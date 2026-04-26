@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  release-preflight:
+    name: Release Preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - shell: pwsh
+        run: ./scripts/release-preflight.ps1 -BackendOrigin http://localhost:8080 -AllowLocalhost
+
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mess
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mess/go.mod
+          cache-dependency-path: mess/go.sum
+      - run: go test ./...
+
+  backend-docker:
+    name: Backend Docker
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mess
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config
+      - run: docker build -t e2ee-messenger-backend:ci .
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: messk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: messk/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  tauri-check:
+    name: Tauri Cargo Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: messk/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+        working-directory: .
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check

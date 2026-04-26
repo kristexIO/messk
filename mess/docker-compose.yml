@@ -1,0 +1,42 @@
+services:
+  backend:
+    build:
+      context: .
+    environment:
+      PORT: "8080"
+      DB_PATH: "/app/data/messenger.db"
+      UPLOAD_DIR: "/app/uploads"
+      ALLOWED_ORIGINS: "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000"
+      MAX_UPLOAD_MB: "25"
+      ALLOWED_UPLOAD_MIME_TYPES: "application/octet-stream"
+      FILE_TOKEN_TTL_MINUTES: "60"
+      SESSION_TOKEN_TTL_MINUTES: "1440"
+      RATE_LIMIT_PER_MINUTE: "200"
+      ENABLE_METADATA_PROXY: "false"
+      REDIS_ADDR: "redis:6379"
+    ports:
+      - "8080:8080"
+    volumes:
+      - messenger-data:/app/data
+      - uploads:/app/uploads
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    restart: unless-stopped
+
+volumes:
+  messenger-data:
+  uploads:
+  redisdata:

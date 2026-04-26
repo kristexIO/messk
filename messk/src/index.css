@@ -1,0 +1,139 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Outfit", "Inter", system-ui, sans-serif;
+  
+  --color-primary-500: #8b5cf6;
+  --color-primary-600: #7c3aed;
+  
+  --color-accent-blue: #3b82f6;
+  --color-accent-pink: #ec4899;
+}
+
+:root {
+  /* Default: Midnight Theme */
+  --bg-main: #020617;
+  --bg-gradient: radial-gradient(circle at 50% 0%, #1e1b4b 0%, #020617 100%);
+  --bg-card: rgba(15, 23, 42, 0.65);
+  --border-glass: rgba(255, 255, 255, 0.08);
+  --text-main: #f1f5f9;
+  --text-muted: #94a3b8;
+  --accent: #8b5cf6;
+  --accent-glow: rgba(139, 92, 246, 0.3);
+}
+
+[data-theme="cyberpunk"] {
+  --bg-main: #05010d;
+  --bg-gradient: linear-gradient(135deg, #05010d 0%, #1a0b2e 100%);
+  --bg-card: rgba(13, 2, 33, 0.7);
+  --border-glass: rgba(236, 72, 153, 0.2);
+  --text-main: #fff;
+  --text-muted: #a78bfa;
+  --accent: #f472b6;
+  --accent-glow: rgba(244, 114, 182, 0.5);
+}
+
+[data-theme="forest"] {
+  --bg-main: #052e16;
+  --bg-gradient: radial-gradient(circle at 50% 0%, #064e3b 0%, #022c22 100%);
+  --bg-card: rgba(6, 78, 59, 0.6);
+  --border-glass: rgba(16, 185, 129, 0.15);
+  --text-main: #ecfdf5;
+  --text-muted: #6ee7b7;
+  --accent: #10b981;
+  --accent-glow: rgba(16, 185, 129, 0.3);
+}
+
+[data-theme="light"] {
+  --bg-main: #f8fafc;
+  --bg-gradient: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+  --bg-card: rgba(255, 255, 255, 0.75);
+  --border-glass: rgba(0, 0, 0, 0.05);
+  --text-main: #0f172a;
+  --text-muted: #64748b;
+  --accent: #6366f1;
+  --accent-glow: rgba(99, 102, 241, 0.2);
+}
+
+@layer base {
+  html, body, #root {
+    min-height: 100%;
+    height: 100%;
+  }
+
+  body {
+    background: var(--bg-gradient);
+    background-color: var(--bg-main);
+    color: var(--text-main);
+    min-height: 100vh;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    @apply font-sans antialiased overflow-hidden transition-all duration-700;
+  }
+}
+
+@layer components {
+  .premium-glass {
+    background: var(--bg-card);
+    backdrop-filter: blur(24px) saturate(180%);
+    border: 1px solid var(--border-glass);
+    box-shadow: 0 10px 40px -10px rgba(0, 0, 0, 0.5);
+  }
+
+  .chat-bubble-send {
+    @apply px-5 py-2.5 rounded-2xl rounded-tr-none text-white shadow-xl transition-all duration-300;
+    background: linear-gradient(135deg, var(--accent) 0%, #6d28d9 100%);
+    box-shadow: 0 4px 15px -3px var(--accent-glow);
+  }
+
+  .chat-bubble-recv {
+    @apply px-5 py-2.5 rounded-2xl rounded-tl-none text-gray-100 border transition-all duration-300;
+    background: var(--bg-card);
+    border-color: var(--border-glass);
+    backdrop-filter: blur(10px);
+  }
+
+  .btn-premium {
+    @apply px-6 py-3 rounded-xl font-medium transition-all duration-300 flex items-center justify-center gap-2 active:scale-95;
+    background: linear-gradient(135deg, var(--accent) 0%, #6d28d9 100%);
+    box-shadow: 0 4px 20px -5px var(--accent-glow);
+  }
+
+  .btn-premium:hover {
+    @apply shadow-[0_0_25px_var(--accent-glow)] scale-[1.03];
+  }
+
+  .hover-glow {
+    @apply transition-all duration-300 hover:shadow-[0_0_25px_var(--accent-glow)] hover:scale-[1.02] active:scale-98;
+  }
+
+  .shimmer-bg {
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.03), transparent);
+    background-size: 200% 100%;
+    animation: shimmer 3s infinite;
+  }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes pulse-slow {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.8; transform: scale(0.98); }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-glass);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}

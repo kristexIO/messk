@@ -1,0 +1,20 @@
+# Local runtime data
+mess/messenger.db
+mess/uploads/
+mess/query
+
+# Build artifacts
+dist/
+mess/*.exe
+messk/dist/
+messk/src-tauri/target/
+
+# Dependencies
+messk/node_modules/
+
+# Logs and local env
+*.log
+*.local
+.env
+mess/.env
+messk/.env

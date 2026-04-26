@@ -1,0 +1,6 @@
+.git
+*.exe
+messenger.db
+uploads/
+query
+tools/
