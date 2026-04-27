@@ -3,6 +3,26 @@ import { generateSeedPhrase, deriveKeysFromPhraseAsync, isValidSeedPhrase } from
 import { useAppStore } from '../store';
 import { KeyRound, ShieldCheck, AtSign, Loader2, Copy, Check, ChevronRight, Camera, ArrowLeft, UserRound } from 'lucide-react';
 import { prepareDatabaseForIdentity } from '../lib/db';
+import { prepareAvatarDataUrl } from '../lib/images';
+import { appConfig } from '../lib/config';
+import { fetchWithTimeout } from '../lib/http';
+
+type RemoteProfile = {
+  nickname?: string;
+  avatar?: string;
+};
+
+async function loadRemoteProfile(pubKey: string): Promise<RemoteProfile | null> {
+  try {
+    const response = await fetchWithTimeout(`${appConfig.profileUrl}?pub=${encodeURIComponent(pubKey)}`);
+    if (!response.ok) {
+      return null;
+    }
+    return await response.json() as RemoteProfile;
+  } catch {
+    return null;
+  }
+}
 
 export const Auth: React.FC = () => {
   const [mode, setMode] = useState<'select' | 'generate' | 'import' | 'profile'>('select');
@@ -33,15 +53,16 @@ export const Auth: React.FC = () => {
     setTimeout(() => setHasCopied(false), 2000);
   };
 
-  const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setProfileAvatar(String(reader.result ?? ''));
-    };
-    reader.readAsDataURL(file);
+    try {
+      setProfileAvatar(await prepareAvatarDataUrl(file));
+    } catch (avatarError) {
+      setError(avatarError instanceof Error ? avatarError.message : 'Failed to prepare avatar.');
+    } finally {
+      e.target.value = '';
+    }
   };
 
   const continueToProfile = (seedPhrase: string, source: 'generate' | 'import') => {
@@ -65,8 +86,20 @@ export const Auth: React.FC = () => {
       }
       const keys = await deriveKeysFromPhraseAsync(seedPhrase);
       await prepareDatabaseForIdentity(keys.publicKey);
+      const remoteProfile = profileSource === 'import' ? await loadRemoteProfile(keys.publicKey) : null;
       setKeys(keys.publicKey, keys.secretKey);
-      setProfile(profileNickname.trim() || `User ${keys.publicKey.substring(0, 6)}`, profileAvatar || null);
+      const currentProfile = useAppStore.getState();
+      const nickname =
+        profileNickname.trim() ||
+        remoteProfile?.nickname?.trim() ||
+        currentProfile.nickname?.trim() ||
+        `User ${keys.publicKey.substring(0, 6)}`;
+      const avatar =
+        profileAvatar ||
+        remoteProfile?.avatar?.trim() ||
+        currentProfile.avatar ||
+        null;
+      setProfile(nickname, avatar);
     } catch {
       setError('Cryptographic derivation failed.');
     } finally {
@@ -75,18 +108,18 @@ export const Auth: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen w-full flex items-center justify-center p-6 bg-gradient-to-br from-[#020617] via-[#0f172a] to-[#1e1b4b]">
+    <div className="min-h-[100dvh] w-full overflow-y-auto bg-gradient-to-br from-[#020617] via-[#0f172a] to-[#1e1b4b] px-4 py-6 sm:flex sm:items-center sm:justify-center sm:p-6">
       {/* Background Decorative Blobs */}
       <div className="fixed top-[-10%] left-[-10%] w-[40%] h-[40%] bg-accent/10 rounded-full blur-[120px] pointer-events-none animate-pulse-slow" />
       <div className="fixed bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-500/10 rounded-full blur-[120px] pointer-events-none animate-pulse-slow" />
 
       {mode === 'select' && (
-        <div className="w-full max-w-md premium-glass p-10 flex flex-col items-center animate-in fade-in zoom-in duration-500 rounded-[32px]">
-          <div className="w-20 h-20 bg-accent/20 rounded-3xl flex items-center justify-center mb-8 shadow-[0_0_40px_var(--accent-glow)] border border-accent/30">
-            <ShieldCheck className="w-10 h-10 text-accent" />
+        <div className="flex w-full max-w-md flex-col items-center rounded-[28px] premium-glass p-6 animate-in fade-in zoom-in duration-500 sm:rounded-[32px] sm:p-10">
+          <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-3xl border border-accent/30 bg-accent/20 shadow-[0_0_40px_var(--accent-glow)] sm:mb-8 sm:h-20 sm:w-20">
+            <ShieldCheck className="h-8 w-8 text-accent sm:h-10 sm:w-10" />
           </div>
-          <h1 className="text-4xl font-bold tracking-tight mb-3 text-center">Messk</h1>
-          <p className="text-text-muted mb-10 text-center text-sm leading-relaxed max-w-[280px]">
+          <h1 className="mb-3 text-center text-3xl font-bold tracking-tight sm:text-4xl">Messk</h1>
+          <p className="mb-8 max-w-[280px] text-center text-sm leading-relaxed text-text-muted sm:mb-10">
             Quantum-safe encryption for your most private conversations.
           </p>
 
@@ -112,8 +145,8 @@ export const Auth: React.FC = () => {
       )}
 
       {mode === 'generate' && (
-        <div className="w-full max-w-xl premium-glass p-10 animate-in slide-in-from-right-10 duration-500 rounded-[32px]">
-          <h2 className="text-2xl font-bold mb-3 flex items-center gap-3">
+        <div className="w-full max-w-xl rounded-[28px] premium-glass p-5 animate-in slide-in-from-right-10 duration-500 sm:rounded-[32px] sm:p-10">
+          <h2 className="mb-3 flex items-center gap-3 text-xl font-bold sm:text-2xl">
              <ShieldCheck className="text-accent" />
              Back Up Your Phrase
           </h2>
@@ -122,8 +155,8 @@ export const Auth: React.FC = () => {
             <span className="block mt-2 text-accent/80 font-medium">No one can recover this if lost.</span>
           </p>
 
-          <div className="bg-black/40 rounded-2xl p-6 border border-white/5 mb-8 relative group">
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+          <div className="group relative mb-8 rounded-2xl border border-white/5 bg-black/40 p-4 sm:p-6">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4">
               {phrase.split(' ').map((word, index) => (
                 <div key={index} className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-2.5 border border-white/5 hover:border-accent/20 transition-all">
                   <span className="text-accent/40 text-[10px] font-bold w-4">{index + 1}</span>
@@ -173,8 +206,8 @@ export const Auth: React.FC = () => {
       )}
 
       {mode === 'import' && (
-        <div className="w-full max-w-lg premium-glass p-10 animate-in slide-in-from-left-10 duration-500 rounded-[32px]">
-          <h2 className="text-2xl font-bold mb-3 flex items-center gap-3">
+        <div className="w-full max-w-lg rounded-[28px] premium-glass p-5 animate-in slide-in-from-left-10 duration-500 sm:rounded-[32px] sm:p-10">
+          <h2 className="mb-3 flex items-center gap-3 text-xl font-bold sm:text-2xl">
              <KeyRound className="text-accent" />
              Restore Access
           </h2>
@@ -183,7 +216,7 @@ export const Auth: React.FC = () => {
           </p>
 
           <textarea
-            className="w-full min-h-[140px] bg-black/40 border border-white/10 rounded-2xl p-6 mb-2 font-mono text-lg outline-none focus:border-accent/40 focus:bg-black/60 transition-all resize-none shadow-inner"
+            className="mb-2 min-h-[140px] w-full resize-none rounded-2xl border border-white/10 bg-black/40 p-4 font-mono text-base outline-none transition-all shadow-inner focus:border-accent/40 focus:bg-black/60 sm:p-6 sm:text-lg"
             placeholder="word1 word2 word3..."
             value={phrase}
             onChange={(e) => {
@@ -216,7 +249,7 @@ export const Auth: React.FC = () => {
       )}
 
       {mode === 'profile' && (
-        <div className="w-full max-w-xl premium-glass p-10 animate-in fade-in zoom-in duration-500 rounded-[32px]">
+        <div className="w-full max-w-xl rounded-[28px] premium-glass p-5 animate-in fade-in zoom-in duration-500 sm:rounded-[32px] sm:p-10">
           <div className="flex items-center gap-3 mb-3">
             <UserRound className="text-accent" />
             <h2 className="text-2xl font-bold">Finish Your Profile</h2>
@@ -227,7 +260,7 @@ export const Auth: React.FC = () => {
 
           <div className="flex flex-col gap-6 sm:flex-row sm:items-center">
             <div className="relative group">
-              <div className="w-28 h-28 rounded-3xl bg-white/5 border border-white/10 overflow-hidden flex items-center justify-center text-3xl font-bold text-accent">
+              <div className="flex h-24 w-24 items-center justify-center overflow-hidden rounded-3xl border border-white/10 bg-white/5 text-3xl font-bold text-accent sm:h-28 sm:w-28">
                 {profileAvatar ? (
                   <img src={profileAvatar} alt="Profile avatar" className="w-full h-full object-cover" />
                 ) : (

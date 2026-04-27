@@ -2,6 +2,7 @@ import { db, type ChannelThread, type GroupThread } from './db';
 import { appConfig } from './config';
 import { socketManager } from './socket';
 import { useAppStore } from '../store';
+import { fetchWithTimeout } from './http';
 
 type ServerGroup = {
   id: string;
@@ -46,6 +47,8 @@ function toFriendlyRequestError(status: number, fallback: string) {
       return 'You do not have access to this group.';
     case 404:
       return 'Group was not found on the server.';
+    case 413:
+      return 'The selected avatar is too large. Choose a smaller image or skip the cover.';
     default:
       return fallback;
   }
@@ -58,7 +61,7 @@ function toTimestamp(value: string | undefined): number {
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
@@ -100,22 +103,14 @@ export async function syncGroups(force = false): Promise<GroupThread[]> {
 
   const groups = await Promise.all(
     (payload.groups ?? []).map(async (group) => {
-      const membersPayload = await fetchJson<{ members: ServerGroupMember[] }>(
-        `${appConfig.backendOrigin}/groups/${encodeURIComponent(group.id)}/members`,
-        { method: 'GET' }
-      );
-
       const existing = await db.groupThreads.get(group.id);
-      const members = (membersPayload.members ?? [])
-        .map((member) => member?.memberPubKey)
-        .filter((member): member is string => typeof member === 'string' && member.length > 0);
       const record: GroupThread = {
         id: group.id,
         title: group.title,
         avatar: group.avatar?.trim() || null,
         role: group.role,
-        members,
-        memberCount: members.length,
+        members: existing?.members ?? [],
+        memberCount: existing?.memberCount ?? 0,
         createdAt: toTimestamp(group.createdAt),
         lastActivityAt: existing?.lastActivityAt ?? toTimestamp(group.createdAt),
       };
@@ -200,12 +195,19 @@ export async function listGroupMembers(groupId: string) {
     { method: 'GET' }
   );
 
-  return (payload.members ?? [])
+  const members = (payload.members ?? [])
     .map((member) => ({
       memberPubKey: member?.memberPubKey,
       role: typeof member?.role === 'string' ? member.role : 'member',
     }))
     .filter((member): member is { memberPubKey: string; role: string } => typeof member.memberPubKey === 'string' && member.memberPubKey.length > 0);
+
+  await db.groupThreads.update(groupId, {
+    members: members.map((member) => member.memberPubKey),
+    memberCount: members.length,
+  });
+
+  return members;
 }
 
 export async function updateGroupMemberRole(groupId: string, pubKey: string, role: 'admin' | 'member') {
@@ -277,23 +279,14 @@ export async function syncChannels(force = false): Promise<ChannelThread[]> {
 
     const channels = await Promise.all(
       (payload.channels ?? []).map(async (channel) => {
-        const subscribersPayload = await fetchJson<{ subscribers: ServerChannelSubscriber[] }>(
-          `${appConfig.backendOrigin}/channels/${encodeURIComponent(channel.id)}/subscribers`,
-          { method: 'GET' }
-        );
-
         const existing = await db.channelThreads.get(channel.id);
-        const subscriberCount = (subscribersPayload.subscribers ?? [])
-          .filter((subscriber) => typeof subscriber?.subscriberPubKey === 'string' && subscriber.subscriberPubKey.length > 0)
-          .length;
-
         const record: ChannelThread = {
           id: channel.id,
           title: channel.title,
           avatar: channel.avatar?.trim() || null,
           role: channel.role,
           ownerPubKey: channel.ownerPubKey,
-          subscriberCount,
+          subscriberCount: existing?.subscriberCount ?? 0,
           createdAt: toTimestamp(channel.createdAt),
           lastActivityAt: existing?.lastActivityAt ?? toTimestamp(channel.createdAt),
         };
@@ -357,7 +350,7 @@ export async function listChannelSubscribers(channelId: string) {
     { method: 'GET' }
   );
 
-  return (payload.subscribers ?? [])
+  const subscribers = (payload.subscribers ?? [])
     .map((subscriber) => ({
       subscriberPubKey: subscriber?.subscriberPubKey,
       role: typeof subscriber?.role === 'string' ? subscriber.role : 'subscriber',
@@ -366,6 +359,10 @@ export async function listChannelSubscribers(channelId: string) {
       (subscriber): subscriber is { subscriberPubKey: string; role: string } =>
         typeof subscriber.subscriberPubKey === 'string' && subscriber.subscriberPubKey.length > 0
     );
+
+  await db.channelThreads.update(channelId, { subscriberCount: subscribers.length });
+
+  return subscribers;
 }
 
 export async function addChannelSubscriber(channelId: string, pubKey: string) {

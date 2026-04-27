@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { Megaphone, Upload, X } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { createChannel } from '../lib/community';
+import { prepareAvatarDataUrl } from '../lib/images';
 
 type CreateChannelModalProps = {
   onClose: () => void;
@@ -14,13 +15,16 @@ export const CreateChannelModal: React.FC<CreateChannelModalProps> = ({ onClose,
   const [avatar, setAvatar] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleAvatarChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleAvatarChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-
-    const reader = new FileReader();
-    reader.onloadend = () => setAvatar(reader.result as string);
-    reader.readAsDataURL(file);
+    try {
+      setAvatar(await prepareAvatarDataUrl(file));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to prepare avatar');
+    } finally {
+      event.target.value = '';
+    }
   };
 
   const handleSubmit = async (event: React.FormEvent) => {
@@ -44,8 +48,8 @@ export const CreateChannelModal: React.FC<CreateChannelModalProps> = ({ onClose,
   };
 
   const modal = (
-    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/80 px-4 backdrop-blur">
-      <div className="w-full max-w-4xl rounded-[32px] border border-white/10 bg-slate-950/95 shadow-[0_30px_100px_rgba(0,0,0,0.45)]">
+    <div className="fixed inset-0 z-[120] flex items-end justify-center bg-slate-950/80 px-3 py-3 backdrop-blur sm:items-center sm:px-4">
+      <div className="max-h-[100dvh] w-full max-w-4xl overflow-y-auto rounded-[28px] border border-white/10 bg-slate-950/95 shadow-[0_30px_100px_rgba(0,0,0,0.45)] sm:rounded-[32px]">
         <div className="flex items-center justify-between border-b border-white/10 px-6 py-5">
           <div>
             <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-200/80">Channels</div>

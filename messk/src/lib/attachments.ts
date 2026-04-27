@@ -1,6 +1,7 @@
 import { randomBytes, secretbox } from 'tweetnacl';
 import { encodeBase64, decodeBase64 } from 'tweetnacl-util';
 import { socketManager } from './socket';
+import { fetchWithTimeout } from './http';
 
 export interface EncryptedFile {
   url: string;
@@ -61,9 +62,12 @@ export async function encryptFile(file: File): Promise<{ encryptedBlob: Blob; ke
  * Decrypt a file from a URL using a symmetric key
  */
 export async function decryptFile(url: string, keyBase64: string): Promise<Blob> {
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     headers: socketManager.getSessionHeaders()
   });
+  if (!response.ok) {
+    throw new Error(`Failed to download file (${response.status})`);
+  }
   const arrayBuffer = await response.arrayBuffer();
   const fullData = new Uint8Array(arrayBuffer);
   

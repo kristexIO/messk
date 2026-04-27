@@ -131,17 +131,37 @@ func main() {
 			}
 
 			var payload struct {
-				Nickname string `json:"nickname"`
-				Avatar   string `json:"avatar"`
+				Nickname string  `json:"nickname"`
+				Avatar   string  `json:"avatar"`
+				Username *string `json:"username"`
 			}
 			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
 				http.Error(w, "Bad request", http.StatusBadRequest)
 				return
 			}
 
+			if payload.Username != nil && *payload.Username != "" {
+				// Basic validation: 5-32 chars, alphanumeric and underscore
+				un := *payload.Username
+				if len(un) < 5 || len(un) > 32 {
+					http.Error(w, "Username must be between 5 and 32 characters", http.StatusBadRequest)
+					return
+				}
+				for _, r := range un {
+					if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && r != '_' {
+						http.Error(w, "Username can only contain letters, numbers, and underscores", http.StatusBadRequest)
+						return
+					}
+				}
+			}
+
 			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 			defer cancel()
-			if err := db.SaveUserProfile(ctx, pubKey, payload.Nickname, payload.Avatar); err != nil {
+			if err := db.SaveUserProfile(ctx, pubKey, payload.Nickname, payload.Avatar, payload.Username); err != nil {
+				if strings.Contains(strings.ToLower(err.Error()), "unique constraint failed") {
+					http.Error(w, "Username already taken", http.StatusConflict)
+					return
+				}
 				http.Error(w, "Failed to save profile", http.StatusInternalServerError)
 				return
 			}
@@ -156,7 +176,7 @@ func main() {
 
 			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 			defer cancel()
-			nickname, avatar, err := db.GetUserProfile(ctx, targetPubKey)
+			nickname, avatar, username, err := db.GetUserProfile(ctx, targetPubKey)
 			if err == sql.ErrNoRows {
 				http.Error(w, "Not found", http.StatusNotFound)
 				return
@@ -171,10 +191,44 @@ func main() {
 				"pubKey":   targetPubKey,
 				"nickname": nickname,
 				"avatar":   avatar,
+				"username": username,
 			})
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
+	}))
+	mux.HandleFunc("/resolve", rateLimit(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		username := strings.TrimSpace(r.URL.Query().Get("username"))
+		if username == "" {
+			http.Error(w, "Missing username", http.StatusBadRequest)
+			return
+		}
+		if strings.HasPrefix(username, "@") {
+			username = username[1:]
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		pubKey, nickname, avatar, err := db.ResolveUsername(ctx, username)
+		if err == sql.ErrNoRows {
+			http.Error(w, "User not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"pubKey":   pubKey,
+			"nickname": nickname,
+			"avatar":   avatar,
+		})
 	}))
 	mux.HandleFunc("/groups", rateLimit(func(w http.ResponseWriter, r *http.Request) {
 		pubKey, ok := authorizeSession(hub, w, r)
@@ -865,8 +919,13 @@ func main() {
 	}
 
 	server := &http.Server{
-		Addr:    ":" + port,
-		Handler: handler,
+		Addr:              ":" + port,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       2 * time.Minute,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	// Канал для перехвата сигналов ОС
@@ -928,7 +987,7 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		w.Header().Set("Permissions-Policy", "camera=(self), microphone=(self), geolocation=()")
 		if r.TLS != nil {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
@@ -1177,12 +1236,12 @@ func isSafeUploadExtension(extension string) bool {
 func getMaxUploadBytes() int64 {
 	raw := strings.TrimSpace(os.Getenv("MAX_UPLOAD_MB"))
 	if raw == "" {
-		return 25 << 20
+		return 80 << 20
 	}
 
 	mb, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || mb <= 0 {
-		return 25 << 20
+		return 80 << 20
 	}
 	return mb << 20
 }

@@ -1,14 +1,18 @@
 import { useAppStore } from '../store';
 import { decryptMessage, encryptMessage, x3dhInitiate, x3dhRespond } from './crypto';
 import { RatchetManager, type RatchetMessage } from './ratchet';
-import { db, syncThreadStats, type ChannelActivityEntry, type OutgoingGroupEvent, type Session, type StoredMessage } from './db';
+import { db, syncThreadStats, type ChannelActivityEntry, type OutgoingDirectMessage, type OutgoingGroupEvent, type Session, type StoredMessage } from './db';
 import { box, randomBytes, secretbox } from 'tweetnacl';
 import { decodeBase64, encodeBase64 } from 'tweetnacl-util';
 import { sendDesktopNotification } from './notifications';
 import { appConfig } from './config';
 import { toast } from 'react-hot-toast';
+import { fetchWithTimeout } from './http';
+import { getMessageNotificationPreview, isMentioningPubKey } from './message-format';
 
 const WS_URL = appConfig.wsUrl;
+const DIRECT_RETRY_BASE_DELAY_MS = 3_000;
+const DIRECT_RETRY_MAX_DELAY_MS = 30_000;
 
 type IncomingEnvelope = {
   type: string;
@@ -18,11 +22,14 @@ type IncomingEnvelope = {
   sender_pub_key?: string;
   data?: string;
   msg_id?: string;
+  ack_type?: string;
   prekey?: string | null;
   reaction?: string;
   challenge?: string;
   ephemeral?: string;
   session_token?: string;
+  signed_prekey?: string | null;
+  signed_prekey_sig?: string | null;
 };
 
 type X3DHParams = {
@@ -206,12 +213,44 @@ export class SocketManager {
   private authWaiters: (() => void)[] = [];
   private pendingGroupEvents = new Map<string, IncomingEnvelope[]>();
   private flushingGroupOutbox = false;
+  private flushingDirectOutbox = false;
+  private profileRefreshAt = new Map<string, number>();
+  private profileRefreshInFlight = new Map<string, Promise<void>>();
+  private lastKnownProfilesRefreshAt = 0;
+  private outboxFlushTimer: ReturnType<typeof setInterval> | null = null;
 
   static getInstance(): SocketManager {
     if (!SocketManager.instance) {
       SocketManager.instance = new SocketManager();
     }
     return SocketManager.instance;
+  }
+
+  private startOutboxLoop() {
+    if (this.outboxFlushTimer) {
+      return;
+    }
+    this.outboxFlushTimer = setInterval(() => {
+      if (!this.canSendImmediately()) {
+        return;
+      }
+      void this.flushOutgoingDirectMessages();
+      void this.flushOutgoingGroupEvents();
+    }, 8_000);
+  }
+
+  private stopOutboxLoop() {
+    if (!this.outboxFlushTimer) {
+      return;
+    }
+    clearInterval(this.outboxFlushTimer);
+    this.outboxFlushTimer = null;
+  }
+
+  private getDirectRetryDelay(attempts: number) {
+    const exponent = Math.max(0, attempts - 1);
+    const delay = DIRECT_RETRY_BASE_DELAY_MS * Math.pow(2, exponent);
+    return Math.min(DIRECT_RETRY_MAX_DELAY_MS, delay);
   }
 
   connect(pubKey: string) {
@@ -267,10 +306,12 @@ export class SocketManager {
           // Release waiters
           this.authWaiters.forEach(resolve => resolve());
           this.authWaiters = [];
+          this.startOutboxLoop();
           // Upload prekeys if we don't have enough
           this.ensurePreKeys(pubKey);
           void this.syncMyProfile();
           void this.refreshKnownProfiles();
+          void this.flushOutgoingDirectMessages();
           void this.flushOutgoingGroupEvents();
           return;
         }
@@ -289,6 +330,14 @@ export class SocketManager {
           this.sessionToken = null;
           useAppStore.getState().setConnectionStatus('offline');
           this.ws?.close();
+          return;
+        }
+
+        if (env.type === 'server_ack') {
+          if (!env.msg_id) return;
+          if (!env.ack_type || env.ack_type === 'message') {
+            await this.handleServerAck(env.msg_id);
+          }
           return;
         }
 
@@ -487,6 +536,22 @@ export class SocketManager {
           const peerPubKey = isFromMe ? recipientPubKey : senderPubKey;
           console.log("Incoming message from", senderPubKey, "for peer", peerPubKey);
 
+          const existingMsg = await db.messages.where('msgId').equals(msgId).first();
+          if (existingMsg) {
+            if (existingMsg.id && existingMsg.status !== 'delivered' && existingMsg.status !== 'read') {
+              await updateMessageAndSync(existingMsg.id, { status: 'delivered' });
+            }
+            if (this.authenticated && senderPubKey !== pubKey) {
+              this.ws?.send(JSON.stringify({
+                type: 'delivery_receipt',
+                recipient_pub_key: senderPubKey,
+                sender_pub_key: pubKey,
+                msg_id: msgId
+              }));
+            }
+            return;
+          }
+
           // Parse data to see if there's x3dh
           let x3dh: X3DHParams | undefined;
           try {
@@ -499,14 +564,6 @@ export class SocketManager {
           const plaintext = await this.decryptInSession(peerPubKey, env.data ?? '', x3dh);
           if (plaintext) {
             console.log("Successfully decrypted message from", senderPubKey);
-            // Deduplicate: check if we already have this message
-            const existingMsg = await db.messages.where('msgId').equals(msgId).first();
-            
-            if (existingMsg) {
-                if (existingMsg.id && existingMsg.status !== 'delivered') {
-                    await updateMessageAndSync(existingMsg.id, { status: 'delivered' });
-                }
-            } else {
                 // Save new message to DB (cloned to avoid encryption mutation affecting this scope)
                 await addMessageAndSync({
                   msgId,
@@ -544,7 +601,6 @@ export class SocketManager {
                   await db.contacts.update(peerPubKey, { lastMessageAt: Date.now() });
                 }
                 void this.refreshContactProfile(peerPubKey);
-            }
 
             // Send delivery receipt back
             if (this.authenticated && senderPubKey !== pubKey) {
@@ -604,6 +660,7 @@ export class SocketManager {
       this.ws = null;
       this.authenticated = false;
       this.sessionToken = null;
+      this.stopOutboxLoop();
       this.pendingPreKeyResolvers.forEach((resolve) => resolve(null));
       this.pendingPreKeyResolvers.clear();
       window.dispatchEvent(new CustomEvent('socket_disconnected'));
@@ -630,6 +687,7 @@ export class SocketManager {
   disconnect() {
     this.manualDisconnect = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.stopOutboxLoop();
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -647,11 +705,11 @@ export class SocketManager {
   }
 
   async syncMyProfile() {
-    const { nickname, avatar } = useAppStore.getState();
+    const { nickname, avatar, username } = useAppStore.getState();
     if (!this.sessionToken) return;
 
     try {
-      await fetch(appConfig.profileUrl, {
+      const response = await fetchWithTimeout(appConfig.profileUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -660,16 +718,36 @@ export class SocketManager {
         body: JSON.stringify({
           nickname: nickname ?? '',
           avatar: avatar ?? '',
+          username: username,
         }),
       });
+      if (response.status === 409) {
+        throw new Error('Username is already taken');
+      }
+      if (!response.ok) {
+        throw new Error('Failed to save profile');
+      }
     } catch (error) {
       console.warn('Failed to sync profile', error);
+      throw error;
     }
   }
 
-  async refreshContactProfile(pubKey: string) {
+  async refreshContactProfile(pubKey: string, force = false) {
+    const now = Date.now();
+    const lastRefreshedAt = this.profileRefreshAt.get(pubKey) ?? 0;
+    if (!force && now - lastRefreshedAt < 5 * 60_000) {
+      return;
+    }
+
+    const existingRequest = this.profileRefreshInFlight.get(pubKey);
+    if (existingRequest) {
+      return existingRequest;
+    }
+
+    const request = (async () => {
     try {
-      const response = await fetch(`${appConfig.profileUrl}?pub=${encodeURIComponent(pubKey)}`, {
+      const response = await fetchWithTimeout(`${appConfig.profileUrl}?pub=${encodeURIComponent(pubKey)}`, {
         headers: this.getSessionHeaders(),
       });
       if (!response.ok) return;
@@ -677,29 +755,68 @@ export class SocketManager {
       const profile = await response.json() as {
         nickname?: string;
         avatar?: string;
+        username?: string;
       };
       const fallbackName = pubKey.substring(0, 8) + '...';
       const existingContact = await db.contacts.get(pubKey);
       await db.contacts.put({
         pubKey,
         name: profile.nickname?.trim() || existingContact?.name || fallbackName,
-        avatar: profile.avatar?.trim() || existingContact?.avatar || undefined,
-        lastMessageAt: existingContact?.lastMessageAt,
+        avatar: profile.avatar || existingContact?.avatar || undefined,
+        username: profile.username || existingContact?.username || undefined,
+        lastMessageAt: existingContact?.lastMessageAt ?? Date.now(),
         pinned: existingContact?.pinned,
         draft: existingContact?.draft,
         archived: existingContact?.archived,
         mutedUntil: existingContact?.mutedUntil,
       });
+      this.profileRefreshAt.set(pubKey, Date.now());
     } catch (error) {
       console.warn('Failed to refresh contact profile', error);
+    } finally {
+      this.profileRefreshInFlight.delete(pubKey);
+    }
+    })();
+
+    this.profileRefreshInFlight.set(pubKey, request);
+    return request;
+  }
+
+  async resolveUsername(username: string): Promise<{ pubKey: string; nickname?: string; avatar?: string } | null> {
+    try {
+      const url = new URL(appConfig.profileUrl);
+      url.pathname = '/resolve';
+      url.searchParams.set('username', username);
+      
+      const response = await fetchWithTimeout(url.toString(), {
+        headers: this.getSessionHeaders(),
+      });
+      if (!response.ok) return null;
+
+      const profile = await response.json() as {
+        pubKey: string;
+        nickname?: string;
+        avatar?: string;
+      };
+      
+      return profile;
+    } catch (error) {
+      console.warn('Failed to resolve username', error);
+      return null;
     }
   }
 
-  async refreshKnownProfiles() {
+  async refreshKnownProfiles(force = false) {
+    const now = Date.now();
+    if (!force && now - this.lastKnownProfilesRefreshAt < 60_000) {
+      return;
+    }
+    this.lastKnownProfilesRefreshAt = now;
+
     try {
-      const contacts = await db.contacts.toArray();
+      const contacts = await db.contacts.orderBy('lastMessageAt').reverse().limit(40).toArray();
       await Promise.allSettled(
-        contacts.map((contact) => this.refreshContactProfile(contact.pubKey))
+        contacts.map((contact) => this.refreshContactProfile(contact.pubKey, force))
       );
     } catch (error) {
       console.warn('Failed to refresh known contact profiles', error);
@@ -962,6 +1079,13 @@ export class SocketManager {
     });
 
     await db.groupThreads.update(env.group_id, { lastActivityAt: Date.now() });
+
+    const { myPublicKey } = useAppStore.getState();
+    if (myPublicKey && env.sender_pub_key !== myPublicKey && isMentioningPubKey(plaintext, myPublicKey)) {
+      const group = await db.groupThreads.get(env.group_id);
+      const preview = getMessageNotificationPreview(plaintext);
+      sendDesktopNotification(`Mention in ${group?.title ?? 'group'}`, preview);
+    }
   }
 
   private async enqueueOutgoingGroupEvent(event: OutgoingGroupEvent) {
@@ -970,6 +1094,77 @@ export class SocketManager {
 
   private canSendImmediately() {
     return Boolean(this.ws && this.ws.readyState === WebSocket.OPEN && this.authenticated);
+  }
+
+  private async enqueueOutgoingDirectMessage(message: OutgoingDirectMessage) {
+    await db.outgoingDirectMessages.put(message);
+  }
+
+  private sendDirectEnvelope(message: OutgoingDirectMessage) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.authenticated) {
+      throw new Error('Secure channel is not ready yet');
+    }
+
+    this.ws.send(JSON.stringify({
+      type: 'message',
+      msg_id: message.id,
+      recipient_pub_key: message.recipientPubKey,
+      sender_pub_key: message.senderPubKey,
+      data: message.data,
+    }));
+  }
+
+  private async markDirectAttempt(message: OutgoingDirectMessage) {
+    await db.outgoingDirectMessages.update(message.id, {
+      attempts: message.attempts + 1,
+      lastAttemptAt: Date.now(),
+    });
+  }
+
+  private async handleServerAck(msgId: string) {
+    const queued = await db.outgoingDirectMessages.get(msgId);
+    if (queued) {
+      await db.outgoingDirectMessages.delete(msgId);
+    }
+
+    const msg = await db.messages.where('msgId').equals(msgId).first();
+    if (msg?.id && msg.status === 'pending') {
+      await updateMessageAndSync(msg.id, { status: 'sent' });
+    }
+  }
+
+  private async flushOutgoingDirectMessages() {
+    if (this.flushingDirectOutbox || !this.canSendImmediately()) {
+      return;
+    }
+
+    const { myPublicKey } = useAppStore.getState();
+    if (!myPublicKey) {
+      return;
+    }
+
+    this.flushingDirectOutbox = true;
+    try {
+      const queuedMessages = await db.outgoingDirectMessages.orderBy('createdAt').toArray();
+      for (const message of queuedMessages) {
+        if (message.senderPubKey !== myPublicKey) {
+          continue;
+        }
+        const retryDelay = this.getDirectRetryDelay(message.attempts);
+        if (message.lastAttemptAt && Date.now() - message.lastAttemptAt < retryDelay) {
+          continue;
+        }
+        try {
+          this.sendDirectEnvelope(message);
+          await this.markDirectAttempt(message);
+        } catch (error) {
+          console.warn('Failed to flush queued direct message', message.id, error);
+          break;
+        }
+      }
+    } finally {
+      this.flushingDirectOutbox = false;
+    }
   }
 
   private async flushOutgoingGroupEvents() {
@@ -1129,6 +1324,13 @@ export class SocketManager {
     });
 
     await db.channelThreads.update(env.group_id, { lastActivityAt: Date.now() });
+
+    const { myPublicKey } = useAppStore.getState();
+    if (myPublicKey && env.sender_pub_key !== myPublicKey && isMentioningPubKey(env.data, myPublicKey)) {
+      const channel = await db.channelThreads.get(env.group_id);
+      const preview = getMessageNotificationPreview(env.data);
+      sendDesktopNotification(`Mention in ${channel?.title ?? 'channel'}`, preview);
+    }
   }
 
   private async handleIncomingChannelEdit(env: IncomingEnvelope) {
@@ -1215,12 +1417,20 @@ export class SocketManager {
         newKeys.push({ publicKey: pkBase64, secretKey: skBase64 });
         pubKeysForUpload.push(pkBase64);
       }
+      
+      // Generate a stub Signed PreKey
+      const spkPair = box.keyPair();
+      const spkBase64 = encodeBase64(spkPair.publicKey);
+      const spkSig = 'dummy_sig'; // TODO: replace with Ed25519 signature when identity keys are separated
+
       // Save prekeys to DB (clone to avoid in-place mutation)
       await db.prekeys.bulkAdd(newKeys.map(pk => ({ ...pk })));
       this.ws?.send(JSON.stringify({
         type: 'upload_prekeys',
         sender_pub_key: pubKey,
-        prekeys: pubKeysForUpload
+        prekeys: pubKeysForUpload,
+        signed_prekey: spkBase64,
+        signed_prekey_sig: spkSig
       }));
     }
   }
@@ -1300,11 +1510,7 @@ export class SocketManager {
   }
 
   async send(recipientPubKey: string, plaintext: string, mySecretKey: string, myPublicKey: string) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error('Socket disconnected');
-    }
-
-    if (!this.authenticated) {
+    if (this.ws?.readyState === WebSocket.OPEN && !this.authenticated) {
       console.log("Waiting for authentication before sending...");
       await new Promise<void>((resolve) => {
         this.authWaiters.push(resolve);
@@ -1314,27 +1520,40 @@ export class SocketManager {
       if (!this.authenticated) throw new Error('Authentication timeout');
     }
 
+    if (!this.canSendImmediately()) {
+      const existingSession = await db.sessions.get(recipientPubKey);
+      if (!existingSession) {
+        throw new Error('Connect once with this contact before sending offline messages.');
+      }
+    }
+
     const msgId = crypto.randomUUID();
-    const envelope = {
-      type: "message",
-      msg_id: msgId,
-      recipient_pub_key: recipientPubKey,
-      sender_pub_key: myPublicKey,
-      data: await this.encryptInSession(recipientPubKey, plaintext, mySecretKey, myPublicKey)
+    const queuedMessage: OutgoingDirectMessage = {
+      id: msgId,
+      recipientPubKey,
+      senderPubKey: myPublicKey,
+      data: await this.encryptInSession(recipientPubKey, plaintext, mySecretKey, myPublicKey),
+      createdAt: Date.now(),
+      attempts: 0,
     };
 
-    this.ws.send(JSON.stringify(envelope));
-
-    // Optimistically save to local DB (cloned)
     await addMessageAndSync({
       msgId,
       peerPublicKey: recipientPubKey,
       senderPublicKey: myPublicKey,
       text: plaintext,
-      timestamp: Date.now(),
-      status: 'sent',
+      timestamp: queuedMessage.createdAt,
+      status: 'pending',
       reactions: {}
     });
+    await this.enqueueOutgoingDirectMessage(queuedMessage);
+
+    if (this.canSendImmediately()) {
+      this.sendDirectEnvelope(queuedMessage);
+      await this.markDirectAttempt(queuedMessage);
+    } else {
+      toast('Queued and will send when connection is back.', { icon: 'вЏі' });
+    }
   }
 
   async sendGroupMessage(groupId: string, plaintext: string, myPublicKey: string, mySecretKey: string) {

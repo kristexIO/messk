@@ -45,6 +45,11 @@ async function logCallEvent(input: {
 }
 
 function errorToStatus(error: unknown): string | null {
+  if (error instanceof Error && error.message.trim()) {
+    if (error.message.includes('secure') || error.message.includes('Socket disconnected')) {
+      return 'Secure signaling is not ready yet';
+    }
+  }
   if (!(error instanceof DOMException)) {
     return null;
   }
@@ -52,12 +57,16 @@ function errorToStatus(error: unknown): string | null {
   switch (error.name) {
     case 'NotAllowedError':
       return 'Microphone or camera access denied';
+    case 'SecurityError':
+      return 'Browser blocked microphone or camera access';
     case 'NotFoundError':
       return 'Camera or microphone not found';
     case 'NotReadableError':
       return 'Camera or microphone is busy';
     case 'OverconstrainedError':
       return 'Requested media device is unavailable';
+    case 'AbortError':
+      return 'Media startup was interrupted. Retry the call.';
     default:
       return null;
   }
@@ -512,14 +521,14 @@ export const CallOverlay: React.FC = () => {
   }
 
   return (
-    <div className="fixed inset-0 z-[100] bg-slate-950 flex flex-col items-center justify-center p-8">
-      <div className="absolute top-8 flex items-center gap-2 text-primary-400 animate-pulse">
+    <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-slate-950 p-4 sm:p-8">
+      <div className="absolute top-4 flex items-center gap-2 text-primary-400 animate-pulse sm:top-8">
         <ShieldCheck className="w-5 h-5" />
         <span className="text-xs font-mono uppercase tracking-widest">End-to-End Encrypted Call</span>
       </div>
 
       {statusText ? (
-        <div className={`absolute top-16 rounded-full border px-4 py-2 text-xs ${statusToneClass}`}>
+        <div className={`absolute top-14 rounded-full border px-4 py-2 text-xs sm:top-16 ${statusToneClass}`}>
           {statusText}
         </div>
       ) : null}
@@ -527,7 +536,7 @@ export const CallOverlay: React.FC = () => {
       <button
         type="button"
         onClick={() => setShowDiagnostics((current) => !current)}
-        className="absolute right-8 top-8 inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900/90 px-3 py-2 text-xs text-slate-300 transition-all hover:border-slate-500 hover:text-white"
+        className="absolute right-4 top-4 inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900/90 px-3 py-2 text-xs text-slate-300 transition-all hover:border-slate-500 hover:text-white sm:right-8 sm:top-8"
       >
         <Activity className="h-4 w-4" />
         Diagnostics
@@ -536,7 +545,7 @@ export const CallOverlay: React.FC = () => {
       <div className="relative w-full max-w-4xl aspect-video bg-slate-900 rounded-3xl overflow-hidden shadow-2xl border border-slate-800">
         <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
         
-        <div className="absolute bottom-6 right-6 w-48 aspect-video bg-black rounded-2xl overflow-hidden border-2 border-slate-700 shadow-xl">
+          <div className="absolute bottom-4 right-4 aspect-video w-28 overflow-hidden rounded-2xl border-2 border-slate-700 bg-black shadow-xl sm:bottom-6 sm:right-6 sm:w-48">
           <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
         </div>
 
@@ -556,7 +565,7 @@ export const CallOverlay: React.FC = () => {
         )}
 
         {showDiagnostics ? (
-          <div className="absolute left-6 top-6 z-10 w-72 rounded-2xl border border-slate-700 bg-slate-950/85 p-4 text-xs text-slate-300 backdrop-blur">
+          <div className="absolute left-3 top-3 z-10 w-[calc(100%-24px)] max-w-72 rounded-2xl border border-slate-700 bg-slate-950/85 p-4 text-xs text-slate-300 backdrop-blur sm:left-6 sm:top-6 sm:w-72">
             <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Call Diagnostics</div>
             <div className="mt-3 space-y-2">
               <div className="flex items-center justify-between">
@@ -596,7 +605,7 @@ export const CallOverlay: React.FC = () => {
         ) : null}
       </div>
 
-      <div className="mt-12 flex items-center gap-6">
+      <div className="mt-8 flex items-center gap-4 sm:mt-12 sm:gap-6">
         <button 
           onClick={handleToggleMic}
           className={`p-5 rounded-full transition-all ${isMicOn ? 'bg-slate-800 hover:bg-slate-700' : 'bg-red-500/20 text-red-400'}`}

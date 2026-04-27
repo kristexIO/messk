@@ -99,11 +99,12 @@ export const Sidebar: React.FC = () => {
 
   React.useEffect(() => {
     if (connectionStatus !== 'connected') return;
-    void syncGroups().catch((error) => {
-      console.warn('Failed to sync groups', error);
-    });
-    void syncChannels().catch((error) => {
-      console.warn('Failed to sync channels', error);
+    void Promise.allSettled([syncGroups(), syncChannels()]).then((results) => {
+      results.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          console.warn(index === 0 ? 'Failed to sync groups' : 'Failed to sync channels', result.reason);
+        }
+      });
     });
   }, [connectionStatus]);
 
@@ -360,7 +361,7 @@ export const Sidebar: React.FC = () => {
       ${activePeerKey || activeGroupId || activeChannelId ? 'hidden md:flex' : 'flex'}
       flex-col w-full md:w-[380px] premium-glass z-10 h-full border-r border-white/5
     `}>
-      <div className="p-6 space-y-6">
+      <div className="p-4 space-y-5 sm:p-6 sm:space-y-6">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-accent/20 text-accent flex items-center justify-center shadow-[0_0_15px_var(--accent-glow)]">
@@ -446,7 +447,7 @@ export const Sidebar: React.FC = () => {
         />
       )}
 
-      <div className="px-6 py-4">
+      <div className="px-4 py-4 sm:px-6">
         <div className="rounded-[22px] border border-white/10 bg-white/[0.04] p-1.5">
           <div className="grid grid-cols-3 gap-1.5">
             {workspaceTabs.map((tab) => (
@@ -575,7 +576,7 @@ export const Sidebar: React.FC = () => {
         ) : null}
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 pb-4 custom-scrollbar">
+      <div className="flex-1 overflow-y-auto px-3 pb-4 custom-scrollbar sm:px-4">
         {activeWorkspaceTab === 'groups' ? (
         <div className="mb-4 rounded-[26px] border border-white/8 bg-white/[0.03] p-3">
           <div className="mb-3 flex items-center justify-between px-2">
@@ -1018,8 +1019,8 @@ export const Sidebar: React.FC = () => {
         ) : null}
       </div>
 
-      <div className="border-t border-white/5 px-6 py-4">
-        <div className="grid grid-cols-3 gap-2 text-center text-[11px] text-text-muted">
+      <div className="border-t border-white/5 px-4 py-3 sm:px-6 sm:py-4">
+        <div className="grid grid-cols-3 gap-2 text-center text-[10px] text-text-muted sm:text-[11px]">
           <div className="rounded-2xl bg-white/5 px-3 py-2">
             <div className="text-base font-semibold text-white">{activeWorkspaceCount}</div>
             <div>{activeWorkspaceTab === 'chats' ? 'Visible chats' : activeWorkspaceTab === 'groups' ? 'Visible groups' : 'Visible channels'}</div>

@@ -16,6 +16,27 @@ export default defineConfig({
     target: ['es2021', 'chrome105', 'safari15'],
     minify: !process.env.TAURI_DEBUG ? 'esbuild' : false,
     sourcemap: !!process.env.TAURI_DEBUG,
+    cssCodeSplit: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) {
+            return;
+          }
+          if (id.includes('react') || id.includes('react-dom') || id.includes('react-router-dom')) {
+            return 'react-core';
+          }
+          if (id.includes('dexie')) {
+            return 'data-layer';
+          }
+          if (id.includes('tweetnacl') || id.includes('bip39')) {
+            return 'crypto-core';
+          }
+          if (id.includes('lucide-react') || id.includes('qrcode.react') || id.includes('react-hot-toast')) {
+            return 'ui-kit';
+          }
+        },
+      },
+    },
   },
 })
-

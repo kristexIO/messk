@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -14,6 +15,8 @@ import (
 type DB struct {
 	db *sql.DB
 }
+
+const offlineDeliveryBatchLimit = 1000
 
 type GroupRecord struct {
 	ID          string    `json:"id"`
@@ -56,6 +59,20 @@ func InitDB(ctx context.Context, dataSourceName string) *DB {
 	// Проверяем подключение
 	if err := db.Ping(); err != nil {
 		log.Fatalf("Unable to connect to database: %v", err)
+	}
+
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(4)
+	db.SetConnMaxLifetime(30 * time.Minute)
+
+	if _, err := db.ExecContext(ctx, `
+		PRAGMA journal_mode = WAL;
+		PRAGMA synchronous = NORMAL;
+		PRAGMA busy_timeout = 5000;
+		PRAGMA foreign_keys = ON;
+		PRAGMA temp_store = MEMORY;
+	`); err != nil {
+		log.Fatalf("Failed to tune database connection: %v", err)
 	}
 
 	// Миграция: создание таблицы пользователей
@@ -147,6 +164,21 @@ func InitDB(ctx context.Context, dataSourceName string) *DB {
 		log.Fatalf("Failed to migrate offline_messages schema: %v", err)
 	}
 
+	if _, err := db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN signed_prekey TEXT`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		log.Fatalf("Failed to migrate users.signed_prekey schema: %v", err)
+	}
+
+	if _, err := db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN signed_prekey_sig TEXT`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		log.Fatalf("Failed to migrate users.signed_prekey_sig schema: %v", err)
+	}
+
+	if _, err := db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN username TEXT`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		log.Fatalf("Failed to migrate users.username schema: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username) WHERE username IS NOT NULL`); err != nil {
+		log.Fatalf("Failed to create index for users.username: %v", err)
+	}
+
 	return &DB{db: db}
 }
 
@@ -170,30 +202,92 @@ func (db *DB) SaveUserIfNotExists(ctx context.Context, pubKey string) error {
 	return err
 }
 
-func (db *DB) SaveUserProfile(ctx context.Context, pubKey, nickname, avatar string) error {
-	_, err := db.db.ExecContext(ctx, `
-		INSERT INTO users (pub_key, nickname, avatar)
-		VALUES (?, ?, ?)
-		ON CONFLICT (pub_key) DO UPDATE SET
-			nickname = excluded.nickname,
-			avatar = excluded.avatar;
-	`, pubKey, strings.TrimSpace(nickname), strings.TrimSpace(avatar))
+func (db *DB) SaveUserProfile(ctx context.Context, pubKey, nickname, avatar string, username *string) error {
+	var err error
+	if username != nil && *username != "" {
+		// Update with username
+		_, err = db.db.ExecContext(ctx, `
+			INSERT INTO users (pub_key, nickname, avatar, username)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT (pub_key) DO UPDATE SET
+				nickname = CASE
+					WHEN excluded.nickname = '' THEN users.nickname
+					ELSE excluded.nickname
+				END,
+				avatar = CASE
+					WHEN excluded.avatar = '' THEN users.avatar
+					ELSE excluded.avatar
+				END,
+				username = excluded.username;
+		`, pubKey, strings.TrimSpace(nickname), strings.TrimSpace(avatar), strings.ToLower(strings.TrimSpace(*username)))
+	} else if username != nil && *username == "" {
+		// Clear username
+		_, err = db.db.ExecContext(ctx, `
+			INSERT INTO users (pub_key, nickname, avatar, username)
+			VALUES (?, ?, ?, NULL)
+			ON CONFLICT (pub_key) DO UPDATE SET
+				nickname = CASE
+					WHEN excluded.nickname = '' THEN users.nickname
+					ELSE excluded.nickname
+				END,
+				avatar = CASE
+					WHEN excluded.avatar = '' THEN users.avatar
+					ELSE excluded.avatar
+				END,
+				username = NULL;
+		`, pubKey, strings.TrimSpace(nickname), strings.TrimSpace(avatar))
+	} else {
+		// Keep existing username
+		_, err = db.db.ExecContext(ctx, `
+			INSERT INTO users (pub_key, nickname, avatar)
+			VALUES (?, ?, ?)
+			ON CONFLICT (pub_key) DO UPDATE SET
+				nickname = CASE
+					WHEN excluded.nickname = '' THEN users.nickname
+					ELSE excluded.nickname
+				END,
+				avatar = CASE
+					WHEN excluded.avatar = '' THEN users.avatar
+					ELSE excluded.avatar
+				END;
+		`, pubKey, strings.TrimSpace(nickname), strings.TrimSpace(avatar))
+	}
 	return err
 }
 
-func (db *DB) GetUserProfile(ctx context.Context, pubKey string) (string, string, error) {
+func (db *DB) GetUserProfile(ctx context.Context, pubKey string) (string, string, string, error) {
 	var nickname sql.NullString
 	var avatar sql.NullString
+	var username sql.NullString
 	err := db.db.QueryRowContext(ctx, `
-		SELECT nickname, avatar
+		SELECT nickname, avatar, username
 		FROM users
 		WHERE pub_key = ?
-	`, pubKey).Scan(&nickname, &avatar)
+	`, pubKey).Scan(&nickname, &avatar, &username)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 
-	return nickname.String, avatar.String, nil
+	return nickname.String, avatar.String, username.String, nil
+}
+
+// ResolveUsername looks up a user by their @username tag.
+func (db *DB) ResolveUsername(ctx context.Context, username string) (string, string, string, error) {
+	var pubKey sql.NullString
+	var nickname sql.NullString
+	var avatar sql.NullString
+	
+	err := db.db.QueryRowContext(ctx, `
+		SELECT pub_key, nickname, avatar
+		FROM users
+		WHERE username = ?
+	`, strings.ToLower(strings.TrimSpace(username))).Scan(&pubKey, &nickname, &avatar)
+	
+	if err != nil {
+		return "", "", "", err
+	}
+
+	return pubKey.String, nickname.String, avatar.String, nil
 }
 
 func (db *DB) CreateGroup(ctx context.Context, id, title, avatar, ownerPubKey string, members []string) error {
@@ -591,26 +685,55 @@ func (db *DB) SaveOfflineMessage(ctx context.Context, senderPubKey, recipientPub
 
 // GetAndDeleteOfflineMessages возвращает все сообщения для пользователя и удаляет их из БД
 func (db *DB) GetAndDeleteOfflineMessages(ctx context.Context, pubKey string) ([]*Message, error) {
-	// В SQLite RETURNING поддерживается в последних версиях (с 3.35.0, что в modernc.org/sqlite поддерживается)
-	rows, err := db.db.QueryContext(ctx, `
-		DELETE FROM offline_messages 
+	// Deliver in insertion order and delete only after the batch is read.
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, sender_pub_key, recipient_pub_key, payload
+		FROM offline_messages
 		WHERE recipient_pub_key = ?
-		RETURNING sender_pub_key, recipient_pub_key, payload
-	`, pubKey)
+		ORDER BY id ASC
+		LIMIT ?
+	`, pubKey, offlineDeliveryBatchLimit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
+	ids := make([]any, 0)
 	var messages []*Message
 	for rows.Next() {
 		var msg Message
-		if err := rows.Scan(&msg.SenderPubKey, &msg.RecipientPubKey, &msg.Payload); err != nil {
+		var id int64
+		if err := rows.Scan(&id, &msg.SenderPubKey, &msg.RecipientPubKey, &msg.Payload); err != nil {
 			return nil, err
 		}
+		ids = append(ids, id)
 		messages = append(messages, &msg)
 	}
-	return messages, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return messages, nil
+	}
+
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM offline_messages WHERE id IN (%s)", placeholders), ids...); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return messages, nil
 }
 
 // SavePreKeys сохраняет пачку пре-ключей пользователя
@@ -672,4 +795,29 @@ func extractMessageID(payload []byte) string {
 		return ""
 	}
 	return env.MsgID
+}
+
+// SaveSignedPreKey saves the user's active Signed PreKey and its signature
+func (db *DB) SaveSignedPreKey(ctx context.Context, pubKey, spk, sig string) error {
+	_, err := db.db.ExecContext(ctx, `
+		UPDATE users
+		SET signed_prekey = ?, signed_prekey_sig = ?
+		WHERE pub_key = ?
+	`, spk, sig, pubKey)
+	return err
+}
+
+// GetSignedPreKey retrieves the user's active Signed PreKey and its signature
+func (db *DB) GetSignedPreKey(ctx context.Context, pubKey string) (string, string, error) {
+	var spk sql.NullString
+	var sig sql.NullString
+	err := db.db.QueryRowContext(ctx, `
+		SELECT signed_prekey, signed_prekey_sig
+		FROM users
+		WHERE pub_key = ?
+	`, pubKey).Scan(&spk, &sig)
+	if err != nil && err != sql.ErrNoRows {
+		return "", "", err
+	}
+	return spk.String, sig.String, nil
 }

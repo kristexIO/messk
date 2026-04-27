@@ -1,13 +1,14 @@
 import React, { useState } from 'react';
 import { useAppStore } from '../store';
-import type { Theme } from '../store';
-import { X, User, Palette, Shield, LogOut, Camera, Lock, Download, Upload, Database, PhoneCall, PhoneIncoming, PhoneOutgoing, PhoneMissed } from 'lucide-react';
+import type { DesignStyle, Theme } from '../store';
+import { X, User, Palette, Shield, LogOut, Camera, Lock, Download, Upload, Database, PhoneCall, PhoneIncoming, PhoneOutgoing, PhoneMissed, Layers } from 'lucide-react';
 import { socketManager } from '../lib/socket';
 import { db } from '../lib/db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import Dexie from 'dexie';
 import { hashPin } from '../lib/security';
 import { createEncryptedBackup, downloadEncryptedBackup, parseBackupFile, restoreBackup } from '../lib/backup';
+import { prepareAvatarDataUrl } from '../lib/images';
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -17,8 +18,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
   const {
     nickname,
     avatar,
+    username,
     theme,
+    designStyle,
     setTheme,
+    setDesignStyle,
     setProfile,
     logout,
     pinHash,
@@ -30,6 +34,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
   } = useAppStore();
   const [tempNick, setTempNick] = useState(nickname || '');
   const [tempAvatar, setTempAvatar] = useState(avatar || '');
+  const [tempUsername, setTempUsername] = useState(username || '');
+  const [profileError, setProfileError] = useState('');
   const [pinInput, setPinInput] = useState('');
   const [pinConfirm, setPinConfirm] = useState('');
   const [pinMessage, setPinMessage] = useState('');
@@ -67,10 +73,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     [channels]
   );
 
-  const handleSaveProfile = () => {
-    setProfile(tempNick, tempAvatar);
-    void socketManager.syncMyProfile();
-    onClose();
+  const handleSaveProfile = async () => {
+    setProfileError('');
+    if (tempUsername) {
+      if (tempUsername.length < 5 || tempUsername.length > 32) {
+        setProfileError('Username must be between 5 and 32 characters');
+        return;
+      }
+      if (!/^[a-zA-Z0-9_]+$/.test(tempUsername)) {
+        setProfileError('Username can only contain letters, numbers, and underscores');
+        return;
+      }
+    }
+
+    setProfile(tempNick, tempAvatar, tempUsername);
+    try {
+      await socketManager.syncMyProfile();
+      onClose();
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Username is already taken') {
+        setProfileError('Username is already taken');
+      } else {
+        setProfileError('Failed to save profile to server');
+      }
+    }
   };
 
   const handleLogout = () => {
@@ -80,14 +106,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     logout();
   };
 
-  const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setTempAvatar(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+      try {
+        setTempAvatar(await prepareAvatarDataUrl(file));
+      } catch (error) {
+        setBackupMessage(error instanceof Error ? error.message : 'Failed to prepare avatar.');
+      } finally {
+        e.target.value = '';
+      }
     }
   };
 
@@ -177,6 +205,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     { id: 'forest', name: 'Forest', color: 'bg-[#052e16]' },
     { id: 'light', name: 'Cloud', color: 'bg-white' },
   ];
+  const designStyles: { id: DesignStyle; name: string; description: string }[] = [
+    { id: 'glass', name: 'Glassmorphism', description: 'Blurred translucent panels' },
+    { id: 'neumorph', name: 'Neumorphism', description: 'Soft inset and raised surfaces' },
+  ];
 
   const getCallOutcomeTone = (outcome: string) => {
     switch (outcome) {
@@ -206,9 +238,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
       : 'text-amber-200';
 
   return (
-    <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/60 backdrop-blur-md">
-      <div className="w-full max-w-2xl premium-glass rounded-3xl overflow-hidden shadow-2xl animate-in fade-in zoom-in duration-300">
-        <div className="p-6 border-b border-white/10 flex items-center justify-between">
+    <div className="fixed inset-0 z-[200] flex items-end justify-center bg-black/60 px-3 py-3 backdrop-blur-md sm:items-center sm:p-4">
+      <div className="flex max-h-[100dvh] w-full max-w-2xl flex-col overflow-hidden rounded-[28px] premium-glass shadow-2xl animate-in fade-in zoom-in duration-300 sm:rounded-3xl">
+        <div className="flex items-center justify-between border-b border-white/10 bg-slate-950/75 px-4 py-4 sm:px-6">
           <h2 className="text-xl font-bold flex items-center gap-2">
             <Palette className="w-5 h-5 text-accent" />
             Settings
@@ -218,16 +250,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
           </button>
         </div>
 
-        <div className="p-8 space-y-8 max-h-[70vh] overflow-y-auto">
+        <div className="max-h-[calc(100dvh-132px)] space-y-6 overflow-y-auto p-4 sm:max-h-[70vh] sm:space-y-8 sm:p-8">
           {/* Profile Section */}
           <section className="space-y-4">
             <h3 className="text-sm font-semibold uppercase tracking-wider text-text-muted flex items-center gap-2">
               <User className="w-4 h-4" />
               Profile
             </h3>
-            <div className="flex items-center gap-6">
-              <div className="relative group">
-                <div className="w-24 h-24 rounded-2xl bg-slate-800 overflow-hidden border-2 border-accent/30">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-6">
+              <div className="relative group self-start">
+                <div className="h-20 w-20 overflow-hidden rounded-2xl border-2 border-accent/30 bg-slate-800 sm:h-24 sm:w-24">
                   {tempAvatar ? (
                     <img src={tempAvatar} alt="Avatar" className="w-full h-full object-cover" />
                   ) : (
@@ -236,20 +268,42 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                     </div>
                   )}
                 </div>
-                <label className="absolute inset-0 flex items-center justify-center bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer rounded-2xl">
+                <label className="absolute inset-0 flex cursor-pointer items-center justify-center rounded-2xl bg-black/60 opacity-0 transition-opacity group-hover:opacity-100">
                   <Camera className="w-6 h-6 text-white" />
                   <input type="file" className="hidden" accept="image/*" onChange={handleAvatarChange} />
                 </label>
               </div>
-              <div className="flex-1 space-y-2">
-                <label className="text-xs text-text-muted">Display Name</label>
-                <input 
-                  type="text" 
-                  value={tempNick}
-                  onChange={(e) => setTempNick(e.target.value)}
-                  placeholder="Enter your nickname..."
-                  className="w-full px-4 py-3 bg-white/5 rounded-xl border border-white/10 focus:border-accent outline-none transition-all"
-                />
+              <div className="flex-1 space-y-4">
+                <div className="space-y-2">
+                  <label className="text-xs text-text-muted">Display Name</label>
+                  <input 
+                    type="text" 
+                    value={tempNick}
+                    onChange={(e) => setTempNick(e.target.value)}
+                    placeholder="Enter your nickname..."
+                    className="w-full px-4 py-3 bg-white/5 rounded-xl border border-white/10 focus:border-accent outline-none transition-all"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs text-text-muted">Username (@handle)</label>
+                  <div className="relative">
+                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted select-none">@</span>
+                    <input 
+                      type="text" 
+                      value={tempUsername}
+                      onChange={(e) => setTempUsername(e.target.value.replace(/[^a-zA-Z0-9_]/g, ''))}
+                      placeholder="your_handle"
+                      className={`w-full py-3 pl-9 pr-4 bg-white/5 rounded-xl border outline-none transition-all ${
+                        profileError ? 'border-red-400 focus:border-red-500' : 'border-white/10 focus:border-accent'
+                      }`}
+                    />
+                  </div>
+                  {profileError ? (
+                    <div className="text-xs text-red-400 mt-1">{profileError}</div>
+                  ) : (
+                    <div className="text-xs text-text-muted mt-1">Global handle to let people find you</div>
+                  )}
+                </div>
               </div>
             </div>
           </section>
@@ -273,6 +327,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                   <span className="text-xs font-medium">{t.name}</span>
                 </button>
               ))}
+            </div>
+            <div className="space-y-2">
+              <div className="text-xs uppercase tracking-[0.22em] text-text-muted flex items-center gap-2">
+                <Layers className="w-3.5 h-3.5" />
+                Surface style
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {designStyles.map((style) => (
+                  <button
+                    key={style.id}
+                    onClick={() => setDesignStyle(style.id)}
+                    className={`rounded-2xl border p-4 text-left transition-all ${
+                      designStyle === style.id
+                        ? 'border-accent bg-accent/10 shadow-lg'
+                        : 'border-white/10 bg-white/5 hover:border-white/20'
+                    }`}
+                  >
+                    <div className="text-sm font-semibold text-white">{style.name}</div>
+                    <div className="mt-1 text-xs text-text-muted">{style.description}</div>
+                  </button>
+                ))}
+              </div>
             </div>
           </section>
 
@@ -312,11 +388,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                     <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Owned channels</div>
                     <div className="mt-2 text-xl font-semibold text-violet-200">{ownedChannelCount}</div>
                   </div>
-                  <div className="text-right text-xs leading-5 text-text-muted">
-                    Overview cards moved here so the sidebar can stay focused on navigation and creation.
-                  </div>
+                <div className="max-w-[220px] text-right text-xs leading-5 text-text-muted">
+                  Overview cards moved here so the sidebar can stay focused on navigation and creation.
                 </div>
               </div>
+            </div>
             </div>
           </section>
 
@@ -534,7 +610,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
           </section>
         </div>
 
-        <div className="p-6 bg-black/20 border-t border-white/10 flex justify-end gap-4">
+        <div className="flex justify-end gap-3 border-t border-white/10 bg-black/20 px-4 py-4 sm:gap-4 sm:p-6">
           <button onClick={onClose} className="px-6 py-2.5 rounded-xl text-sm font-medium hover:bg-white/5 transition-all">
             Cancel
           </button>

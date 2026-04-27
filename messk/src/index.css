@@ -70,16 +70,30 @@
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    @apply font-sans antialiased overflow-hidden transition-all duration-700;
+    @apply font-sans antialiased overflow-x-hidden transition-all duration-700;
   }
 }
 
 @layer components {
+  .app-shell-height {
+    height: 100vh;
+    height: 100dvh;
+  }
+
   .premium-glass {
     background: var(--bg-card);
     backdrop-filter: blur(24px) saturate(180%);
     border: 1px solid var(--border-glass);
     box-shadow: 0 10px 40px -10px rgba(0, 0, 0, 0.5);
+  }
+
+  [data-style="neumorph"] .premium-glass {
+    background: color-mix(in srgb, var(--bg-main) 78%, white 22%);
+    backdrop-filter: none;
+    border: 1px solid color-mix(in srgb, var(--bg-main) 85%, white 15%);
+    box-shadow:
+      10px 10px 24px color-mix(in srgb, var(--bg-main) 88%, black 12%),
+      -10px -10px 24px color-mix(in srgb, var(--bg-main) 78%, white 22%);
   }
 
   .chat-bubble-send {
@@ -103,6 +117,40 @@
 
   .btn-premium:hover {
     @apply shadow-[0_0_25px_var(--accent-glow)] scale-[1.03];
+  }
+
+  [data-style="neumorph"] .btn-premium {
+    background: color-mix(in srgb, var(--bg-main) 78%, white 22%);
+    color: var(--text-main);
+    border: 1px solid color-mix(in srgb, var(--bg-main) 82%, white 18%);
+    box-shadow:
+      8px 8px 16px color-mix(in srgb, var(--bg-main) 88%, black 12%),
+      -8px -8px 16px color-mix(in srgb, var(--bg-main) 74%, white 26%);
+  }
+
+  [data-style="neumorph"] .btn-premium:hover {
+    box-shadow:
+      inset 6px 6px 12px color-mix(in srgb, var(--bg-main) 86%, black 14%),
+      inset -6px -6px 12px color-mix(in srgb, var(--bg-main) 76%, white 24%);
+    transform: translateY(0);
+  }
+
+  [data-style="neumorph"] .chat-bubble-send {
+    color: var(--text-main);
+    background: color-mix(in srgb, var(--bg-main) 76%, white 24%);
+    box-shadow:
+      inset 6px 6px 12px color-mix(in srgb, var(--bg-main) 90%, black 10%),
+      inset -6px -6px 12px color-mix(in srgb, var(--bg-main) 74%, white 26%);
+  }
+
+  [data-style="neumorph"] .chat-bubble-recv {
+    color: var(--text-main);
+    background: color-mix(in srgb, var(--bg-main) 78%, white 22%);
+    border-color: color-mix(in srgb, var(--bg-main) 82%, white 18%);
+    backdrop-filter: none;
+    box-shadow:
+      8px 8px 18px color-mix(in srgb, var(--bg-main) 89%, black 11%),
+      -8px -8px 18px color-mix(in srgb, var(--bg-main) 74%, white 26%);
   }
 
   .hover-glow {

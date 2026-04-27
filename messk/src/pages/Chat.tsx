@@ -4,13 +4,17 @@ import { socketManager } from '../lib/socket';
 import { clearThreadStats, db, syncThreadStats, type StoredMessage } from '../lib/db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import Dexie from 'dexie';
-import { Send, ArrowLeft, ShieldCheck, Check, CheckCheck, Trash2, Paperclip, FileIcon, Download, Loader2, Mic, Square, Play, Phone, Video, Pencil, Search, X, Archive, Bell, BellOff, ArrowDownCircle, Users, Crown, WifiOff, Clock3, UserPlus, UserMinus, Shield, Megaphone, Pin } from 'lucide-react';
+import { Send, ArrowLeft, ShieldCheck, Check, CheckCheck, Trash2, Paperclip, FileIcon, Download, Loader2, Mic, Square, Play, Phone, Video, Pencil, Search, X, Archive, Bell, BellOff, ArrowDownCircle, Users, Crown, WifiOff, Clock3, UserPlus, UserMinus, Shield, Megaphone, Pin, AtSign } from 'lucide-react';
+import { UserIdentityModal } from '../components/UserIdentityModal';
 import { Sidebar } from '../components/Sidebar';
 import { encryptFile, decryptFile } from '../lib/attachments';
 import { CallOverlay } from '../components/CallOverlay';
 import { VoiceWaveform } from '../components/VoiceWaveform';
 import { toast } from 'react-hot-toast';
 import { appConfig } from '../lib/config';
+import { fetchWithTimeout, toNetworkErrorMessage, UPLOAD_REQUEST_TIMEOUT_MS } from '../lib/http';
+import { encodeRichTextMessage, parseRichTextMessage, type MessageMention } from '../lib/message-format';
+import { deriveMentionHandle, getPublicKeyFingerprint } from '../lib/identity';
 import {
   addChannelSubscriber,
   addGroupMember,
@@ -44,9 +48,11 @@ type VoicePayload = {
 };
 
 type ParsedMessageContent =
-  | { kind: 'text'; text: string }
+  | { kind: 'text'; text: string; mentions: MessageMention[] }
   | { kind: 'file'; payload: FilePayload }
   | { kind: 'voice'; payload: VoicePayload };
+
+const MAX_ATTACHMENT_SIZE_BYTES = 75 * 1024 * 1024;
 
 function safeGroupMembers(value: unknown): string[] {
   if (!Array.isArray(value)) {
@@ -63,7 +69,7 @@ function parseMessageContent(text: string): ParsedMessageContent {
         payload: JSON.parse(text) as FilePayload,
       };
     } catch {
-      return { kind: 'text', text };
+      return { kind: 'text', text, mentions: [] };
     }
   }
 
@@ -74,11 +80,50 @@ function parseMessageContent(text: string): ParsedMessageContent {
         payload: JSON.parse(text) as VoicePayload,
       };
     } catch {
-      return { kind: 'text', text };
+      return { kind: 'text', text, mentions: [] };
     }
   }
 
-  return { kind: 'text', text };
+  const parsedRichText = parseRichTextMessage(text);
+  return { kind: 'text', text: parsedRichText.text, mentions: parsedRichText.mentions };
+}
+
+function renderTextWithMentions(text: string, mentions: MessageMention[], onMentionClick?: (pubKey: string) => void) {
+  if (!mentions.length) {
+    return text;
+  }
+
+  const mentionByStart = new Map<number, MessageMention>();
+  mentions.forEach((mention) => mentionByStart.set(mention.start, mention));
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+
+  while (cursor < text.length) {
+    const mention = mentionByStart.get(cursor);
+    if (!mention) {
+      let nextCursor = cursor + 1;
+      while (nextCursor < text.length && !mentionByStart.has(nextCursor)) {
+        nextCursor++;
+      }
+      parts.push(text.slice(cursor, nextCursor));
+      cursor = nextCursor;
+      continue;
+    }
+
+    const token = text.slice(mention.start, mention.end);
+    parts.push(
+      <span
+        key={`${mention.start}:${mention.handle}`}
+        className="font-semibold text-cyan-200 cursor-pointer hover:underline"
+        onClick={() => onMentionClick?.(mention.pubKey)}
+      >
+        {token}
+      </span>
+    );
+    cursor = mention.end;
+  }
+
+  return parts;
 }
 
 function fallbackParticipantName(pubKey: string) {
@@ -182,6 +227,7 @@ const MessageBubble = React.memo(({
   canPin?: boolean;
   isPinned?: boolean;
   onPin?: (msg: StoredMessage) => void;
+  onMentionClick?: (pubKey: string) => void;
 }) => {
   const isDeleted = Boolean(msg.deletedAt);
   const reactionEntries = React.useMemo(
@@ -270,7 +316,7 @@ const MessageBubble = React.memo(({
           ) : parsedContent.kind === 'voice' ? (
             <VoiceMessage voiceData={parsedContent.payload} downloadFile={downloadFile} />
           ) : (
-            parsedContent.text
+            renderTextWithMentions(parsedContent.text, parsedContent.mentions, onMentionClick)
           )}
         </div>
         {hasReactions ? (
@@ -337,6 +383,8 @@ export const Chat: React.FC = () => {
   const [isUploading, setIsUploading] = React.useState(false);
   const [isRecording, setIsRecording] = React.useState(false);
   const [messageSearch, setMessageSearch] = React.useState('');
+  const [mentionFilterActive, setMentionFilterActive] = React.useState(false);
+  const [viewedIdentityPubKey, setViewedIdentityPubKey] = React.useState<string | null>(null);
   const [messageRenderLimits, setMessageRenderLimits] = React.useState<Record<string, number>>({});
   const [nowTs, setNowTs] = React.useState(() => Date.now());
   const [groupMemberInput, setGroupMemberInput] = React.useState('');
@@ -347,6 +395,10 @@ export const Chat: React.FC = () => {
   const [isAddingSubscriber, setIsAddingSubscriber] = React.useState(false);
   const [channelSubscribersMeta, setChannelSubscribersMeta] = React.useState<Array<{ subscriberPubKey: string; role: string }>>([]);
   const [subscriberActionPubKey, setSubscriberActionPubKey] = React.useState<string | null>(null);
+  const [mentionQuery, setMentionQuery] = React.useState('');
+  const [mentionStartIndex, setMentionStartIndex] = React.useState<number | null>(null);
+  const [mentionSelectionIndex, setMentionSelectionIndex] = React.useState(0);
+  const [activePeerFingerprint, setActivePeerFingerprint] = React.useState('');
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -355,6 +407,7 @@ export const Chat: React.FC = () => {
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const messageSearchInputRef = useRef<HTMLInputElement>(null);
   const lastTypingSentRef = useRef(0);
+  const caretRef = useRef(0);
   const draftSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const deferredMessageSearch = useDeferredValue(messageSearch.trim().toLowerCase());
   const activeThreadId = activeGroupId ?? activeChannelId ?? activePeerKey;
@@ -450,12 +503,19 @@ export const Chat: React.FC = () => {
     : '';
   const filteredMessages = React.useMemo(() => {
     if (!messages) return messages;
-    if (!deferredMessageSearch) return messages;
+    if (!deferredMessageSearch && !mentionFilterActive) return messages;
     return messages.filter((msg) => {
       if (msg.deletedAt) return false;
-      return msg.text.toLowerCase().includes(deferredMessageSearch);
+      let matches = true;
+      if (mentionFilterActive && myPublicKey) {
+        matches = isMentioningPubKey(msg.text, myPublicKey);
+      }
+      if (matches && deferredMessageSearch) {
+        matches = msg.text.toLowerCase().includes(deferredMessageSearch);
+      }
+      return matches;
     });
-  }, [deferredMessageSearch, messages]);
+  }, [deferredMessageSearch, mentionFilterActive, messages, myPublicKey]);
   const visibleMessages = filteredMessages;
   const hasHiddenMessages = Boolean(
     !deferredMessageSearch &&
@@ -505,6 +565,54 @@ export const Chat: React.FC = () => {
       return acc;
     }, {});
   }, [relevantParticipantKeys.join('|')]);
+  const mentionCandidates = React.useMemo(() => {
+    const candidates: Array<{ pubKey: string; displayName: string; handle: string }> = [];
+    const seenPubKeys = new Set<string>();
+    const takenHandles = new Set<string>();
+
+    const pushCandidate = (pubKey: string | undefined, fallbackName?: string) => {
+      if (!pubKey || seenPubKeys.has(pubKey)) {
+        return;
+      }
+      seenPubKeys.add(pubKey);
+      const displayName = participantNames?.[pubKey] || fallbackName || fallbackParticipantName(pubKey);
+      const handle = deriveMentionHandle(displayName, pubKey, takenHandles);
+      candidates.push({ pubKey, displayName, handle });
+    };
+
+    if (activeGroupId) {
+      displayedGroupMembers.forEach((member) => pushCandidate(member.memberPubKey));
+    } else if (activeChannelId) {
+      displayedChannelSubscribers.forEach((subscriber) => pushCandidate(subscriber.subscriberPubKey));
+    } else if (activePeerKey) {
+      pushCandidate(activePeerKey, activeContact?.name || undefined);
+    }
+
+    return candidates;
+  }, [
+    activeChannelId,
+    activeContact?.name,
+    activeGroupId,
+    activePeerKey,
+    displayedChannelSubscribers,
+    displayedGroupMembers,
+    participantNames
+  ]);
+  const mentionHandleDirectory = React.useMemo(
+    () => Object.fromEntries(mentionCandidates.map((candidate) => [candidate.handle, candidate.pubKey])),
+    [mentionCandidates]
+  );
+  const mentionSuggestions = React.useMemo(() => {
+    if (mentionStartIndex === null) {
+      return [];
+    }
+    const query = mentionQuery.trim().toLowerCase();
+    const filtered = mentionCandidates.filter((candidate) =>
+      candidate.handle.includes(query) || candidate.displayName.toLowerCase().includes(query)
+    );
+    return filtered.slice(0, 6);
+  }, [mentionCandidates, mentionQuery, mentionStartIndex]);
+  const isMentionMenuOpen = mentionStartIndex !== null && mentionSuggestions.length > 0;
   const firstUnreadMessageId = deferredMessageSearch ? null : stableUnreadIncomingMessages[0]?.msgId ?? null;
   const unreadCount = deferredMessageSearch ? 0 : stableUnreadIncomingMessages.length;
   const lastVisibleMessageId = visibleMessages?.[visibleMessages.length - 1]?.msgId ?? null;
@@ -514,6 +622,34 @@ export const Chat: React.FC = () => {
     if (pubKey === myPublicKey) return 'You';
     return participantNames?.[pubKey] || fallbackParticipantName(pubKey);
   }, [myPublicKey, participantNames]);
+
+  useEffect(() => {
+    if (!activePeerKey) {
+      setActivePeerFingerprint('');
+      return;
+    }
+    void getPublicKeyFingerprint(activePeerKey)
+      .then((fingerprint) => setActivePeerFingerprint(fingerprint))
+      .catch(() => setActivePeerFingerprint(''));
+  }, [activePeerKey]);
+
+  useEffect(() => {
+    setMentionQuery('');
+    setMentionStartIndex(null);
+    setMentionSelectionIndex(0);
+  }, [activeThreadId]);
+
+  useEffect(() => {
+    if (!mentionSuggestions.length) {
+      if (mentionSelectionIndex !== 0) {
+        setMentionSelectionIndex(0);
+      }
+      return;
+    }
+    if (mentionSelectionIndex >= mentionSuggestions.length) {
+      setMentionSelectionIndex(0);
+    }
+  }, [mentionSelectionIndex, mentionSuggestions.length]);
 
   useEffect(() => {
     if (!lastVisibleMessageId) {
@@ -591,23 +727,108 @@ export const Chat: React.FC = () => {
     ).then(() => syncThreadStats(activeChannelId));
   }, [activeChannelId, messages, stableUnreadIncomingMessages]);
 
+  const closeMentionMenu = React.useCallback(() => {
+    setMentionQuery('');
+    setMentionStartIndex(null);
+    setMentionSelectionIndex(0);
+  }, []);
+
+  const handleMentionClick = React.useCallback((pubKey: string) => {
+    setViewedIdentityPubKey(pubKey);
+  }, []);
+
+  const handleComposerChange = React.useCallback((nextValue: string, caretPosition: number) => {
+    if (activeThreadId) {
+      setDraftOverrides((current) => ({ ...current, [activeThreadId]: nextValue }));
+    }
+    caretRef.current = caretPosition;
+
+    const prefix = nextValue.slice(0, caretPosition);
+    const mentionMatch = prefix.match(/(^|\s)@([a-z0-9._-]{0,32})$/i);
+    if (!mentionMatch) {
+      closeMentionMenu();
+      return;
+    }
+
+    const mentionToken = mentionMatch[2].toLowerCase();
+    const mentionStart = caretPosition - mentionToken.length - 1;
+    setMentionStartIndex(mentionStart);
+    setMentionQuery(mentionToken);
+    setMentionSelectionIndex(0);
+  }, [activeThreadId, closeMentionMenu]);
+
+  const applyMentionSuggestion = React.useCallback((candidate: { pubKey: string; displayName: string; handle: string }) => {
+    if (mentionStartIndex === null || !activeThreadId) {
+      return;
+    }
+    const before = messageInput.slice(0, mentionStartIndex);
+    const after = messageInput.slice(caretRef.current);
+    const nextValue = `${before}@${candidate.handle} ${after}`;
+    const nextCaret = (before.length + candidate.handle.length + 2);
+    setDraftOverrides((current) => ({ ...current, [activeThreadId]: nextValue }));
+    closeMentionMenu();
+    requestAnimationFrame(() => {
+      if (messageInputRef.current) {
+        messageInputRef.current.selectionStart = nextCaret;
+        messageInputRef.current.selectionEnd = nextCaret;
+        messageInputRef.current.focus();
+      }
+      caretRef.current = nextCaret;
+    });
+  }, [activeThreadId, closeMentionMenu, mentionStartIndex, messageInput]);
+
+  const handleComposerKeyDown = React.useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (!isMentionMenuOpen) {
+      return;
+    }
+
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setMentionSelectionIndex((current) => (current + 1) % mentionSuggestions.length);
+      return;
+    }
+
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setMentionSelectionIndex((current) => (current - 1 + mentionSuggestions.length) % mentionSuggestions.length);
+      return;
+    }
+
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeMentionMenu();
+      return;
+    }
+
+    if (event.key === 'Enter' || event.key === 'Tab') {
+      event.preventDefault();
+      const selected = mentionSuggestions[mentionSelectionIndex] ?? mentionSuggestions[0];
+      if (selected) {
+        applyMentionSuggestion(selected);
+      }
+    }
+  }, [applyMentionSuggestion, closeMentionMenu, isMentionMenuOpen, mentionSelectionIndex, mentionSuggestions]);
+
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!messageInput.trim() || !myPublicKey) return;
 
+    const plaintext = encodeRichTextMessage(messageInput.trim(), mentionHandleDirectory);
+
     try {
       if (activeGroupId && mySecretKey) {
-        await socketManager.sendGroupMessage(activeGroupId, messageInput.trim(), myPublicKey, mySecretKey);
+        await socketManager.sendGroupMessage(activeGroupId, plaintext, myPublicKey, mySecretKey);
       } else if (activeChannelId) {
-        await socketManager.sendChannelMessage(activeChannelId, messageInput.trim(), myPublicKey);
+        await socketManager.sendChannelMessage(activeChannelId, plaintext, myPublicKey);
       } else if (activePeerKey && mySecretKey) {
-        await socketManager.send(activePeerKey, messageInput.trim(), mySecretKey, myPublicKey);
+        await socketManager.send(activePeerKey, plaintext, mySecretKey, myPublicKey);
         await db.contacts.update(activePeerKey, { draft: '', lastMessageAt: Date.now() });
         setDraftOverrides((current) => ({ ...current, [activePeerKey]: '' }));
       } else {
         return;
       }
 
+      closeMentionMenu();
       if (activeThreadId) {
         setDraftOverrides((current) => ({ ...current, [activeThreadId]: '' }));
       }
@@ -620,6 +841,11 @@ export const Chat: React.FC = () => {
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !mySecretKey || !myPublicKey || (!activePeerKey && !activeGroupId && !activeChannelId)) return;
+    if (file.size > MAX_ATTACHMENT_SIZE_BYTES) {
+      toast.error('This file is too large. Please choose a file smaller than 75 MB.');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
 
     setIsUploading(true);
     try {
@@ -634,13 +860,21 @@ export const Chat: React.FC = () => {
         formData.append('recipient_pub_key', activePeerKey);
       }
 
-      const response = await fetch(appConfig.uploadUrl, {
+      const response = await fetchWithTimeout(appConfig.uploadUrl, {
         method: 'POST',
         headers: socketManager.getSessionHeaders(),
         body: formData,
+      }, {
+        timeoutMs: UPLOAD_REQUEST_TIMEOUT_MS,
       });
 
-      if (!response.ok) throw new Error('Upload failed');
+      if (!response.ok) {
+        throw new Error(
+          response.status === 413
+            ? 'This file is too large for upload. Please choose a smaller file.'
+            : `Upload failed (${response.status})`
+        );
+      }
       const { url } = await response.json();
 
       const fileData = {
@@ -661,7 +895,7 @@ export const Chat: React.FC = () => {
       }
     } catch (err) {
       console.error("Upload failed", err);
-      toast.error("Failed to upload file");
+      toast.error(toNetworkErrorMessage(err, "Failed to upload file"));
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -670,6 +904,10 @@ export const Chat: React.FC = () => {
 
   const handleVoiceUpload = async (file: File) => {
     if (!mySecretKey || !myPublicKey || (!activePeerKey && !activeGroupId && !activeChannelId)) return;
+    if (file.size > MAX_ATTACHMENT_SIZE_BYTES) {
+      toast.error('This recording is too large. Please keep voice messages under 75 MB.');
+      return;
+    }
 
     setIsUploading(true);
     try {
@@ -684,12 +922,20 @@ export const Chat: React.FC = () => {
         formData.append('recipient_pub_key', activePeerKey);
       }
 
-      const response = await fetch(appConfig.uploadUrl, {
+      const response = await fetchWithTimeout(appConfig.uploadUrl, {
         method: 'POST',
         headers: socketManager.getSessionHeaders(),
         body: formData
+      }, {
+        timeoutMs: UPLOAD_REQUEST_TIMEOUT_MS,
       });
-      if (!response.ok) throw new Error('Upload failed');
+      if (!response.ok) {
+        throw new Error(
+          response.status === 413
+            ? 'This recording is too large for upload. Please keep it shorter.'
+            : `Upload failed (${response.status})`
+        );
+      }
 
       const { url } = await response.json();
       const voiceData = { type: 'voice', url: `${appConfig.backendOrigin}${url}`, key, duration: 0 };
@@ -700,8 +946,8 @@ export const Chat: React.FC = () => {
       } else if (activePeerKey) {
         await socketManager.send(activePeerKey, JSON.stringify(voiceData), mySecretKey, myPublicKey);
       }
-    } catch {
-      toast.error("Failed to upload voice message");
+    } catch (error) {
+      toast.error(toNetworkErrorMessage(error, "Failed to upload voice message"));
     } finally {
       setIsUploading(false);
     }
@@ -777,6 +1023,24 @@ export const Chat: React.FC = () => {
     if (nextArchived) {
       setActivePeer(null);
     }
+  };
+
+  const handleVerifyIdentity = async () => {
+    if (!activePeerKey || !activePeerFingerprint) return;
+    await db.contacts.update(activePeerKey, {
+      verifiedIdentityFingerprint: activePeerFingerprint,
+      verifiedIdentityAt: Date.now(),
+    });
+    toast.success('Contact key fingerprint verified.');
+  };
+
+  const handleClearIdentityVerification = async () => {
+    if (!activePeerKey) return;
+    await db.contacts.update(activePeerKey, {
+      verifiedIdentityFingerprint: undefined,
+      verifiedIdentityAt: undefined,
+    });
+    toast('Contact key verification removed.');
   };
 
   const jumpToFirstUnread = () => {
@@ -1148,20 +1412,21 @@ export const Chat: React.FC = () => {
     }
     const nextText = window.prompt('Edit message', msg.text);
     if (!nextText || nextText.trim() === msg.text.trim()) return;
+    const encodedText = encodeRichTextMessage(nextText.trim(), mentionHandleDirectory);
 
     try {
       if (activeGroupId) {
         if (!mySecretKey) return;
-        await socketManager.sendGroupEdit(activeGroupId, msg.msgId, nextText.trim(), myPublicKey, mySecretKey);
+        await socketManager.sendGroupEdit(activeGroupId, msg.msgId, encodedText, myPublicKey, mySecretKey);
       } else if (activeChannelId) {
-        await socketManager.sendChannelEdit(activeChannelId, msg.msgId, nextText.trim(), myPublicKey);
+        await socketManager.sendChannelEdit(activeChannelId, msg.msgId, encodedText, myPublicKey);
         if (msg.id) {
           await db.messages.update(msg.id, { editedBy: myPublicKey });
           await syncThreadStats(activeChannelId);
         }
       } else if (activePeerKey) {
         if (!mySecretKey) return;
-        await socketManager.sendEdit(activePeerKey, msg.msgId, nextText.trim());
+        await socketManager.sendEdit(activePeerKey, msg.msgId, encodedText);
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to edit message');
@@ -1216,28 +1481,33 @@ export const Chat: React.FC = () => {
       ? 'border-red-400/20 bg-red-400/10 text-red-200'
       : 'border-amber-400/20 bg-amber-400/10 text-amber-100';
   const activeCollectionSync = activeGroupId ? groupSyncStatus : activeChannelId ? channelSyncStatus : null;
+  const isIdentityVerified = Boolean(
+    activeContact?.verifiedIdentityFingerprint &&
+    activePeerFingerprint &&
+    activeContact.verifiedIdentityFingerprint === activePeerFingerprint
+  );
 
   return (
-    <div className="flex h-screen overflow-hidden">
+    <div className="app-shell-height flex overflow-hidden">
       <Sidebar />
 
       <div className={`
         ${activePeerKey || activeGroupId || activeChannelId ? 'flex' : 'hidden md:flex'}
-        flex-col flex-1 relative
+        w-full flex-col flex-1 relative
       `}>
         {activePeerKey ? (
           <>
             <CallOverlay />
-            <header className="h-20 flex-shrink-0 premium-glass border-b border-white/5 flex items-center justify-between px-6 z-20">
-              <div className="flex items-center gap-4">
+            <header className="premium-glass z-20 flex min-h-20 flex-shrink-0 items-center justify-between border-b border-white/5 px-4 py-3 sm:px-6">
+              <div className="flex min-w-0 items-center gap-3 sm:gap-4">
                 <button
                   className="md:hidden p-2 -ml-2 text-text-muted hover:text-white"
                   onClick={() => setActivePeer(null)}
                 >
                   <ArrowLeft className="w-6 h-6" />
                 </button>
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-white/10 to-white/5 border border-white/10 flex items-center justify-center text-white shadow-xl relative overflow-hidden group">
+                <div className="flex min-w-0 items-center gap-3 sm:gap-4">
+                  <div className="relative flex h-11 w-11 items-center justify-center overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-white/10 to-white/5 text-white shadow-xl group sm:h-12 sm:w-12">
                     <div className="absolute inset-0 shimmer-bg opacity-30 group-hover:opacity-50 transition-opacity" />
                     {contactAvatar ? (
                       <img
@@ -1259,6 +1529,16 @@ export const Chat: React.FC = () => {
                       </p>
                     )}
                     <div className="mt-1 flex flex-wrap gap-2">
+                      {activePeerFingerprint ? (
+                        <span className="rounded-full border border-white/15 bg-black/20 px-2 py-0.5 text-[10px] font-medium text-text-muted">
+                          FP: {activePeerFingerprint.slice(0, 19)}...
+                        </span>
+                      ) : null}
+                      {isIdentityVerified ? (
+                        <span className="rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2 py-0.5 text-[10px] font-medium text-emerald-200">
+                          Identity verified
+                        </span>
+                      ) : null}
                       {isChatMuted ? (
                         <span className="rounded-full border border-blue-300/20 bg-blue-300/10 px-2 py-0.5 text-[10px] font-medium text-blue-200">
                           Muted for 8 hours
@@ -1273,8 +1553,21 @@ export const Chat: React.FC = () => {
                   </div>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <div className="relative hidden lg:block">
+              <div className="ml-3 flex items-center gap-1 sm:gap-2">
+                <button
+                  type="button"
+                  onClick={() => setMentionFilterActive((prev) => !prev)}
+                  className={`hidden xl:flex items-center justify-center rounded-xl p-2 transition-all ${
+                    mentionFilterActive 
+                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30' 
+                      : 'text-text-muted hover:bg-white/5 hover:text-white border border-transparent'
+                  }`}
+                  title="Filter messages mentioning me"
+                  aria-label="Filter messages mentioning me"
+                >
+                  <AtSign className="w-5 h-5" />
+                </button>
+                <div className="relative hidden xl:block">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-text-muted" />
                   <input
                     type="text"
@@ -1297,21 +1590,33 @@ export const Chat: React.FC = () => {
                 </div>
                 <button
                   onClick={() => triggerCallStart(false)}
-                  className="p-2.5 text-text-muted hover:text-white hover:bg-white/5 rounded-xl transition-all"
+                  className="rounded-xl p-2 text-text-muted transition-all hover:bg-white/5 hover:text-white sm:p-2.5"
                   aria-label="Start voice call"
                 >
                   <Phone className="w-5 h-5" />
                 </button>
                 <button
                   onClick={() => triggerCallStart(true)}
-                  className="p-2.5 text-text-muted hover:text-white hover:bg-white/5 rounded-xl transition-all"
+                  className="rounded-xl p-2 text-text-muted transition-all hover:bg-white/5 hover:text-white sm:p-2.5"
                   aria-label="Start video call"
                 >
                   <Video className="w-5 h-5" />
                 </button>
                 <button
+                  onClick={isIdentityVerified ? handleClearIdentityVerification : handleVerifyIdentity}
+                  className={`rounded-xl p-2 transition-all sm:p-2.5 ${
+                    isIdentityVerified
+                      ? 'text-emerald-200 hover:bg-emerald-300/10 hover:text-emerald-100'
+                      : 'text-text-muted hover:bg-white/5 hover:text-white'
+                  }`}
+                  title={isIdentityVerified ? 'Remove key verification' : 'Mark current contact key as verified'}
+                  aria-label={isIdentityVerified ? 'Remove key verification' : 'Mark contact key as verified'}
+                >
+                  <ShieldCheck className="w-5 h-5" />
+                </button>
+                <button
                   onClick={handleToggleMute}
-                  className="p-2.5 text-text-muted hover:text-white hover:bg-white/5 rounded-xl transition-all"
+                  className="rounded-xl p-2 text-text-muted transition-all hover:bg-white/5 hover:text-white sm:p-2.5"
                   title={isChatMuted ? 'Unmute chat' : 'Mute chat for 8 hours'}
                   aria-label={isChatMuted ? 'Unmute chat' : 'Mute chat for 8 hours'}
                 >
@@ -1323,16 +1628,16 @@ export const Chat: React.FC = () => {
                 </button>
                 <button
                   onClick={handleToggleArchive}
-                  className="p-2.5 text-text-muted hover:text-white hover:bg-white/5 rounded-xl transition-all"
+                  className="rounded-xl p-2 text-text-muted transition-all hover:bg-white/5 hover:text-white sm:p-2.5"
                   title={activeContact?.archived ? 'Restore chat' : 'Archive chat'}
                   aria-label={activeContact?.archived ? 'Restore chat' : 'Archive chat'}
                 >
                   <Archive className={`w-5 h-5 ${activeContact?.archived ? 'text-violet-300' : ''}`} />
                 </button>
-                <div className="w-px h-6 bg-white/10 mx-2" />
+                <div className="mx-1 hidden h-6 w-px bg-white/10 sm:mx-2 sm:block" />
                 <button
                   onClick={handleClearChat}
-                  className="p-2.5 text-text-muted hover:text-red-400 hover:bg-red-400/10 rounded-xl transition-all"
+                  className="hidden rounded-xl p-2 text-text-muted transition-all hover:bg-red-400/10 hover:text-red-400 sm:block sm:p-2.5"
                   title="Clear Chat"
                   aria-label="Clear chat"
                 >
@@ -1342,14 +1647,14 @@ export const Chat: React.FC = () => {
             </header>
 
             {connectionStatus !== 'connected' ? (
-              <div className={`mx-6 mt-4 rounded-2xl border px-4 py-3 text-sm ${connectionTone}`}>
+              <div className={`mx-4 mt-3 rounded-2xl border px-4 py-3 text-sm sm:mx-6 sm:mt-4 ${connectionTone}`}>
                 {connectionLabel}
               </div>
             ) : null}
 
             <div
               ref={messageListRef}
-              className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar bg-black/10"
+              className="flex-1 overflow-y-auto bg-black/10 p-3 space-y-4 custom-scrollbar sm:p-6 sm:space-y-6"
               role="log"
               aria-live="polite"
               aria-label={`Messages with ${contactName}`}
@@ -1407,9 +1712,10 @@ export const Chat: React.FC = () => {
                         isMine={msg.senderPublicKey === myPublicKey}
                         isGroupMessage={Boolean(activeGroupId)}
                         downloadFile={downloadFile}
-                        onEdit={handleEditMessage}
+                        onEdit={handleInitEdit}
                         onDelete={handleDeleteMessage}
-                        onReact={handleReactToMessage}
+                        onReact={handleReaction}
+                        onMentionClick={handleMentionClick}
                       />
                     </div>
                   </React.Fragment>
@@ -1422,7 +1728,7 @@ export const Chat: React.FC = () => {
               <button
                 type="button"
                 onClick={jumpToFirstUnread}
-                className="absolute bottom-28 right-6 z-20 inline-flex items-center gap-2 rounded-full border border-accent/30 bg-slate-950/90 px-4 py-2 text-sm font-medium text-white shadow-xl backdrop-blur transition-all hover:border-accent/50 hover:bg-slate-900"
+                className="absolute bottom-24 right-4 z-20 inline-flex items-center gap-2 rounded-full border border-accent/30 bg-slate-950/90 px-4 py-2 text-sm font-medium text-white shadow-xl backdrop-blur transition-all hover:border-accent/50 hover:bg-slate-900 sm:bottom-28 sm:right-6"
                 aria-label={`Jump to ${unreadCount} unread messages`}
               >
                 <ArrowDownCircle className="h-4 w-4 text-accent" />
@@ -1430,11 +1736,11 @@ export const Chat: React.FC = () => {
               </button>
             ) : null}
 
-            <div className="p-6 bg-transparent border-t border-white/5 premium-glass">
-              <form onSubmit={handleSendMessage} className="flex items-end gap-3 max-w-5xl mx-auto">
+            <div className="premium-glass border-t border-white/5 bg-transparent p-3 sm:p-6">
+              <form onSubmit={handleSendMessage} className="mx-auto flex max-w-5xl items-end gap-2 sm:gap-3">
                 <input type="file" className="hidden" ref={fileInputRef} onChange={handleFileChange} />
 
-                <div className="flex-1 flex items-end gap-2 bg-white/5 border border-white/10 rounded-2xl p-2 focus-within:border-accent/40 focus-within:bg-white/10 transition-all">
+                <div className="relative flex flex-1 items-end gap-2 rounded-2xl border border-white/10 bg-white/5 p-2 transition-all focus-within:border-accent/40 focus-within:bg-white/10">
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
@@ -1450,7 +1756,7 @@ export const Chat: React.FC = () => {
                     value={messageInput}
                     onChange={(e) => {
                       const nextValue = e.target.value;
-                      setDraftOverrides((current) => activeThreadId ? { ...current, [activeThreadId]: nextValue } : current);
+                      handleComposerChange(nextValue, e.target.selectionStart ?? nextValue.length);
                       if (activePeerKey && myPublicKey && nextValue.trim()) {
                         const now = Date.now();
                         if (now - lastTypingSentRef.current > 1500) {
@@ -1460,15 +1766,37 @@ export const Chat: React.FC = () => {
                       }
                     }}
                     placeholder={isRecording ? "Listening..." : "Message..."}
-                    className="flex-1 bg-transparent border-none focus:ring-0 resize-none min-h-[44px] max-h-32 px-2 py-2.5 text-[15px] outline-none"
+                    className="min-h-[44px] max-h-32 flex-1 resize-none border-none bg-transparent px-2 py-2.5 text-[15px] outline-none focus:ring-0"
                     aria-label="Message input"
                     onKeyDown={(e) => {
+                      handleComposerKeyDown(e);
                       if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault();
-                        handleSendMessage(e);
+                        if (!isMentionMenuOpen) {
+                          handleSendMessage(e);
+                        }
                       }
                     }}
                   />
+                  {isMentionMenuOpen ? (
+                    <div className="absolute bottom-16 left-16 z-30 w-64 rounded-2xl border border-white/15 bg-slate-950/95 p-2 shadow-2xl backdrop-blur">
+                      {mentionSuggestions.map((candidate, index) => (
+                        <button
+                          key={candidate.pubKey}
+                          type="button"
+                          onClick={() => applyMentionSuggestion(candidate)}
+                          className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm transition-all ${
+                            mentionSelectionIndex === index
+                              ? 'bg-accent/20 text-white'
+                              : 'text-text-muted hover:bg-white/10 hover:text-white'
+                          }`}
+                        >
+                          <span className="truncate">{candidate.displayName}</span>
+                          <span className="ml-2 font-mono text-[11px] text-accent">@{candidate.handle}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
 
                   {!messageInput.trim() && !isUploading && (
                     <button
@@ -1486,7 +1814,7 @@ export const Chat: React.FC = () => {
                   <button
                     type="submit"
                     disabled={isUploading}
-                    className="btn-premium w-12 h-12 rounded-2xl flex-shrink-0"
+                    className="btn-premium h-11 w-11 rounded-2xl flex-shrink-0 sm:h-12 sm:w-12"
                     aria-label="Send message"
                   >
                     <Send className="w-5 h-5" />
@@ -1494,11 +1822,17 @@ export const Chat: React.FC = () => {
                 ) : null}
               </form>
             </div>
+            {userIdentityModalVisible && (
+              <UserIdentityModal
+                pubKey={selectedIdentityPubKey}
+                onClose={() => setUserIdentityModalVisible(false)}
+              />
+            )}
           </>
         ) : activeGroup ? (
           <>
-            <header className="h-20 flex-shrink-0 premium-glass border-b border-white/5 flex items-center justify-between px-6 z-20">
-              <div className="flex items-center gap-4">
+            <header className="premium-glass z-20 flex min-h-20 flex-shrink-0 items-center justify-between border-b border-white/5 px-4 py-3 sm:px-6">
+              <div className="flex min-w-0 items-center gap-3 sm:gap-4">
                 <button
                   className="md:hidden p-2 -ml-2 text-text-muted hover:text-white"
                   onClick={() => setActiveGroup(null)}
@@ -1527,7 +1861,7 @@ export const Chat: React.FC = () => {
               </div>
             </header>
 
-            <div className="px-6 pt-4">
+            <div className="px-4 pt-3 sm:px-6 sm:pt-4">
               <div className="flex flex-wrap gap-2">
                 {activeGroup.role !== 'owner' ? (
                   <button
@@ -1554,7 +1888,7 @@ export const Chat: React.FC = () => {
             <div className="grid flex-1 overflow-hidden lg:grid-cols-[minmax(0,1fr)_320px]">
               <div className="flex min-h-0 flex-col">
                 {activeGroupId && (queuedGroupEvents?.length ?? 0) > 0 ? (
-                  <div className="mx-6 mt-4 rounded-2xl border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm text-amber-100">
+                  <div className="mx-4 mt-3 rounded-2xl border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm text-amber-100 sm:mx-6 sm:mt-4">
                     <div className="flex items-center gap-2 font-medium">
                       {connectionStatus === 'connected' ? <Clock3 className="h-4 w-4" /> : <WifiOff className="h-4 w-4" />}
                       {queuedGroupEvents?.length} queued group event{queuedGroupEvents?.length === 1 ? '' : 's'}
@@ -1567,7 +1901,7 @@ export const Chat: React.FC = () => {
                   </div>
                 ) : null}
                 {activeCollectionSync && activeCollectionSync.state !== 'synced' ? (
-                  <div className={`mx-6 mt-4 rounded-2xl border px-4 py-3 text-sm ${
+                  <div className={`mx-4 mt-3 rounded-2xl border px-4 py-3 text-sm sm:mx-6 sm:mt-4 ${
                     activeCollectionSync.state === 'error'
                       ? 'border-red-400/20 bg-red-400/10 text-red-100'
                       : 'border-amber-300/20 bg-amber-300/10 text-amber-100'
@@ -1588,7 +1922,7 @@ export const Chat: React.FC = () => {
                 ) : null}
                 <div
                   ref={messageListRef}
-                  className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar bg-black/10"
+                  className="flex-1 overflow-y-auto bg-black/10 p-3 space-y-4 custom-scrollbar sm:p-6 sm:space-y-6"
                   role="log"
                   aria-live="polite"
                   aria-label={`Messages in ${activeGroup.title}`}
@@ -1623,9 +1957,10 @@ export const Chat: React.FC = () => {
                           isMine={msg.senderPublicKey === myPublicKey}
                           isGroupMessage
                           downloadFile={downloadFile}
-                          onEdit={handleEditMessage}
+                          onEdit={handleInitEdit}
                           onDelete={handleDeleteMessage}
-                          onReact={handleReactToMessage}
+                          onReact={handleReaction}
+                          onMentionClick={handleMentionClick}
                         />
                         </div>
                       </React.Fragment>
@@ -1640,10 +1975,10 @@ export const Chat: React.FC = () => {
                   <div ref={messagesEndRef} />
                 </div>
 
-                <div className="p-6 bg-transparent border-t border-white/5 premium-glass">
-                  <form onSubmit={handleSendMessage} className="flex items-end gap-3 max-w-5xl mx-auto">
+                <div className="premium-glass border-t border-white/5 bg-transparent p-3 sm:p-6">
+                  <form onSubmit={handleSendMessage} className="mx-auto flex max-w-5xl items-end gap-2 sm:gap-3">
                     <input type="file" className="hidden" ref={fileInputRef} onChange={handleFileChange} />
-                    <div className="flex-1 flex items-end gap-2 bg-white/5 border border-white/10 rounded-2xl p-2 focus-within:border-accent/40 focus-within:bg-white/10 transition-all">
+                    <div className="relative flex flex-1 items-end gap-2 rounded-2xl border border-white/10 bg-white/5 p-2 transition-all focus-within:border-accent/40 focus-within:bg-white/10">
                       <button
                         type="button"
                         onClick={() => fileInputRef.current?.click()}
@@ -1658,18 +1993,40 @@ export const Chat: React.FC = () => {
                         value={messageInput}
                         onChange={(e) => {
                           const nextValue = e.target.value;
-                          setDraftOverrides((current) => activeThreadId ? { ...current, [activeThreadId]: nextValue } : current);
+                          handleComposerChange(nextValue, e.target.selectionStart ?? nextValue.length);
                         }}
                         placeholder="Message the group..."
-                        className="flex-1 bg-transparent border-none focus:ring-0 resize-none min-h-[44px] max-h-32 px-2 py-2.5 text-[15px] outline-none"
+                        className="min-h-[44px] max-h-32 flex-1 resize-none border-none bg-transparent px-2 py-2.5 text-[15px] outline-none focus:ring-0"
                         aria-label="Group message input"
                         onKeyDown={(e) => {
+                          handleComposerKeyDown(e);
                           if (e.key === 'Enter' && !e.shiftKey) {
                             e.preventDefault();
-                            void handleSendMessage(e);
+                            if (!isMentionMenuOpen) {
+                              void handleSendMessage(e);
+                            }
                           }
                         }}
                       />
+                      {isMentionMenuOpen ? (
+                        <div className="absolute bottom-16 left-16 z-30 w-64 rounded-2xl border border-white/15 bg-slate-950/95 p-2 shadow-2xl backdrop-blur">
+                          {mentionSuggestions.map((candidate, index) => (
+                            <button
+                              key={candidate.pubKey}
+                              type="button"
+                              onClick={() => applyMentionSuggestion(candidate)}
+                              className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm transition-all ${
+                                mentionSelectionIndex === index
+                                  ? 'bg-accent/20 text-white'
+                                  : 'text-text-muted hover:bg-white/10 hover:text-white'
+                              }`}
+                            >
+                              <span className="truncate">{candidate.displayName}</span>
+                              <span className="ml-2 font-mono text-[11px] text-accent">@{candidate.handle}</span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
                       {!messageInput.trim() && !isUploading && (
                         <button
                           type="button"
@@ -1686,7 +2043,7 @@ export const Chat: React.FC = () => {
                       <button
                         type="submit"
                         disabled={isUploading}
-                        className="btn-premium w-12 h-12 rounded-2xl flex-shrink-0"
+                        className="btn-premium h-11 w-11 rounded-2xl flex-shrink-0 sm:h-12 sm:w-12"
                         aria-label="Send group message"
                       >
                         <Send className="w-5 h-5" />
@@ -1788,10 +2145,16 @@ export const Chat: React.FC = () => {
                 </div>
               </aside>
             </div>
+            {userIdentityModalVisible && (
+              <UserIdentityModal
+                pubKey={selectedIdentityPubKey}
+                onClose={() => setUserIdentityModalVisible(false)}
+              />
+            )}
           </>
         ) : activeChannel ? (
           <>
-            <header className="h-20 flex-shrink-0 premium-glass border-b border-white/5 flex items-center justify-between px-6 z-20">
+            <header className="premium-glass z-20 flex min-h-20 flex-shrink-0 items-center justify-between border-b border-white/5 px-4 py-3 sm:px-6">
               <div className="flex items-center gap-4">
                 <button
                   className="md:hidden p-2 -ml-2 text-text-muted hover:text-white"
@@ -1853,7 +2216,7 @@ export const Chat: React.FC = () => {
                 ) : null}
                 <div
                   ref={messageListRef}
-                  className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar bg-black/10"
+                  className="flex-1 overflow-y-auto bg-black/10 p-3 space-y-4 custom-scrollbar sm:p-6 sm:space-y-6"
                   role="log"
                   aria-live="polite"
                   aria-label={`Posts in ${activeChannel.title}`}
@@ -1888,12 +2251,13 @@ export const Chat: React.FC = () => {
                             isMine={msg.senderPublicKey === myPublicKey}
                             isGroupMessage
                             downloadFile={downloadFile}
-                            onEdit={handleEditMessage}
+                            onEdit={handleInitEdit}
                             onDelete={handleDeleteMessage}
-                            onReact={handleReactToMessage}
+                            onReact={handleReaction}
                             canPin={canPinChannelPosts}
                             isPinned={activeChannel?.pinnedMsgId === msg.msgId}
                             onPin={handleToggleChannelPin}
+                            onMentionClick={handleMentionClick}
                           />
                         </div>
                       </React.Fragment>
@@ -1912,11 +2276,11 @@ export const Chat: React.FC = () => {
                   <div ref={messagesEndRef} />
                 </div>
 
-                <div className="p-6 bg-transparent border-t border-white/5 premium-glass">
+                <div className="premium-glass border-t border-white/5 bg-transparent p-3 sm:p-6">
                   {canPostInChannel ? (
-                    <form onSubmit={handleSendMessage} className="flex items-end gap-3 max-w-5xl mx-auto">
+                    <form onSubmit={handleSendMessage} className="mx-auto flex max-w-5xl items-end gap-2 sm:gap-3">
                       <input type="file" className="hidden" ref={fileInputRef} onChange={handleFileChange} />
-                      <div className="flex-1 flex items-end gap-2 bg-white/5 border border-white/10 rounded-2xl p-2 focus-within:border-violet-300/40 focus-within:bg-white/10 transition-all">
+                      <div className="relative flex flex-1 items-end gap-2 rounded-2xl border border-white/10 bg-white/5 p-2 transition-all focus-within:border-violet-300/40 focus-within:bg-white/10">
                         <button
                           type="button"
                           onClick={() => fileInputRef.current?.click()}
@@ -1931,18 +2295,40 @@ export const Chat: React.FC = () => {
                           value={messageInput}
                           onChange={(e) => {
                             const nextValue = e.target.value;
-                            setDraftOverrides((current) => activeThreadId ? { ...current, [activeThreadId]: nextValue } : current);
+                            handleComposerChange(nextValue, e.target.selectionStart ?? nextValue.length);
                           }}
                           placeholder="Publish an update..."
-                          className="flex-1 bg-transparent border-none focus:ring-0 resize-none min-h-[44px] max-h-32 px-2 py-2.5 text-[15px] outline-none"
+                          className="min-h-[44px] max-h-32 flex-1 resize-none border-none bg-transparent px-2 py-2.5 text-[15px] outline-none focus:ring-0"
                           aria-label="Channel post input"
                           onKeyDown={(e) => {
+                            handleComposerKeyDown(e);
                             if (e.key === 'Enter' && !e.shiftKey) {
                               e.preventDefault();
-                              void handleSendMessage(e);
+                              if (!isMentionMenuOpen) {
+                                void handleSendMessage(e);
+                              }
                             }
                           }}
                         />
+                        {isMentionMenuOpen ? (
+                          <div className="absolute bottom-16 left-16 z-30 w-64 rounded-2xl border border-white/15 bg-slate-950/95 p-2 shadow-2xl backdrop-blur">
+                            {mentionSuggestions.map((candidate, index) => (
+                              <button
+                                key={candidate.pubKey}
+                                type="button"
+                                onClick={() => applyMentionSuggestion(candidate)}
+                                className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm transition-all ${
+                                  mentionSelectionIndex === index
+                                    ? 'bg-accent/20 text-white'
+                                    : 'text-text-muted hover:bg-white/10 hover:text-white'
+                                }`}
+                              >
+                                <span className="truncate">{candidate.displayName}</span>
+                                <span className="ml-2 font-mono text-[11px] text-accent">@{candidate.handle}</span>
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
                         {!messageInput.trim() && !isUploading && (
                           <button
                             type="button"
@@ -1959,7 +2345,7 @@ export const Chat: React.FC = () => {
                         <button
                           type="submit"
                           disabled={isUploading}
-                          className="btn-premium w-12 h-12 rounded-2xl flex-shrink-0"
+                          className="btn-premium h-11 w-11 rounded-2xl flex-shrink-0 sm:h-12 sm:w-12"
                           aria-label="Publish channel post"
                         >
                           <Send className="w-5 h-5" />
@@ -2182,6 +2568,12 @@ export const Chat: React.FC = () => {
           </div>
         )}
       </div>
+      {viewedIdentityPubKey && (
+        <UserIdentityModal 
+          pubKey={viewedIdentityPubKey} 
+          onClose={() => setViewedIdentityPubKey(null)} 
+        />
+      )}
     </div>
   );
 };

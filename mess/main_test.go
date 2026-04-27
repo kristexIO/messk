@@ -471,7 +471,7 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 		"X-Content-Type-Options": "nosniff",
 		"X-Frame-Options":        "DENY",
 		"Referrer-Policy":        "no-referrer",
-		"Permissions-Policy":     "camera=(), microphone=(), geolocation=()",
+		"Permissions-Policy":     "camera=(self), microphone=(self), geolocation=()",
 	}
 
 	for header, want := range expected {

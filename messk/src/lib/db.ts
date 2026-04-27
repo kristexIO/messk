@@ -1,6 +1,7 @@
 import Dexie, { type Table } from 'dexie';
 import { randomBytes, secretbox } from 'tweetnacl';
 import { decodeBase64, encodeBase64 } from 'tweetnacl-util';
+import { parseRichTextMessage } from './message-format';
 
 export interface MyKeyPair {
   id?: number;
@@ -33,6 +34,8 @@ export interface Contact {
   draft?: string;
   archived?: boolean;
   mutedUntil?: number;
+  verifiedIdentityFingerprint?: string;
+  verifiedIdentityAt?: number;
 }
 
 export interface ThreadStat {
@@ -106,6 +109,16 @@ export interface OutgoingGroupEvent {
   targetMsgId?: string;
   reaction?: string | null;
   createdAt: number;
+}
+
+export interface OutgoingDirectMessage {
+  id: string;
+  recipientPubKey: string;
+  senderPubKey: string;
+  data: string;
+  createdAt: number;
+  lastAttemptAt?: number;
+  attempts: number;
 }
 
 export interface CallHistoryEntry {
@@ -427,6 +440,7 @@ export class MessengerDatabase extends Dexie {
   channelActivity!: Table<ChannelActivityEntry, string>;
   groupInvites!: Table<GroupInvite, string>;
   outgoingGroupEvents!: Table<OutgoingGroupEvent, string>;
+  outgoingDirectMessages!: Table<OutgoingDirectMessage, string>;
   callHistory!: Table<CallHistoryEntry, string>;
   groupSenderKeys!: Table<GroupSenderKey, string>;
   sessions!: Table<Session, string>;
@@ -583,6 +597,23 @@ export class MessengerDatabase extends Dexie {
       prekeys: '++id, &publicKey'
     });
 
+    this.version(14).stores({
+      keypairs: '++id, &publicKey',
+      messages: '++id, &msgId, peerPublicKey, timestamp, [peerPublicKey+timestamp]',
+      contacts: '&pubKey, lastMessageAt',
+      threadStats: '&threadId, unreadCount, lastMessageAt',
+      groupThreads: '&id, lastActivityAt, createdAt, title',
+      channelThreads: '&id, lastActivityAt, createdAt, title',
+      channelActivity: '&id, channelId, createdAt, [channelId+createdAt], type',
+      groupInvites: '&id, groupId, createdAt',
+      outgoingGroupEvents: '&id, groupId, createdAt, type',
+      outgoingDirectMessages: '&id, recipientPubKey, createdAt, lastAttemptAt',
+      callHistory: '&id, peerPubKey, createdAt, outcome',
+      groupSenderKeys: '&id, groupId, senderPubKey, createdAt',
+      sessions: '&peerPublicKey',
+      prekeys: '++id, &publicKey'
+    });
+
     this.table('keypairs').hook('creating', (_primKey, obj) => encryptFields(obj, KEYPAIR_SECRET_FIELDS));
     this.table('keypairs').hook('updating', (mods) => encryptFields(mods, KEYPAIR_SECRET_FIELDS));
     this.table('keypairs').hook('reading', (obj) => decryptFields(obj, KEYPAIR_SECRET_FIELDS));
@@ -621,7 +652,7 @@ function previewThreadMessage(message: Pick<StoredMessage, 'text' | 'deletedAt'>
   if (message.text.startsWith('{"type":"voice"')) {
     return 'Voice message';
   }
-  return message.text;
+  return parseRichTextMessage(message.text).text;
 }
 
 async function getCurrentIdentityPublicKey(database: MessengerDatabase = db) {

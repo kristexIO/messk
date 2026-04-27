@@ -20,14 +20,45 @@ export class WebRTCManager {
     this.onIceConnectionStateChange = onIceConnectionStateChange;
   }
 
+  private async requestMedia(isVideo: boolean) {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('This browser does not allow microphone or camera access for calls.');
+    }
+
+    const preferredConstraints: MediaStreamConstraints = {
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: isVideo
+        ? {
+            facingMode: 'user',
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          }
+        : false,
+    };
+
+    try {
+      return await navigator.mediaDevices.getUserMedia(preferredConstraints);
+    } catch {
+      if (!isVideo) {
+        return navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      }
+      try {
+        return await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+      } catch {
+        return navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      }
+    }
+  }
+
   async startCall(recipientPubKey: string, isVideo: boolean) {
     this.peerConnection = this.createPeerConnection(recipientPubKey);
     this.remoteDescriptionReady = false;
     
-    this.localStream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: isVideo ? { facingMode: 'user' } : false
-    });
+    this.localStream = await this.requestMedia(isVideo);
 
     this.localStream.getTracks().forEach(track => {
       if (this.localStream) this.peerConnection?.addTrack(track, this.localStream);
@@ -48,10 +79,7 @@ export class WebRTCManager {
     this.peerConnection = this.createPeerConnection(senderPubKey);
     this.remoteDescriptionReady = false;
     
-    this.localStream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: isVideo ? { facingMode: 'user' } : false
-    });
+    this.localStream = await this.requestMedia(isVideo);
 
     this.localStream.getTracks().forEach(track => {
       if (this.localStream) this.peerConnection?.addTrack(track, this.localStream);
@@ -98,7 +126,12 @@ export class WebRTCManager {
     this.pendingCandidates = [];
     this.remoteDescriptionReady = false;
     const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:global.stun.twilio.com:3478?transport=udp' },
+      ],
+      iceCandidatePoolSize: 8,
     });
 
     pc.onicecandidate = (event) => {

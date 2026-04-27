@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { migrateLocalDataToEncryptedAtRest, persistIdentityKeyPair, setVaultKey, switchActiveDatabase } from '../lib/db';
 
 export type Theme = 'dark' | 'light' | 'cyberpunk' | 'forest';
+export type DesignStyle = 'glass' | 'neumorph';
 
 export type CollectionSyncStatus = {
   state: 'idle' | 'syncing' | 'synced' | 'error';
@@ -19,6 +20,7 @@ interface AppState {
   // Profile
   nickname: string | null;
   avatar: string | null; // Base64 avatar
+  username: string | null;
   
   // UI State
   typingStatus: Record<string, boolean>;
@@ -28,10 +30,11 @@ interface AppState {
   isLocked: boolean;
   pinHash: string | null;
   theme: Theme;
+  designStyle: DesignStyle;
 
   // Actions
   setKeys: (publicKey: string, secretKey: string) => void;
-  setProfile: (nickname: string, avatar: string | null) => void;
+  setProfile: (nickname: string, avatar: string | null, username: string | null) => void;
   setActivePeer: (peerKey: string | null) => void;
   setActiveGroup: (groupId: string | null) => void;
   setActiveChannel: (channelId: string | null) => void;
@@ -43,6 +46,7 @@ interface AppState {
   setPinHash: (pinHash: string | null) => void;
   lockApp: () => void;
   setTheme: (theme: Theme) => void;
+  setDesignStyle: (designStyle: DesignStyle) => void;
   logout: () => void;
 }
 
@@ -57,8 +61,19 @@ const loadSettings = () => {
 };
 
 const savedSettings = loadSettings();
+const loadProfileForKey = (publicKey: string): { nickname?: string | null; avatar?: string | null; username?: string | null } | null => {
+  const profiles = loadSettings().profiles;
+  if (!profiles || typeof profiles !== 'object') {
+    return null;
+  }
+  const profile = profiles[publicKey];
+  if (!profile || typeof profile !== 'object') {
+    return null;
+  }
+  return profile;
+};
 
-export const useAppStore = create<AppState>((set) => ({
+export const useAppStore = create<AppState>((set, get) => ({
   myPublicKey: null,
   mySecretKey: null,
   activePeerKey: null,
@@ -67,6 +82,7 @@ export const useAppStore = create<AppState>((set) => ({
   
   nickname: savedSettings.nickname || null,
   avatar: savedSettings.avatar || null,
+  username: savedSettings.username || null,
   
   typingStatus: {},
   connectionStatus: 'offline',
@@ -75,11 +91,19 @@ export const useAppStore = create<AppState>((set) => ({
   isLocked: false,
   pinHash: savedSettings.pinHash || null,
   theme: savedSettings.theme || 'dark',
+  designStyle: savedSettings.designStyle || 'glass',
 
   setKeys: (publicKey, secretKey) => {
     switchActiveDatabase(publicKey);
     setVaultKey(secretKey);
-    set({ myPublicKey: publicKey, mySecretKey: secretKey });
+    const savedProfile = loadProfileForKey(publicKey);
+    set({
+      myPublicKey: publicKey,
+      mySecretKey: secretKey,
+      nickname: savedProfile?.nickname ?? null,
+      avatar: savedProfile?.avatar ?? null,
+      username: savedProfile?.username ?? null,
+    });
     void persistIdentityKeyPair(publicKey, secretKey).catch((error) => {
       console.error('Failed to persist current identity key pair', error);
     });
@@ -88,12 +112,23 @@ export const useAppStore = create<AppState>((set) => ({
     });
   },
   
-  setProfile: (nickname, avatar) => {
-    set({ nickname, avatar });
+  setProfile: (nickname, avatar, username) => {
+    const publicKey = get().myPublicKey;
+    const settings = loadSettings();
+    const profiles = publicKey
+      ? {
+          ...(settings.profiles ?? {}),
+          [publicKey]: { nickname, avatar, username },
+        }
+      : settings.profiles;
+
+    set({ nickname, avatar, username });
     localStorage.setItem('messenger_settings', JSON.stringify({
-      ...loadSettings(),
+      ...settings,
       nickname,
-      avatar
+      avatar,
+      username,
+      profiles,
     }));
   },
   
@@ -133,6 +168,15 @@ export const useAppStore = create<AppState>((set) => ({
       theme
     }));
   },
+
+  setDesignStyle: (designStyle) => {
+    set({ designStyle });
+    document.documentElement.setAttribute('data-style', designStyle);
+    localStorage.setItem('messenger_settings', JSON.stringify({
+      ...loadSettings(),
+      designStyle
+    }));
+  },
   
   logout: () => {
     switchActiveDatabase(null);
@@ -157,4 +201,5 @@ export const useAppStore = create<AppState>((set) => ({
 // Initialize theme on load
 if (typeof document !== 'undefined') {
   document.documentElement.setAttribute('data-theme', savedSettings.theme || 'dark');
+  document.documentElement.setAttribute('data-style', savedSettings.designStyle || 'glass');
 }

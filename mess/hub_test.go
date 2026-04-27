@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -51,6 +52,28 @@ func TestRouteToLocalDeliversMessageToRecipientAndSenderSessions(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("sender mirror did not receive sync copy")
+	}
+}
+
+func TestSendServerAckWritesAckEnvelope(t *testing.T) {
+	client := newTestClient("sender")
+	client.hub = NewHub(nil, nil, nil)
+
+	client.sendServerAck(Envelope{
+		Type:  "message",
+		MsgID: "ack-1",
+	})
+
+	select {
+	case got := <-client.send:
+		if !strings.Contains(string(got), `"type":"server_ack"`) {
+			t.Fatalf("expected server_ack envelope, got %s", string(got))
+		}
+		if !strings.Contains(string(got), `"msg_id":"ack-1"`) {
+			t.Fatalf("expected ack msg_id, got %s", string(got))
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("server ack was not sent")
 	}
 }
 

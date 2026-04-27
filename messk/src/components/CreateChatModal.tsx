@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { MessageSquare, UserPlus, X } from 'lucide-react';
+import { socketManager } from '../lib/socket';
+import { toast } from 'react-hot-toast';
 
 type CreateChatModalProps = {
   onClose: () => void;
@@ -13,13 +15,28 @@ export const CreateChatModal: React.FC<CreateChatModalProps> = ({ onClose, onCre
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!publicKey.trim()) {
+    const inputStr = publicKey.trim();
+    if (!inputStr) {
       return;
     }
 
     setIsSubmitting(true);
     try {
-      const didOpen = await onCreate(publicKey);
+      let targetPubKey = inputStr;
+      
+      // If it looks like a username (starts with @ or no spaces and short), try to resolve it
+      if (inputStr.startsWith('@') || (inputStr.length <= 32 && !inputStr.includes(' ') && !inputStr.endsWith('='))) {
+        const resolved = await socketManager.resolveUsername(inputStr);
+        if (resolved && resolved.pubKey) {
+          targetPubKey = resolved.pubKey;
+        } else if (inputStr.startsWith('@')) {
+          toast.error('User not found by that handle.');
+          setIsSubmitting(false);
+          return;
+        }
+      }
+
+      const didOpen = await onCreate(targetPubKey);
       if (didOpen) {
         onClose();
       }
@@ -29,8 +46,8 @@ export const CreateChatModal: React.FC<CreateChatModalProps> = ({ onClose, onCre
   };
 
   const modal = (
-    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/80 px-4 backdrop-blur">
-      <div className="w-full max-w-2xl rounded-[32px] border border-white/10 bg-slate-950/95 shadow-[0_30px_100px_rgba(0,0,0,0.45)]">
+    <div className="fixed inset-0 z-[120] flex items-end justify-center bg-slate-950/80 px-3 py-3 backdrop-blur sm:items-center sm:px-4">
+      <div className="max-h-[100dvh] w-full max-w-2xl overflow-y-auto rounded-[28px] border border-white/10 bg-slate-950/95 shadow-[0_30px_100px_rgba(0,0,0,0.45)] sm:rounded-[32px]">
         <div className="flex items-center justify-between border-b border-white/10 px-6 py-5">
           <div>
             <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-accent/80">Chats</div>
@@ -46,7 +63,7 @@ export const CreateChatModal: React.FC<CreateChatModalProps> = ({ onClose, onCre
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-6 px-6 py-6">
+        <form onSubmit={handleSubmit} className="space-y-6 px-4 py-5 sm:px-6 sm:py-6">
           <div className="rounded-[24px] border border-white/10 bg-gradient-to-br from-white/[0.04] to-white/[0.02] p-5 sm:p-6">
             <div className="flex items-start gap-4">
               <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-accent/20 bg-accent/10 text-accent">
@@ -61,12 +78,12 @@ export const CreateChatModal: React.FC<CreateChatModalProps> = ({ onClose, onCre
             </div>
 
             <label className="mt-5 block text-[11px] font-semibold uppercase tracking-[0.18em] text-text-muted">
-              Public key
+              Public key or @username
             </label>
             <textarea
               value={publicKey}
               onChange={(event) => setPublicKey(event.target.value)}
-              placeholder="Paste the full Base64 public key..."
+              placeholder="Paste the full Base64 public key or type @handle..."
               rows={4}
               className="mt-2 w-full resize-none rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm leading-6 outline-none transition-all focus:border-accent/40"
             />

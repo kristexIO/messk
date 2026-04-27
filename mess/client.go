@@ -107,6 +107,8 @@ type Envelope struct {
 	Reaction        string          `json:"reaction,omitempty"`
 	PreKeys         []string        `json:"prekeys,omitempty"` // Р вЂќР В»РЎРЏ upload_prekeys
 	PreKey          string          `json:"prekey,omitempty"`  // Р вЂќР В»РЎРЏ Р С•РЎвЂљР Р†Р ВµРЎвЂљР В° Р Р…Р В° get_prekey
+	SignedPreKey    string          `json:"signed_prekey,omitempty"`
+	SignedPreKeySig string          `json:"signed_prekey_sig,omitempty"`
 }
 
 func (c *Client) readPump() {
@@ -226,19 +228,29 @@ func (c *Client) readPump() {
 					RecipientPubKey: env.RecipientPubKey,
 					Payload:         normalizedMessage,
 				}
-			} else if env.Type == "upload_prekeys" && len(env.PreKeys) > 0 {
-				if !areValidPreKeys(env.PreKeys) {
-					logEvent("ws_invalid_prekeys", map[string]any{
-						"pub_key": c.PubKey,
-						"count":   len(env.PreKeys),
-					})
-					continue
+				c.sendServerAck(env)
+			} else if env.Type == "upload_prekeys" {
+				if len(env.PreKeys) > 0 {
+					if !areValidPreKeys(env.PreKeys) {
+						logEvent("ws_invalid_prekeys", map[string]any{
+							"pub_key": c.PubKey,
+							"count":   len(env.PreKeys),
+						})
+						continue
+					}
 				}
 				go func() {
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer cancel()
-					if err := c.hub.db.SavePreKeys(ctx, c.PubKey, env.PreKeys); err != nil {
-						log.Printf("Error saving prekeys for %s: %v", c.PubKey, err)
+					if len(env.PreKeys) > 0 {
+						if err := c.hub.db.SavePreKeys(ctx, c.PubKey, env.PreKeys); err != nil {
+							log.Printf("Error saving prekeys for %s: %v", c.PubKey, err)
+						}
+					}
+					if env.SignedPreKey != "" && env.SignedPreKeySig != "" {
+						if err := c.hub.db.SaveSignedPreKey(ctx, c.PubKey, env.SignedPreKey, env.SignedPreKeySig); err != nil {
+							log.Printf("Error saving signed prekey for %s: %v", c.PubKey, err)
+						}
 					}
 				}()
 			} else if env.Type == "get_prekey" && env.RecipientPubKey != "" {
@@ -256,11 +268,17 @@ func (c *Client) readPump() {
 					if err != nil {
 						log.Printf("Error getting prekey for %s: %v", env.RecipientPubKey, err)
 					}
+					signedPreKey, signedPreKeySig, err := c.hub.db.GetSignedPreKey(ctx, env.RecipientPubKey)
+					if err != nil {
+						log.Printf("Error getting signed prekey for %s: %v", env.RecipientPubKey, err)
+					}
 
 					res := Envelope{
 						Type:            "prekey_bundle",
 						RecipientPubKey: env.RecipientPubKey,
 						PreKey:          preKey,
+						SignedPreKey:    signedPreKey,
+						SignedPreKeySig: signedPreKeySig,
 					}
 					resJSON, _ := json.Marshal(res)
 					select {
@@ -270,6 +288,27 @@ func (c *Client) readPump() {
 				}()
 			}
 		}
+	}
+}
+
+func (c *Client) sendServerAck(env Envelope) {
+	if env.MsgID == "" {
+		return
+	}
+	ack, err := json.Marshal(map[string]string{
+		"type":        "server_ack",
+		"msg_id":      env.MsgID,
+		"ack_type":    env.Type,
+		"server_time": time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return
+	}
+	select {
+	case <-c.ctx.Done():
+	case c.send <- ack:
+	default:
+		c.hub.dropClient(c, "slow server ack")
 	}
 }
 
