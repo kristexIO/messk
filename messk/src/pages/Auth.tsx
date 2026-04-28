@@ -1,11 +1,13 @@
 import React, { useState } from 'react';
 import { generateSeedPhrase, deriveKeysFromPhraseAsync, isValidSeedPhrase } from '../lib/seed';
 import { useAppStore } from '../store';
+import type { Language } from '../store';
 import { KeyRound, ShieldCheck, AtSign, Loader2, Copy, Check, ChevronRight, Camera, ArrowLeft, UserRound } from 'lucide-react';
 import { prepareDatabaseForIdentity } from '../lib/db';
 import { prepareAvatarDataUrl } from '../lib/images';
 import { appConfig } from '../lib/config';
 import { fetchWithTimeout } from '../lib/http';
+import { useI18n } from '../lib/i18n';
 
 type RemoteProfile = {
   nickname?: string;
@@ -25,7 +27,7 @@ async function loadRemoteProfile(pubKey: string): Promise<RemoteProfile | null> 
 }
 
 export const Auth: React.FC = () => {
-  const [mode, setMode] = useState<'select' | 'generate' | 'import' | 'profile'>('select');
+  const [mode, setMode] = useState<'select' | 'generate' | 'verify' | 'import' | 'profile'>('select');
   const [phrase, setPhrase] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -35,9 +37,26 @@ export const Auth: React.FC = () => {
   const [profileSource, setProfileSource] = useState<'generate' | 'import'>('generate');
   const [profileNickname, setProfileNickname] = useState('');
   const [profileAvatar, setProfileAvatar] = useState('');
+  const [verificationIndexes, setVerificationIndexes] = useState<number[]>([]);
+  const [verificationInputs, setVerificationInputs] = useState<Record<number, string>>({});
+  const { t } = useI18n();
 
   const setKeys = useAppStore(state => state.setKeys);
   const setProfile = useAppStore(state => state.setProfile);
+  const language = useAppStore(state => state.language);
+  const setLanguage = useAppStore(state => state.setLanguage);
+  const languages: { id: Language; code: string; label: string }[] = [
+    { id: 'en', code: 'EN', label: t('english') },
+    { id: 'ru', code: 'RU', label: t('russian') },
+    { id: 'fr', code: 'FR', label: t('french') },
+    { id: 'de', code: 'DE', label: t('german') },
+  ];
+  const trustLabels: Record<Language, string[]> = {
+    en: ['E2EE', 'Local keys', 'No tracking'],
+    ru: ['E2EE', 'Ключи локально', 'Без трекинга'],
+    fr: ['E2EE', 'Cles locales', 'Sans suivi'],
+    de: ['E2EE', 'Lokale Schlussel', 'Kein Tracking'],
+  };
 
   const handleGenerate = async () => {
     setIsLoading(true);
@@ -51,6 +70,34 @@ export const Auth: React.FC = () => {
     navigator.clipboard.writeText(phrase);
     setHasCopied(true);
     setTimeout(() => setHasCopied(false), 2000);
+  };
+
+  const beginSeedVerification = () => {
+    const words = phrase.trim().split(/\s+/);
+    if (words.length !== 12) {
+      setError(t('invalidSeed'));
+      return;
+    }
+    const indexes = [...Array(words.length).keys()]
+      .sort(() => Math.random() - 0.5)
+      .slice(0, 3)
+      .sort((a, b) => a - b);
+    setVerificationIndexes(indexes);
+    setVerificationInputs({});
+    setError('');
+    setMode('verify');
+  };
+
+  const completeSeedVerification = () => {
+    const words = phrase.trim().toLowerCase().split(/\s+/);
+    const isCorrect = verificationIndexes.every((index) =>
+      (verificationInputs[index] ?? '').trim().toLowerCase() === words[index]
+    );
+    if (!isCorrect) {
+      setError(t('verifyError'));
+      return;
+    }
+    continueToProfile(phrase, 'generate');
   };
 
   const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -68,7 +115,7 @@ export const Auth: React.FC = () => {
   const continueToProfile = (seedPhrase: string, source: 'generate' | 'import') => {
     const normalizedPhrase = seedPhrase.trim().toLowerCase().replace(/\s+/g, ' ');
     if (!isValidSeedPhrase(normalizedPhrase)) {
-      setError('Invalid seed phrase. Please check your 12 words.');
+      setError(t('invalidSeed'));
       return;
     }
     setPendingPhrase(normalizedPhrase);
@@ -81,7 +128,7 @@ export const Auth: React.FC = () => {
     setIsLoading(true);
     try {
       if (!isValidSeedPhrase(seedPhrase)) {
-        setError('Invalid seed phrase. Please check your 12 words.');
+        setError(t('invalidSeed'));
         return;
       }
       const keys = await deriveKeysFromPhraseAsync(seedPhrase);
@@ -99,29 +146,48 @@ export const Auth: React.FC = () => {
         remoteProfile?.avatar?.trim() ||
         currentProfile.avatar ||
         null;
-      setProfile(nickname, avatar);
+      setProfile(nickname, avatar, currentProfile.username ?? null);
     } catch {
-      setError('Cryptographic derivation failed.');
+      setError(t('cryptoFailed'));
     } finally {
       setIsLoading(false);
     }
   };
 
   return (
-    <div className="min-h-[100dvh] w-full overflow-y-auto bg-gradient-to-br from-[#020617] via-[#0f172a] to-[#1e1b4b] px-4 py-6 sm:flex sm:items-center sm:justify-center sm:p-6">
+    <div className="auth-screen min-h-[100dvh] w-full overflow-y-auto bg-gradient-to-br from-[#020617] via-[#0f172a] to-[#1e1b4b] px-4 py-6 sm:flex sm:items-center sm:justify-center sm:p-6">
       {/* Background Decorative Blobs */}
       <div className="fixed top-[-10%] left-[-10%] w-[40%] h-[40%] bg-accent/10 rounded-full blur-[120px] pointer-events-none animate-pulse-slow" />
       <div className="fixed bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-500/10 rounded-full blur-[120px] pointer-events-none animate-pulse-slow" />
+      <div className="auth-language-switcher" aria-label={t('language')}>
+        {languages.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => setLanguage(item.id)}
+            className={`auth-language-pill ${language === item.id ? 'is-active' : ''}`}
+            title={item.label}
+          >
+            {item.code}
+          </button>
+        ))}
+      </div>
 
       {mode === 'select' && (
-        <div className="flex w-full max-w-md flex-col items-center rounded-[28px] premium-glass p-6 animate-in fade-in zoom-in duration-500 sm:rounded-[32px] sm:p-10">
+        <div className="auth-card flex w-full max-w-md flex-col items-center rounded-[28px] premium-glass p-6 animate-in fade-in zoom-in duration-500 sm:rounded-[32px] sm:p-10">
           <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-3xl border border-accent/30 bg-accent/20 shadow-[0_0_40px_var(--accent-glow)] sm:mb-8 sm:h-20 sm:w-20">
             <ShieldCheck className="h-8 w-8 text-accent sm:h-10 sm:w-10" />
           </div>
-          <h1 className="mb-3 text-center text-3xl font-bold tracking-tight sm:text-4xl">Messk</h1>
+          <h1 className="mb-3 text-center text-3xl font-bold tracking-tight sm:text-4xl">{t('authTitle')}</h1>
           <p className="mb-8 max-w-[280px] text-center text-sm leading-relaxed text-text-muted sm:mb-10">
-            Quantum-safe encryption for your most private conversations.
+            {t('authSubtitle')}
           </p>
+
+          <div className="trust-strip mb-8 grid w-full grid-cols-3 gap-2 text-center">
+            {trustLabels[language].map((label) => (
+              <div key={label} className="trust-chip">{label}</div>
+            ))}
+          </div>
 
           <div className="w-full space-y-4">
             <button
@@ -130,7 +196,7 @@ export const Auth: React.FC = () => {
               className="btn-premium w-full h-14 group"
             >
               {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <KeyRound className="w-5 h-5 group-hover:rotate-12 transition-transform" />}
-              Create Secure Identity
+              {t('createIdentity')}
             </button>
             
             <button
@@ -138,7 +204,7 @@ export const Auth: React.FC = () => {
               className="w-full h-14 rounded-2xl bg-white/5 border border-white/10 hover:bg-white/10 hover:border-white/20 transition-all flex items-center justify-center gap-3 font-medium text-text-main"
             >
               <AtSign className="w-5 h-5 text-text-muted" />
-              I have a seed phrase
+              {t('haveSeed')}
             </button>
           </div>
         </div>
@@ -148,11 +214,11 @@ export const Auth: React.FC = () => {
         <div className="w-full max-w-xl rounded-[28px] premium-glass p-5 animate-in slide-in-from-right-10 duration-500 sm:rounded-[32px] sm:p-10">
           <h2 className="mb-3 flex items-center gap-3 text-xl font-bold sm:text-2xl">
              <ShieldCheck className="text-accent" />
-             Back Up Your Phrase
+             {t('backupTitle')}
           </h2>
           <p className="text-text-muted mb-8 text-sm leading-relaxed">
-            These 12 words are the ONLY way to access your account. Write them down offline.
-            <span className="block mt-2 text-accent/80 font-medium">No one can recover this if lost.</span>
+            {t('backupDescription')}
+            <span className="block mt-2 text-accent/80 font-medium">{t('backupWarning')}</span>
           </p>
 
           <div className="group relative mb-8 rounded-2xl border border-white/5 bg-black/40 p-4 sm:p-6">
@@ -185,21 +251,74 @@ export const Auth: React.FC = () => {
               <Check className="absolute w-4 h-4 text-white opacity-0 peer-checked:opacity-100 transition-opacity pointer-events-none" />
             </div>
             <span className="text-xs text-text-muted leading-normal group-hover:text-text-main transition-colors">
-              I have written down the phrase and understand that without it my account is unrecoverable.
+              {t('phraseSaved')}
             </span>
           </label>
 
           <div className="flex gap-4">
             <button onClick={() => setMode('select')} className="px-6 py-3 rounded-2xl bg-white/5 hover:bg-white/10 transition-all font-medium">
-              Back
+              {t('back')}
             </button>
             <button 
-              onClick={() => continueToProfile(phrase, 'generate')}
+              onClick={beginSeedVerification}
               disabled={!agreedToSave || isLoading}
               className="btn-premium flex-1"
             >
               {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <ChevronRight className="w-5 h-5" />}
-              Finish Setup
+              {t('continue')}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {mode === 'verify' && (
+        <div className="w-full max-w-lg rounded-[28px] premium-glass p-5 animate-in fade-in zoom-in duration-500 sm:rounded-[32px] sm:p-10">
+          <h2 className="mb-3 flex items-center gap-3 text-xl font-bold sm:text-2xl">
+            <ShieldCheck className="text-accent" />
+            {t('verifyTitle')}
+          </h2>
+          <p className="text-text-muted mb-8 text-sm leading-relaxed">{t('verifyDescription')}</p>
+
+          <div className="space-y-4">
+            {verificationIndexes.map((index) => (
+              <div key={index} className="space-y-2">
+                <label className="text-xs font-semibold uppercase tracking-[0.18em] text-text-muted">
+                  {t('verifyWord', { number: index + 1 })}
+                </label>
+                <input
+                  type="text"
+                  value={verificationInputs[index] ?? ''}
+                  onChange={(event) => {
+                    setError('');
+                    setVerificationInputs((current) => ({
+                      ...current,
+                      [index]: event.target.value.toLowerCase().trim(),
+                    }));
+                  }}
+                  className="w-full rounded-2xl border border-white/10 bg-black/30 px-4 py-3 font-mono outline-none transition-all focus:border-accent/40"
+                />
+              </div>
+            ))}
+          </div>
+
+          {error ? (
+            <div className="text-red-400 text-xs mt-5 px-2 flex items-center gap-2">
+              <div className="w-1.5 h-1.5 bg-red-400 rounded-full animate-pulse" />
+              {error}
+            </div>
+          ) : null}
+
+          <div className="flex gap-4 mt-8">
+            <button onClick={() => setMode('generate')} className="px-6 py-3 rounded-2xl bg-white/5 hover:bg-white/10 transition-all font-medium">
+              {t('back')}
+            </button>
+            <button
+              onClick={completeSeedVerification}
+              disabled={verificationIndexes.some((index) => !(verificationInputs[index] ?? '').trim())}
+              className="btn-premium flex-1"
+            >
+              <ChevronRight className="w-5 h-5" />
+              {t('finishSetup')}
             </button>
           </div>
         </div>
@@ -209,10 +328,10 @@ export const Auth: React.FC = () => {
         <div className="w-full max-w-lg rounded-[28px] premium-glass p-5 animate-in slide-in-from-left-10 duration-500 sm:rounded-[32px] sm:p-10">
           <h2 className="mb-3 flex items-center gap-3 text-xl font-bold sm:text-2xl">
              <KeyRound className="text-accent" />
-             Restore Access
+             {t('restoreTitle')}
           </h2>
           <p className="text-text-muted mb-8 text-sm">
-            Enter your 12-word phrase to reconnect to your encrypted identity.
+            {t('restoreDescription')}
           </p>
 
           <textarea
@@ -234,7 +353,7 @@ export const Auth: React.FC = () => {
 
           <div className="flex gap-4 mt-8">
             <button onClick={() => setMode('select')} className="px-6 py-3 rounded-2xl bg-white/5 hover:bg-white/10 transition-all font-medium">
-              Cancel
+              {t('cancel')}
             </button>
             <button 
               onClick={() => continueToProfile(phrase.trim(), 'import')}
@@ -242,7 +361,7 @@ export const Auth: React.FC = () => {
               className="btn-premium flex-1"
             >
               {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : null}
-              Restore Identity
+              {t('restoreIdentity')}
             </button>
           </div>
         </div>
@@ -252,10 +371,10 @@ export const Auth: React.FC = () => {
         <div className="w-full max-w-xl rounded-[28px] premium-glass p-5 animate-in fade-in zoom-in duration-500 sm:rounded-[32px] sm:p-10">
           <div className="flex items-center gap-3 mb-3">
             <UserRound className="text-accent" />
-            <h2 className="text-2xl font-bold">Finish Your Profile</h2>
+            <h2 className="text-2xl font-bold">{t('finishProfile')}</h2>
           </div>
           <p className="text-text-muted mb-8 text-sm leading-relaxed">
-            One last step: choose how your secure identity should look inside chats.
+            {t('finishProfileDescription')}
           </p>
 
           <div className="flex flex-col gap-6 sm:flex-row sm:items-center">
@@ -274,16 +393,16 @@ export const Auth: React.FC = () => {
             </div>
 
             <div className="flex-1 space-y-2">
-              <label className="text-xs text-text-muted">Display name</label>
+              <label className="text-xs text-text-muted">{t('displayName')}</label>
               <input
                 type="text"
                 value={profileNickname}
                 onChange={(e) => setProfileNickname(e.target.value)}
-                placeholder="Choose a nickname"
+                placeholder={t('chooseNickname')}
                 className="w-full px-4 py-3 bg-black/30 rounded-2xl border border-white/10 focus:border-accent/40 outline-none transition-all"
               />
               <p className="text-xs text-text-muted">
-                You can change nickname and avatar later in Settings.
+                {t('profileHint')}
               </p>
             </div>
           </div>
@@ -301,7 +420,7 @@ export const Auth: React.FC = () => {
               className="px-6 py-3 rounded-2xl bg-white/5 hover:bg-white/10 transition-all font-medium flex items-center gap-2"
             >
               <ArrowLeft className="w-4 h-4" />
-              Back
+              {t('back')}
             </button>
             <button
               onClick={() => performLogin(pendingPhrase)}
@@ -309,7 +428,7 @@ export const Auth: React.FC = () => {
               className="btn-premium flex-1"
             >
               {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <ChevronRight className="w-5 h-5" />}
-              Enter Messenger
+              {t('enterMessenger')}
             </button>
           </div>
         </div>

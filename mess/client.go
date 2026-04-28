@@ -308,7 +308,31 @@ func (c *Client) sendServerAck(env Envelope) {
 	case <-c.ctx.Done():
 	case c.send <- ack:
 	default:
-		c.hub.dropClient(c, "slow server ack")
+		c.requestDrop("slow server ack")
+	}
+}
+
+func (c *Client) requestDrop(reason string) {
+	if c == nil {
+		return
+	}
+	logEvent("client_drop_requested", map[string]any{
+		"pub_key": c.PubKey,
+		"reason":  reason,
+	})
+	c.cancel()
+	if c.hub == nil {
+		return
+	}
+	select {
+	case c.hub.unregister <- c:
+	default:
+		go func() {
+			select {
+			case c.hub.unregister <- c:
+			case <-time.After(time.Second):
+			}
+		}()
 	}
 }
 

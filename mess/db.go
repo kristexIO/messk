@@ -276,13 +276,13 @@ func (db *DB) ResolveUsername(ctx context.Context, username string) (string, str
 	var pubKey sql.NullString
 	var nickname sql.NullString
 	var avatar sql.NullString
-	
+
 	err := db.db.QueryRowContext(ctx, `
 		SELECT pub_key, nickname, avatar
 		FROM users
 		WHERE username = ?
 	`, strings.ToLower(strings.TrimSpace(username))).Scan(&pubKey, &nickname, &avatar)
-	
+
 	if err != nil {
 		return "", "", "", err
 	}
@@ -296,6 +296,15 @@ func (db *DB) CreateGroup(ctx context.Context, id, title, avatar, ownerPubKey st
 		return err
 	}
 	defer tx.Rollback()
+
+	ownerPubKey = strings.TrimSpace(ownerPubKey)
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO users (pub_key)
+		VALUES (?)
+		ON CONFLICT (pub_key) DO NOTHING
+	`, ownerPubKey); err != nil {
+		return err
+	}
 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO groups_meta (id, title, avatar, owner_pub_key)
@@ -321,6 +330,13 @@ func (db *DB) CreateGroup(ctx context.Context, id, title, avatar, ownerPubKey st
 			continue
 		}
 		seenMembers[member] = struct{}{}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO users (pub_key)
+			VALUES (?)
+			ON CONFLICT (pub_key) DO NOTHING
+		`, member); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO group_members (group_id, member_pub_key, role)
 			VALUES (?, ?, 'member')

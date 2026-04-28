@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -68,6 +69,42 @@ func TestValidateFileTokenRejectsExpiredToken(t *testing.T) {
 	}
 	if _, exists := hub.fileTokens.Load("expired"); exists {
 		t.Fatal("expected expired file token to be deleted")
+	}
+}
+
+func TestCleanupExpiredTokensRemovesSessionAndFileTokens(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+	hub.sessionTokens.Store("expired-session", sessionTokenEntry{
+		PubKey:    "alice",
+		ExpiresAt: now.Add(-time.Second),
+	})
+	hub.sessionTokens.Store("fresh-session", sessionTokenEntry{
+		PubKey:    "bob",
+		ExpiresAt: now.Add(time.Hour),
+	})
+	hub.fileTokens.Store("expired-file", fileTokenEntry{
+		Filename:  "secret.bin",
+		ExpiresAt: now.Add(-time.Second),
+	})
+	hub.fileTokens.Store("fresh-file", fileTokenEntry{
+		Filename:  "photo.bin",
+		ExpiresAt: now.Add(time.Hour),
+	})
+
+	hub.cleanupExpiredTokens(now)
+
+	if _, exists := hub.sessionTokens.Load("expired-session"); exists {
+		t.Fatal("expected expired session token to be cleaned")
+	}
+	if _, exists := hub.fileTokens.Load("expired-file"); exists {
+		t.Fatal("expected expired file token to be cleaned")
+	}
+	if _, exists := hub.sessionTokens.Load("fresh-session"); !exists {
+		t.Fatal("expected fresh session token to remain")
+	}
+	if _, exists := hub.fileTokens.Load("fresh-file"); !exists {
+		t.Fatal("expected fresh file token to remain")
 	}
 }
 
@@ -166,6 +203,17 @@ func TestNewUploadFilenameFallsBackForUnsafeExtension(t *testing.T) {
 	}
 }
 
+func TestNewUploadFilenameFallsBackForExecutableExtension(t *testing.T) {
+	filename, err := newUploadFilename("invoice.exe")
+	if err != nil {
+		t.Fatalf("failed to create upload filename: %v", err)
+	}
+
+	if !strings.HasSuffix(filename, ".bin") {
+		t.Fatalf("expected executable extension fallback, got %s", filename)
+	}
+}
+
 func TestProxyAddressPolicyBlocksPrivateAndAllowsPublic(t *testing.T) {
 	privateAddr := netip.MustParseAddr("127.0.0.1")
 	publicAddr := netip.MustParseAddr("8.8.8.8")
@@ -175,6 +223,38 @@ func TestProxyAddressPolicyBlocksPrivateAndAllowsPublic(t *testing.T) {
 	}
 	if isForbiddenProxyAddr(publicAddr) {
 		t.Fatal("expected public global address to be allowed")
+	}
+}
+
+func TestProxyRedirectPolicyBlocksLoopbackRedirect(t *testing.T) {
+	client := newSafeProxyClient(time.Second)
+	redirectReq := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/internal", nil)
+	firstReq := httptest.NewRequest(http.MethodGet, "https://example.com/start", nil)
+
+	err := client.CheckRedirect(redirectReq, []*http.Request{firstReq})
+	if !errors.Is(err, errForbiddenProxyTarget) {
+		t.Fatalf("expected loopback redirect to be blocked, got %v", err)
+	}
+}
+
+func TestSanitizeMemberPubKeysDeduplicatesOwnerAndMembers(t *testing.T) {
+	owner := base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012"))
+	member := base64.StdEncoding.EncodeToString([]byte("abcdefghijklmnopqrstuvwxyz123456"))
+
+	members, err := sanitizeMemberPubKeys([]string{member, owner, member, ""}, owner)
+	if err != nil {
+		t.Fatalf("sanitize failed: %v", err)
+	}
+	if len(members) != 1 || members[0] != member {
+		t.Fatalf("expected one unique non-owner member, got %#v", members)
+	}
+}
+
+func TestSanitizeMemberPubKeysRejectsInvalidKeys(t *testing.T) {
+	owner := base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012"))
+
+	if _, err := sanitizeMemberPubKeys([]string{"not-a-valid-key"}, owner); err == nil {
+		t.Fatal("expected invalid member key to be rejected")
 	}
 }
 
@@ -571,6 +651,27 @@ func TestGroupLifecycle(t *testing.T) {
 	}
 	if len(groupMembers) != 2 {
 		t.Fatalf("expected 2 group members, got %d", len(groupMembers))
+	}
+}
+
+func TestCreateGroupCreatesMissingUsersForMembers(t *testing.T) {
+	ctx := context.Background()
+	db := InitDB(ctx, filepath.Join(t.TempDir(), "groups_missing_users.db"))
+	defer db.Close()
+
+	owner := base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012"))
+	member := base64.StdEncoding.EncodeToString([]byte("abcdefghijklmnopqrstuvwxyz123456"))
+
+	if err := db.CreateGroup(ctx, "grp_missing_users", "Zero Setup", "", owner, []string{member}); err != nil {
+		t.Fatalf("failed to create group with missing users: %v", err)
+	}
+
+	memberGroups, err := db.ListGroupsForUser(ctx, member)
+	if err != nil {
+		t.Fatalf("failed to list member groups: %v", err)
+	}
+	if len(memberGroups) != 1 || memberGroups[0].ID != "grp_missing_users" {
+		t.Fatalf("expected member to see group created without preexisting user row, got %#v", memberGroups)
 	}
 }
 

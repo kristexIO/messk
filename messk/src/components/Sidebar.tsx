@@ -1,6 +1,6 @@
-import React, { useDeferredValue, useState } from 'react';
+﻿import React, { useDeferredValue, useState } from 'react';
 import { useAppStore } from '../store';
-import { db, rebuildAllThreadStats } from '../lib/db';
+import { db, getDatabaseNameForIdentity, rebuildAllThreadStats } from '../lib/db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { KeyRound, Copy, Check, LogOut, MessageSquareOff, UserPlus, Edit2, Settings, QrCode, Search, Pin, Archive, BellOff, Bell, Inbox, Sparkles, Plus, Megaphone } from 'lucide-react';
 import { socketManager } from '../lib/socket';
@@ -13,6 +13,7 @@ import { CreateChannelModal } from './CreateChannelModal';
 import { CreateChatModal } from './CreateChatModal';
 import { refreshGroupAvailability, syncChannels, syncGroups } from '../lib/community';
 import { toast } from 'react-hot-toast';
+import { useI18n } from '../lib/i18n';
 
 const INITIAL_SIDEBAR_SECTION_LIMIT = 24;
 const SIDEBAR_SECTION_STEP = 24;
@@ -76,6 +77,7 @@ export const Sidebar: React.FC = () => {
   const deferredSearch = useDeferredValue(searchInput.trim().toLowerCase());
   const sidebarContextKey = `${activeFilter}:${deferredSearch}`;
   const quickCreateRef = React.useRef<HTMLDivElement>(null);
+  const { t } = useI18n();
 
   React.useEffect(() => {
     const timer = window.setInterval(() => setNowTs(Date.now()), 60000);
@@ -137,6 +139,10 @@ export const Sidebar: React.FC = () => {
           .map((stat) => [stat.threadId, stat.unreadCount] as const)
       ),
     [threadStats]
+  );
+  const contactByPubKey = React.useMemo(
+    () => new Map((allContacts ?? []).map((contact) => [contact.pubKey, contact] as const)),
+    [allContacts]
   );
   const threadSummaries = React.useMemo(
     () =>
@@ -222,18 +228,18 @@ export const Sidebar: React.FC = () => {
   const hasHiddenChannels = !deferredSearch && filteredChannels.length > visibleChannels.length;
 
   const filterTabs = [
-    { id: 'inbox' as const, label: 'Inbox', icon: Inbox },
-    { id: 'unread' as const, label: 'Unread', icon: Bell },
-    { id: 'archived' as const, label: 'Archived', icon: Archive },
+    { id: 'inbox' as const, label: t('inbox'), icon: Inbox },
+    { id: 'unread' as const, label: t('unread'), icon: Bell },
+    { id: 'archived' as const, label: t('archived'), icon: Archive },
   ];
   const workspaceTabs = [
-    { id: 'chats' as const, label: 'Chats', accent: 'from-white to-white/70' },
-    { id: 'groups' as const, label: 'Groups', accent: 'from-cyan-200 to-sky-300' },
-    { id: 'channels' as const, label: 'Channels', accent: 'from-violet-200 to-fuchsia-200' },
+    { id: 'chats' as const, label: t('chats'), accent: 'from-white to-white/70' },
+    { id: 'groups' as const, label: t('groups'), accent: 'from-cyan-200 to-sky-300' },
+    { id: 'channels' as const, label: t('channels'), accent: 'from-violet-200 to-fuchsia-200' },
   ];
 
   const inboxUnreadCount = Object.entries(unreadCounts ?? {}).reduce((total, [pubKey, count]) => {
-    const contact = allContacts?.find((item) => item.pubKey === pubKey);
+    const contact = contactByPubKey.get(pubKey);
     return total + (contact?.archived ? 0 : count);
   }, 0);
   const archivedCount = allContacts?.filter((contact) => contact.archived).length ?? 0;
@@ -242,8 +248,20 @@ export const Sidebar: React.FC = () => {
     : activeWorkspaceTab === 'groups'
       ? filteredGroups.length
       : filteredChannels.length;
+  const connectionStateLabel = connectionStatus === 'connected'
+    ? t('online')
+    : connectionStatus === 'offline'
+      ? t('offline')
+      : connectionStatus === 'reconnecting'
+        ? t('reconnecting')
+        : t('connecting');
+  const connectionStateClass = connectionStatus === 'connected'
+    ? 'is-online'
+    : connectionStatus === 'offline'
+      ? 'is-offline'
+      : 'is-pending';
   const formatSyncTime = (timestamp: number | null) => {
-    if (!timestamp) return 'never';
+    if (!timestamp) return t('never');
     return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
@@ -255,10 +273,16 @@ export const Sidebar: React.FC = () => {
   };
 
   const handleLogout = () => {
+    const databaseNames = Array.from(new Set([
+      getDatabaseNameForIdentity(myPublicKey),
+      getDatabaseNameForIdentity(null),
+    ]));
     socketManager.disconnect();
     localStorage.removeItem('messenger_settings');
-    void Dexie.delete('MessengerDB').finally(() => window.location.reload());
     logout();
+    db.close();
+    void Promise.all(databaseNames.map((databaseName) => Dexie.delete(databaseName).catch(() => undefined)))
+      .finally(() => window.location.reload());
   };
 
   const startChatWithKey = async (rawPeerKey: string) => {
@@ -270,11 +294,11 @@ export const Sidebar: React.FC = () => {
     try {
       const decoded = decodeBase64(cleanPeerKey);
       if (decoded.length !== 32) {
-        toast.error('Invalid key length. Must be 32 bytes.');
+        toast.error(t('invalidKeyLength'));
         return false;
       }
     } catch {
-      toast.error('Invalid Base64 public key.');
+      toast.error(t('invalidBase64Key'));
       return false;
     }
 
@@ -308,18 +332,26 @@ export const Sidebar: React.FC = () => {
   };
 
   const handleRefreshGroups = async () => {
+    if (connectionStatus !== 'connected') {
+      useAppStore.getState().setGroupSyncStatus({ state: 'error', error: t('serverOfflineRefresh') });
+      return;
+    }
     try {
       await syncGroups();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to refresh groups');
+      toast.error(error instanceof Error ? error.message : t('failedRefreshGroups'));
     }
   };
 
   const handleRefreshChannels = async () => {
+    if (connectionStatus !== 'connected') {
+      useAppStore.getState().setChannelSyncStatus({ state: 'error', error: t('serverOfflineRefresh') });
+      return;
+    }
     try {
       await syncChannels(true);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to refresh channels');
+      toast.error(error instanceof Error ? error.message : t('failedRefreshChannels'));
     }
   };
 
@@ -327,14 +359,14 @@ export const Sidebar: React.FC = () => {
     try {
       const group = await refreshGroupAvailability(groupId);
       if (!group) {
-        toast.error('Group is not available yet. Retry in a few seconds.');
+        toast.error(t('groupUnavailable'));
         return;
       }
       await db.groupInvites.delete(inviteId);
       setActiveWorkspaceTab('groups');
       setActiveGroup(groupId);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to load invited group');
+      toast.error(error instanceof Error ? error.message : t('failedLoadInvitedGroup'));
     }
   };
 
@@ -359,39 +391,45 @@ export const Sidebar: React.FC = () => {
   return (
     <div className={`
       ${activePeerKey || activeGroupId || activeChannelId ? 'hidden md:flex' : 'flex'}
-      flex-col w-full md:w-[380px] premium-glass z-10 h-full border-r border-white/5
+      messk-sidebar flex-col w-full md:w-[390px] premium-glass z-10 h-full border-r border-white/5
     `}>
       <div className="p-4 space-y-5 sm:p-6 sm:space-y-6">
-        <div className="flex items-center justify-between">
+        <div className="sidebar-brand flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-accent/20 text-accent flex items-center justify-center shadow-[0_0_15px_var(--accent-glow)]">
               <KeyRound className="w-5 h-5" />
             </div>
-            <h1 className="text-xl font-bold tracking-tight bg-gradient-to-r from-white to-white/60 bg-clip-text text-transparent">
-              Messk
-            </h1>
+            <div>
+              <h1 className="text-xl font-bold tracking-tight bg-gradient-to-r from-white to-white/60 bg-clip-text text-transparent">
+                Messk
+              </h1>
+              <div className={`connection-chip ${connectionStateClass}`}>
+                <span />
+                {connectionStateLabel}
+              </div>
+            </div>
           </div>
           <div className="flex items-center gap-1">
             <button
               onClick={() => setShowSettings(true)}
               className="p-2.5 text-text-muted hover:text-white hover:bg-white/5 rounded-xl transition-all"
-              title="Settings"
-              aria-label="Open settings"
+              title={t('settings')}
+              aria-label={t('openSettings')}
             >
               <Settings className="w-5 h-5" />
             </button>
             <button
               onClick={handleLogout}
               className="p-2.5 text-text-muted hover:text-red-400 hover:bg-red-400/10 rounded-xl transition-all"
-              title="Logout"
-              aria-label="Log out"
+              title={t('logout')}
+              aria-label={t('logout')}
             >
               <LogOut className="w-5 h-5" />
             </button>
           </div>
         </div>
 
-        <div className="relative group p-4 rounded-2xl bg-white/5 border border-white/10 hover:border-accent/30 transition-all hover-glow">
+        <div className="identity-card relative group p-4 rounded-2xl bg-white/5 border border-white/10 hover:border-accent/30 transition-all hover-glow">
           <div className="flex items-center gap-4">
             <div className="w-12 h-12 rounded-xl bg-accent flex items-center justify-center text-lg font-bold shadow-lg overflow-hidden">
               {avatar ? (
@@ -401,12 +439,12 @@ export const Sidebar: React.FC = () => {
               )}
             </div>
             <div className="flex-1 min-w-0">
-              <h2 className="font-semibold truncate">{nickname || 'Anonymous'}</h2>
+              <h2 className="font-semibold truncate">{nickname || t('anonymous')}</h2>
               <div className="flex items-center gap-2 mt-0.5">
                 <span className="font-mono text-[10px] text-text-muted truncate max-w-[120px]">
                   {myPublicKey}
                 </span>
-                <button onClick={handleCopyMyKey} className="text-text-muted hover:text-accent transition-colors" aria-label="Copy public key">
+                <button onClick={handleCopyMyKey} className="text-text-muted hover:text-accent transition-colors" aria-label={t('copyPublicKey')}>
                   {isCopied ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3" />}
                 </button>
               </div>
@@ -414,7 +452,7 @@ export const Sidebar: React.FC = () => {
             <button
               onClick={() => setShowMyId(true)}
               className="p-2 text-text-muted hover:text-accent transition-colors bg-white/5 rounded-lg"
-              aria-label="Show my QR identity"
+              aria-label={t('showQrIdentity')}
             >
               <QrCode className="w-4 h-4" />
             </button>
@@ -448,7 +486,7 @@ export const Sidebar: React.FC = () => {
       )}
 
       <div className="px-4 py-4 sm:px-6">
-        <div className="rounded-[22px] border border-white/10 bg-white/[0.04] p-1.5">
+        <div className="workspace-tabs rounded-[22px] border border-white/10 bg-white/[0.04] p-1.5">
           <div className="grid grid-cols-3 gap-1.5">
             {workspaceTabs.map((tab) => (
               <button
@@ -475,33 +513,33 @@ export const Sidebar: React.FC = () => {
               type="text"
               placeholder={
                 activeWorkspaceTab === 'chats'
-                  ? 'Search chats, keys and drafts...'
+                  ? t('searchChats')
                   : activeWorkspaceTab === 'groups'
-                    ? 'Search groups and members...'
-                    : 'Search channels and owners...'
+                    ? t('searchGroups')
+                    : t('searchChannels')
               }
-              className="w-full bg-white/5 border border-white/10 rounded-xl pl-10 pr-4 py-2.5 text-sm outline-none transition-all focus:border-accent/50 focus:bg-white/10"
+              className="product-input w-full bg-white/5 border border-white/10 rounded-xl pl-10 pr-4 py-2.5 text-sm outline-none transition-all focus:border-accent/50 focus:bg-white/10"
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
-              aria-label="Search current workspace"
+              aria-label={t('searchWorkspace')}
             />
           </div>
           <div className="relative" ref={quickCreateRef}>
             <button
               type="button"
               onClick={() => setShowQuickCreate((current) => !current)}
-              className={`flex h-[42px] w-[42px] items-center justify-center rounded-xl border transition-all ${
+              className={`product-icon-button flex h-[42px] w-[42px] items-center justify-center rounded-xl border transition-all ${
                 showQuickCreate
                   ? 'border-white/20 bg-[#121937] text-white'
                   : 'border-white/10 bg-white/[0.04] text-white hover:bg-white/[0.08]'
               }`}
-              aria-label="Open create menu"
+              aria-label={t('openCreateMenu')}
               aria-expanded={showQuickCreate}
             >
               <Plus className="w-5 h-5" />
             </button>
             {showQuickCreate ? (
-              <div className="absolute right-0 top-[calc(100%+10px)] z-30 w-52 rounded-[22px] border border-white/10 bg-[#0f1530]/95 p-2 shadow-[0_24px_80px_rgba(0,0,0,0.42)] backdrop-blur-xl">
+              <div className="quick-create-menu absolute right-0 top-[calc(100%+10px)] z-30 w-52 rounded-[22px] border border-white/10 bg-[#0f1530]/95 p-2 shadow-[0_24px_80px_rgba(0,0,0,0.42)] backdrop-blur-xl">
                 <button
                   type="button"
                   onClick={handleOpenQuickChat}
@@ -509,8 +547,8 @@ export const Sidebar: React.FC = () => {
                 >
                   <UserPlus className="h-4 w-4 text-accent" />
                   <div>
-                    <div className="font-medium">New chat</div>
-                    <div className="text-[11px] text-text-muted">Add a person by public key</div>
+                    <div className="font-medium">{t('newChat')}</div>
+                    <div className="text-[11px] text-text-muted">{t('newChatHint')}</div>
                   </div>
                 </button>
                 <button
@@ -520,8 +558,8 @@ export const Sidebar: React.FC = () => {
                 >
                   <Sparkles className="h-4 w-4 text-cyan-200" />
                   <div>
-                    <div className="font-medium">New group</div>
-                    <div className="text-[11px] text-text-muted">Create a shared room</div>
+                    <div className="font-medium">{t('newGroup')}</div>
+                    <div className="text-[11px] text-text-muted">{t('newGroupHint')}</div>
                   </div>
                 </button>
                 <button
@@ -531,8 +569,8 @@ export const Sidebar: React.FC = () => {
                 >
                   <Megaphone className="h-4 w-4 text-violet-200" />
                   <div>
-                    <div className="font-medium">New channel</div>
-                    <div className="text-[11px] text-text-muted">Publish updates and announcements</div>
+                    <div className="font-medium">{t('newChannel')}</div>
+                    <div className="text-[11px] text-text-muted">{t('newChannelHint')}</div>
                   </div>
                 </button>
               </div>
@@ -576,20 +614,20 @@ export const Sidebar: React.FC = () => {
         ) : null}
       </div>
 
-      <div className="flex-1 overflow-y-auto px-3 pb-4 custom-scrollbar sm:px-4">
+      <div className="sidebar-scroll flex-1 overflow-y-auto px-3 pb-4 custom-scrollbar sm:px-4">
         {activeWorkspaceTab === 'groups' ? (
         <div className="mb-4 rounded-[26px] border border-white/8 bg-white/[0.03] p-3">
           <div className="mb-3 flex items-center justify-between px-2">
             <div className="flex items-center gap-2">
               <Sparkles className="h-4 w-4 text-accent" />
-              <span className="text-xs font-semibold uppercase tracking-[0.22em] text-text-muted">Groups</span>
+              <span className="text-xs font-semibold uppercase tracking-[0.22em] text-text-muted">{t('groups')}</span>
             </div>
             <button
               type="button"
               onClick={handleRefreshGroups}
               className="rounded-xl border border-white/10 px-2.5 py-1 text-[11px] text-text-muted transition-all hover:border-white/20 hover:text-white"
             >
-              Refresh
+              {t('refresh')}
             </button>
           </div>
           <div className={`mb-3 rounded-2xl border px-3 py-2 text-[11px] ${
@@ -600,10 +638,10 @@ export const Sidebar: React.FC = () => {
                 : 'border-white/10 bg-black/10 text-text-muted'
           }`}>
             {groupSyncStatus.state === 'syncing'
-              ? 'Syncing groups and members...'
+              ? t('syncingGroups')
               : groupSyncStatus.state === 'error'
-                ? groupSyncStatus.error || 'Group sync failed'
-                : `Last sync ${formatSyncTime(groupSyncStatus.lastSyncAt)}`}
+                ? groupSyncStatus.error || t('groupSyncFailed')
+                : t('lastSync', { time: formatSyncTime(groupSyncStatus.lastSyncAt) })}
           </div>
           {groups === undefined ? (
             <div className="space-y-2">
@@ -643,10 +681,10 @@ export const Sidebar: React.FC = () => {
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-semibold text-white">{group.title}</div>
                     <div className="mt-1 flex items-center gap-2 text-[11px] text-text-muted">
-                      <span className="truncate">{threadSummaries?.[group.id]?.preview || `${Number.isFinite(group.memberCount) ? group.memberCount : safeGroupMembers(group.members).length} members`}</span>
+                      <span className="truncate">{threadSummaries?.[group.id]?.preview || t('membersCount', { count: Number.isFinite(group.memberCount) ? group.memberCount : safeGroupMembers(group.members).length })}</span>
                     </div>
                     <div className="mt-1 flex items-center gap-2 text-[11px] text-text-muted">
-                      <span>{Number.isFinite(group.memberCount) ? group.memberCount : safeGroupMembers(group.members).length} members</span>
+                      <span>{t('membersCount', { count: Number.isFinite(group.memberCount) ? group.memberCount : safeGroupMembers(group.members).length })}</span>
                       <span className="h-1 w-1 rounded-full bg-white/20" />
                       <span className="uppercase tracking-wide text-accent/80">{group.role}</span>
                     </div>
@@ -669,14 +707,14 @@ export const Sidebar: React.FC = () => {
                   }
                   className="w-full rounded-2xl border border-white/10 bg-white/[0.02] px-3 py-2 text-sm text-text-muted transition-all hover:border-white/20 hover:bg-white/[0.04] hover:text-white"
                 >
-                  Load {Math.min(SIDEBAR_SECTION_STEP, filteredGroups.length - visibleGroups.length)} more groups
+                  {t('loadMoreGroups', { count: Math.min(SIDEBAR_SECTION_STEP, filteredGroups.length - visibleGroups.length) })}
                 </button>
               ) : null}
             </div>
           ) : (
             <div className="rounded-2xl border border-dashed border-white/10 bg-black/10 px-4 py-6 text-center">
-              <div className="text-sm font-medium text-white">No groups yet</div>
-              <div className="mt-1 text-xs text-text-muted">Create the first room for your team and bring members together.</div>
+              <div className="text-sm font-medium text-white">{t('noGroupsYet')}</div>
+              <div className="mt-1 text-xs text-text-muted">{t('noGroupsYetText')}</div>
             </div>
           )}
         </div>
@@ -687,14 +725,14 @@ export const Sidebar: React.FC = () => {
           <div className="mb-3 flex items-center justify-between px-2">
             <div className="flex items-center gap-2">
               <Megaphone className="h-4 w-4 text-violet-200" />
-              <span className="text-xs font-semibold uppercase tracking-[0.22em] text-text-muted">Channels</span>
+              <span className="text-xs font-semibold uppercase tracking-[0.22em] text-text-muted">{t('channels')}</span>
             </div>
             <button
               type="button"
               onClick={handleRefreshChannels}
               className="rounded-xl border border-white/10 px-2.5 py-1 text-[11px] text-text-muted transition-all hover:border-white/20 hover:text-white"
             >
-              Refresh
+              {t('refresh')}
             </button>
           </div>
           <div className={`mb-3 rounded-2xl border px-3 py-2 text-[11px] ${
@@ -705,10 +743,10 @@ export const Sidebar: React.FC = () => {
                 : 'border-white/10 bg-black/10 text-text-muted'
           }`}>
             {channelSyncStatus.state === 'syncing'
-              ? 'Syncing channels and subscriber roles...'
+              ? t('syncingChannels')
               : channelSyncStatus.state === 'error'
-                ? channelSyncStatus.error || 'Channel sync failed'
-                : `Last sync ${formatSyncTime(channelSyncStatus.lastSyncAt)}`}
+                ? channelSyncStatus.error || t('channelSyncFailed')
+                : t('lastSync', { time: formatSyncTime(channelSyncStatus.lastSyncAt) })}
           </div>
           {channels === undefined ? (
             <div className="space-y-2">
@@ -748,10 +786,10 @@ export const Sidebar: React.FC = () => {
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-semibold text-white">{channel.title}</div>
                     <div className="mt-1 flex items-center gap-2 text-[11px] text-text-muted">
-                      <span className="truncate">{threadSummaries?.[channel.id]?.preview || `${channel.subscriberCount} subscribers`}</span>
+                      <span className="truncate">{threadSummaries?.[channel.id]?.preview || t('subscribersCount', { count: channel.subscriberCount })}</span>
                     </div>
                     <div className="mt-1 flex items-center gap-2 text-[11px] text-text-muted">
-                      <span>{channel.subscriberCount} subscribers</span>
+                      <span>{t('subscribersCount', { count: channel.subscriberCount })}</span>
                       <span className="h-1 w-1 rounded-full bg-white/20" />
                       <span className="uppercase tracking-wide text-violet-200/80">{channel.role}</span>
                     </div>
@@ -774,14 +812,14 @@ export const Sidebar: React.FC = () => {
                   }
                   className="w-full rounded-2xl border border-white/10 bg-white/[0.02] px-3 py-2 text-sm text-text-muted transition-all hover:border-white/20 hover:bg-white/[0.04] hover:text-white"
                 >
-                  Load {Math.min(SIDEBAR_SECTION_STEP, filteredChannels.length - visibleChannels.length)} more channels
+                  {t('loadMoreChannels', { count: Math.min(SIDEBAR_SECTION_STEP, filteredChannels.length - visibleChannels.length) })}
                 </button>
               ) : null}
             </div>
           ) : (
             <div className="rounded-2xl border border-dashed border-white/10 bg-black/10 px-4 py-6 text-center">
-              <div className="text-sm font-medium text-white">No channels yet</div>
-              <div className="mt-1 text-xs text-text-muted">Create a read-mostly lane for releases, notices and team updates.</div>
+              <div className="text-sm font-medium text-white">{t('noChannelsYet')}</div>
+              <div className="mt-1 text-xs text-text-muted">{t('noChannelsYetText')}</div>
             </div>
           )}
         </div>
@@ -792,7 +830,7 @@ export const Sidebar: React.FC = () => {
             <div className="mb-3 flex items-center justify-between px-2">
               <div className="flex items-center gap-2">
                 <Sparkles className="h-4 w-4 text-amber-200" />
-                <span className="text-xs font-semibold uppercase tracking-[0.22em] text-amber-100/80">Invites</span>
+                <span className="text-xs font-semibold uppercase tracking-[0.22em] text-amber-100/80">{t('invites')}</span>
               </div>
               <span className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] text-white">
                 {groupInvites?.length ?? 0}
@@ -815,7 +853,7 @@ export const Sidebar: React.FC = () => {
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-semibold text-white">{invite.title}</div>
                       <div className="mt-1 text-[11px] text-text-muted">
-                        {invite.memberCount} members • role: {invite.role}
+                        {t('membersCount', { count: invite.memberCount })} - {t('role')}: {invite.role}
                       </div>
                     </div>
                   </div>
@@ -825,14 +863,14 @@ export const Sidebar: React.FC = () => {
                       onClick={() => void handleOpenInvitedGroup(invite.groupId, invite.id)}
                       className="rounded-xl border border-amber-300/25 bg-amber-300/10 px-3 py-2 text-xs font-medium text-white transition-all hover:border-amber-300/40 hover:bg-amber-300/15"
                     >
-                      Open group
+                      {t('openGroup')}
                     </button>
                     <button
                       type="button"
                       onClick={() => void db.groupInvites.delete(invite.id)}
                       className="rounded-xl border border-white/10 px-3 py-2 text-xs text-text-muted transition-all hover:border-white/20 hover:text-white"
                     >
-                      Dismiss
+                      {t('dismiss')}
                     </button>
                   </div>
                 </div>
@@ -864,7 +902,7 @@ export const Sidebar: React.FC = () => {
                   onClick={() => setActivePeer(contact.pubKey)}
                   role="button"
                   tabIndex={0}
-                  aria-label={`Open chat with ${contact.name}`}
+                  aria-label={t('openChatWith', { name: contact.name })}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
                       e.preventDefault();
@@ -905,7 +943,7 @@ export const Sidebar: React.FC = () => {
                         <button
                           onClick={(e) => startEditingContact(e, contact.pubKey, contact.name)}
                           className="text-text-muted hover:text-accent opacity-0 group-hover:opacity-100 transition-all p-1"
-                          aria-label={`Rename ${contact.name}`}
+                          aria-label={t('renameContact', { name: contact.name })}
                         >
                           <Edit2 className="w-3.5 h-3.5" />
                         </button>
@@ -913,9 +951,9 @@ export const Sidebar: React.FC = () => {
                     )}
                     <div className="mt-0.5 flex items-center gap-2">
                       {typingStatus[contact.pubKey] ? (
-                        <p className="text-[11px] text-accent truncate">typing...</p>
+                        <p className="text-[11px] text-accent truncate">{t('typing')}</p>
                       ) : contact.draft?.trim() ? (
-                        <p className="text-[11px] text-amber-300 truncate">Draft: {contact.draft}</p>
+                        <p className="text-[11px] text-amber-300 truncate">{t('draft')}: {contact.draft}</p>
                       ) : (
                         <p className="font-mono text-[11px] text-text-muted truncate opacity-60">
                           {contact.pubKey.substring(0, 16)}...
@@ -943,8 +981,8 @@ export const Sidebar: React.FC = () => {
                           ? 'text-blue-300 opacity-100'
                           : 'text-text-muted opacity-0 group-hover:opacity-100 hover:text-blue-300'
                       }`}
-                      title={isMuted ? 'Unmute chat' : 'Mute chat for 8 hours'}
-                      aria-label={isMuted ? `Unmute ${contact.name}` : `Mute ${contact.name} for 8 hours`}
+                      title={isMuted ? t('unmuteChat') : t('muteChat')}
+                      aria-label={isMuted ? t('unmuteContact', { name: contact.name }) : t('muteContact', { name: contact.name })}
                     >
                       {isMuted ? <Bell className="w-4 h-4" /> : <BellOff className="w-4 h-4" />}
                     </button>
@@ -962,8 +1000,8 @@ export const Sidebar: React.FC = () => {
                           ? 'text-violet-300 opacity-100'
                           : 'text-text-muted opacity-0 group-hover:opacity-100 hover:text-violet-300'
                       }`}
-                      title={contact.archived ? 'Restore chat' : 'Archive chat'}
-                      aria-label={contact.archived ? `Restore ${contact.name}` : `Archive ${contact.name}`}
+                      title={contact.archived ? t('restoreChat') : t('archiveChat')}
+                      aria-label={contact.archived ? t('restoreContact', { name: contact.name }) : t('archiveContact', { name: contact.name })}
                     >
                       <Archive className="w-4 h-4" />
                     </button>
@@ -974,8 +1012,8 @@ export const Sidebar: React.FC = () => {
                         await db.contacts.update(contact.pubKey, { pinned: !contact.pinned });
                       }}
                       className={`rounded-xl p-2 transition-all ${contact.pinned ? 'text-amber-300 opacity-100' : 'text-text-muted opacity-0 group-hover:opacity-100 hover:text-amber-300'}`}
-                      title={contact.pinned ? 'Unpin chat' : 'Pin chat'}
-                      aria-label={contact.pinned ? `Unpin ${contact.name}` : `Pin ${contact.name}`}
+                      title={contact.pinned ? t('unpinChat') : t('pinChat')}
+                      aria-label={contact.pinned ? t('unpinContact', { name: contact.name }) : t('pinContact', { name: contact.name })}
                     >
                       <Pin className="w-4 h-4" />
                     </button>
@@ -994,7 +1032,7 @@ export const Sidebar: React.FC = () => {
                 }
                 className="mt-3 w-full rounded-2xl border border-white/10 bg-white/[0.02] px-3 py-2 text-sm text-text-muted transition-all hover:border-white/20 hover:bg-white/[0.04] hover:text-white"
               >
-                Load {Math.min(SIDEBAR_SECTION_STEP, contacts.length - visibleContacts.length)} more chats
+                {t('loadMoreChats', { count: Math.min(SIDEBAR_SECTION_STEP, contacts.length - visibleContacts.length) })}
               </button>
             ) : null}
           </div>
@@ -1005,31 +1043,31 @@ export const Sidebar: React.FC = () => {
             </div>
             <p className="text-sm">
               {activeFilter === 'archived'
-                ? 'No archived chats yet.'
+                ? t('noArchivedChats')
                 : activeFilter === 'unread'
-                  ? 'No unread chats right now.'
-                  : 'No recent chats yet.'}
+                  ? t('noUnreadChats')
+                  : t('noRecentChats')}
             </p>
             {activeFilter === 'inbox' ? (
               <p className="mt-2 max-w-xs text-xs text-text-muted">
-                Use the + menu to start a secure chat, create a group or open a new channel space.
+                {t('emptyInboxHint')}
               </p>
             ) : null}
           </div>
         ) : null}
       </div>
 
-      <div className="border-t border-white/5 px-4 py-3 sm:px-6 sm:py-4">
+      <div className="sidebar-metrics border-t border-white/5 px-4 py-3 sm:px-6 sm:py-4">
         <div className="grid grid-cols-3 gap-2 text-center text-[10px] text-text-muted sm:text-[11px]">
           <div className="rounded-2xl bg-white/5 px-3 py-2">
             <div className="text-base font-semibold text-white">{activeWorkspaceCount}</div>
-            <div>{activeWorkspaceTab === 'chats' ? 'Visible chats' : activeWorkspaceTab === 'groups' ? 'Visible groups' : 'Visible channels'}</div>
+            <div>{activeWorkspaceTab === 'chats' ? t('visibleChats') : activeWorkspaceTab === 'groups' ? t('visibleGroups') : t('visibleChannels')}</div>
           </div>
           <div className="rounded-2xl bg-white/5 px-3 py-2">
             <div className={`text-base font-semibold ${activeWorkspaceTab === 'groups' ? 'text-cyan-200' : activeWorkspaceTab === 'channels' ? 'text-violet-200' : 'text-accent'}`}>
               {activeWorkspaceTab === 'chats' ? inboxUnreadCount : activeWorkspaceTab === 'groups' ? (groups?.length ?? 0) : (channels?.length ?? 0)}
             </div>
-            <div>{activeWorkspaceTab === 'chats' ? 'Unread' : activeWorkspaceTab === 'groups' ? 'Total groups' : 'Total channels'}</div>
+            <div>{activeWorkspaceTab === 'chats' ? t('unread') : activeWorkspaceTab === 'groups' ? t('totalGroups') : t('totalChannels')}</div>
           </div>
           <div className="rounded-2xl bg-white/5 px-3 py-2">
             <div className="text-base font-semibold text-white">
@@ -1039,7 +1077,7 @@ export const Sidebar: React.FC = () => {
                   ? filteredGroups.filter((group) => group.role === 'owner').length
                   : filteredChannels.filter((channel) => channel.role === 'owner').length}
             </div>
-            <div>{activeWorkspaceTab === 'chats' ? 'Archived' : 'Owned'}</div>
+            <div>{activeWorkspaceTab === 'chats' ? t('archived') : t('owned')}</div>
           </div>
         </div>
       </div>

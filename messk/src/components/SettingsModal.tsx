@@ -1,14 +1,16 @@
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useAppStore } from '../store';
-import type { DesignStyle, Theme } from '../store';
+import type { DesignStyle, Language, Theme } from '../store';
 import { X, User, Palette, Shield, LogOut, Camera, Lock, Download, Upload, Database, PhoneCall, PhoneIncoming, PhoneOutgoing, PhoneMissed, Layers } from 'lucide-react';
 import { socketManager } from '../lib/socket';
-import { db } from '../lib/db';
+import { db, getDatabaseNameForIdentity } from '../lib/db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import Dexie from 'dexie';
 import { hashPin } from '../lib/security';
 import { createEncryptedBackup, downloadEncryptedBackup, parseBackupFile, restoreBackup } from '../lib/backup';
 import { prepareAvatarDataUrl } from '../lib/images';
+import { useI18n } from '../lib/i18n';
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -19,12 +21,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     nickname,
     avatar,
     username,
+    myPublicKey,
     theme,
     designStyle,
     setTheme,
     setDesignStyle,
+    language,
+    setLanguage,
     setProfile,
     logout,
+    isIdentityRemembered,
+    forgetRememberedIdentity,
     pinHash,
     setPinHash,
     lockApp,
@@ -40,6 +47,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
   const [pinConfirm, setPinConfirm] = useState('');
   const [pinMessage, setPinMessage] = useState('');
   const [backupMessage, setBackupMessage] = useState('');
+  const [securityMessage, setSecurityMessage] = useState('');
+  const { t } = useI18n();
   const callHistory = useLiveQuery(() => db.callHistory.orderBy('createdAt').reverse().limit(12).toArray(), []);
   const contacts = useLiveQuery(() => db.contacts.toArray(), []);
   const groups = useLiveQuery(() => db.groupThreads.toArray(), []);
@@ -51,14 +60,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     () => (callHistory ?? []).filter((entry) => entry.outcome === 'missed' || entry.outcome === 'failed'),
     [callHistory]
   );
+  const contactByPubKey = React.useMemo(
+    () => new Map((contacts ?? []).map((contact) => [contact.pubKey, contact] as const)),
+    [contacts]
+  );
   const unreadChatCount = React.useMemo(
     () =>
       (threadStats ?? []).reduce((total, stat) => {
         const hasUnread = (stat.unreadCount ?? 0) > 0;
-        const isChatThread = contacts?.some((contact) => contact.pubKey === stat.threadId);
+        const isChatThread = contactByPubKey.has(stat.threadId);
         return total + (hasUnread && isChatThread ? stat.unreadCount ?? 0 : 0);
       }, 0),
-    [contacts, threadStats]
+    [contactByPubKey, threadStats]
   );
   const archivedChatCount = React.useMemo(
     () => contacts?.filter((contact) => contact.archived).length ?? 0,
@@ -100,10 +113,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
   };
 
   const handleLogout = () => {
+    const databaseNames = Array.from(new Set([
+      getDatabaseNameForIdentity(myPublicKey),
+      getDatabaseNameForIdentity(null),
+    ]));
     socketManager.disconnect();
     localStorage.removeItem('messenger_settings');
-    void Dexie.delete('MessengerDB').finally(() => window.location.reload());
     logout();
+    db.close();
+    void Promise.all(databaseNames.map((databaseName) => Dexie.delete(databaseName).catch(() => undefined)))
+      .finally(() => window.location.reload());
+  };
+
+  const handleForgetDevice = () => {
+    forgetRememberedIdentity();
+    setSecurityMessage('Saved identity removed from this browser. After refresh, restore with your seed phrase.');
   };
 
   const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -189,7 +213,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
         payload = await parseBackupFile(file, password);
       }
       await restoreBackup(payload);
-      setProfile(payload.profile.nickname ?? '', payload.profile.avatar);
+      setProfile(payload.profile.nickname ?? '', payload.profile.avatar, null);
       setTheme(payload.profile.theme);
       setBackupMessage('Backup imported successfully.');
     } catch (error) {
@@ -205,9 +229,31 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     { id: 'forest', name: 'Forest', color: 'bg-[#052e16]' },
     { id: 'light', name: 'Cloud', color: 'bg-white' },
   ];
-  const designStyles: { id: DesignStyle; name: string; description: string }[] = [
-    { id: 'glass', name: 'Glassmorphism', description: 'Blurred translucent panels' },
-    { id: 'neumorph', name: 'Neumorphism', description: 'Soft inset and raised surfaces' },
+  const languages: { id: Language; code: string; label: string }[] = [
+    { id: 'en', code: 'EN', label: t('english') },
+    { id: 'ru', code: 'RU', label: t('russian') },
+    { id: 'fr', code: 'FR', label: t('french') },
+    { id: 'de', code: 'DE', label: t('german') },
+  ];
+  const designStyles: { id: DesignStyle; name: string; description: string; previewClass: string }[] = [
+    {
+      id: 'glass',
+      name: 'Glassmorphism',
+      description: 'Blurred translucent panels',
+      previewClass: 'settings-preview-glass',
+    },
+    {
+      id: 'neumorph',
+      name: 'Neumorphism',
+      description: 'Soft inset and raised surfaces',
+      previewClass: 'settings-preview-neumorph',
+    },
+    {
+      id: 'telegram',
+      name: 'Telegram Flow',
+      description: 'Deep blue navigation and compact chat bubbles',
+      previewClass: 'settings-preview-telegram',
+    },
   ];
 
   const getCallOutcomeTone = (outcome: string) => {
@@ -237,29 +283,44 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
       ? 'text-red-300'
       : 'text-amber-200';
 
-  return (
-    <div className="fixed inset-0 z-[200] flex items-end justify-center bg-black/60 px-3 py-3 backdrop-blur-md sm:items-center sm:p-4">
-      <div className="flex max-h-[100dvh] w-full max-w-2xl flex-col overflow-hidden rounded-[28px] premium-glass shadow-2xl animate-in fade-in zoom-in duration-300 sm:rounded-3xl">
-        <div className="flex items-center justify-between border-b border-white/10 bg-slate-950/75 px-4 py-4 sm:px-6">
+  const modal = (
+    <div className="settings-backdrop fixed inset-0 z-[200] flex items-center justify-center px-3 py-3 backdrop-blur-md sm:p-4">
+      <div className="settings-panel flex max-h-[calc(100dvh-24px)] w-full max-w-2xl flex-col overflow-hidden rounded-[28px] shadow-2xl animate-in fade-in zoom-in duration-300 sm:max-h-[min(880px,calc(100dvh-32px))] sm:rounded-3xl">
+        <div className="settings-header flex items-center justify-between px-4 py-4 sm:px-6">
           <h2 className="text-xl font-bold flex items-center gap-2">
             <Palette className="w-5 h-5 text-accent" />
-            Settings
+            {t('settings')}
           </h2>
-          <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-full transition-colors">
-            <X className="w-5 h-5" />
-          </button>
+          <div className="settings-header-actions">
+            <div className="settings-language-pills" aria-label={t('language')}>
+              {languages.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setLanguage(item.id)}
+                  className={`settings-language-pill ${language === item.id ? 'is-active' : ''}`}
+                  title={item.label}
+                >
+                  {item.code}
+                </button>
+              ))}
+            </div>
+            <button onClick={onClose} className="settings-icon-button p-2 rounded-full transition-colors" aria-label="Close settings">
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
-        <div className="max-h-[calc(100dvh-132px)] space-y-6 overflow-y-auto p-4 sm:max-h-[70vh] sm:space-y-8 sm:p-8">
+        <div className="settings-body space-y-6 overflow-y-auto p-4 sm:space-y-8 sm:p-8">
           {/* Profile Section */}
           <section className="space-y-4">
             <h3 className="text-sm font-semibold uppercase tracking-wider text-text-muted flex items-center gap-2">
               <User className="w-4 h-4" />
-              Profile
+              {t('profile')}
             </h3>
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-6">
               <div className="relative group self-start">
-                <div className="h-20 w-20 overflow-hidden rounded-2xl border-2 border-accent/30 bg-slate-800 sm:h-24 sm:w-24">
+                <div className="settings-avatar h-20 w-20 overflow-hidden rounded-2xl sm:h-24 sm:w-24">
                   {tempAvatar ? (
                     <img src={tempAvatar} alt="Avatar" className="w-full h-full object-cover" />
                   ) : (
@@ -275,17 +336,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
               </div>
               <div className="flex-1 space-y-4">
                 <div className="space-y-2">
-                  <label className="text-xs text-text-muted">Display Name</label>
+                  <label className="text-xs text-text-muted">{t('displayName')}</label>
                   <input 
                     type="text" 
                     value={tempNick}
                     onChange={(e) => setTempNick(e.target.value)}
                     placeholder="Enter your nickname..."
-                    className="w-full px-4 py-3 bg-white/5 rounded-xl border border-white/10 focus:border-accent outline-none transition-all"
+                    className="settings-input w-full px-4 py-3 rounded-xl outline-none transition-all"
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-xs text-text-muted">Username (@handle)</label>
+                  <label className="text-xs text-text-muted">{t('username')}</label>
                   <div className="relative">
                     <span className="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted select-none">@</span>
                     <input 
@@ -293,15 +354,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                       value={tempUsername}
                       onChange={(e) => setTempUsername(e.target.value.replace(/[^a-zA-Z0-9_]/g, ''))}
                       placeholder="your_handle"
-                      className={`w-full py-3 pl-9 pr-4 bg-white/5 rounded-xl border outline-none transition-all ${
-                        profileError ? 'border-red-400 focus:border-red-500' : 'border-white/10 focus:border-accent'
+                      className={`settings-input w-full py-3 pl-9 pr-4 rounded-xl outline-none transition-all ${
+                        profileError ? 'settings-input-error' : ''
                       }`}
                     />
                   </div>
                   {profileError ? (
                     <div className="text-xs text-red-400 mt-1">{profileError}</div>
                   ) : (
-                    <div className="text-xs text-text-muted mt-1">Global handle to let people find you</div>
+                    <div className="text-xs text-text-muted mt-1">{t('usernameHint')}</div>
                   )}
                 </div>
               </div>
@@ -312,15 +373,31 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
           <section className="space-y-4">
             <h3 className="text-sm font-semibold uppercase tracking-wider text-text-muted flex items-center gap-2">
               <Palette className="w-4 h-4" />
-              Appearance
+              {t('appearance')}
             </h3>
+            <div className="settings-card rounded-2xl p-4">
+              <div className="mb-3 text-xs uppercase tracking-[0.22em] text-text-muted">{t('language')}</div>
+              <div className="grid grid-cols-2 gap-3">
+                {languages.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setLanguage(item.id)}
+                    className={`settings-choice settings-language-choice rounded-2xl px-4 py-3 text-left transition-all ${language === item.id ? 'is-active' : ''}`}
+                  >
+                    <div className="text-sm font-semibold">{item.code}</div>
+                    <div className="mt-1 text-xs text-text-muted">{item.label}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
               {themes.map((t) => (
                 <button
                   key={t.id}
                   onClick={() => setTheme(t.id)}
-                  className={`p-4 rounded-2xl border-2 transition-all flex flex-col items-center gap-3 ${
-                    theme === t.id ? 'border-accent bg-accent/10 shadow-lg' : 'border-white/10 hover:border-white/20'
+                  className={`settings-choice p-4 rounded-2xl transition-all flex flex-col items-center gap-3 ${
+                    theme === t.id ? 'is-active' : ''
                   }`}
                 >
                   <div className={`w-8 h-8 rounded-full shadow-inner ${t.color}`} />
@@ -331,20 +408,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
             <div className="space-y-2">
               <div className="text-xs uppercase tracking-[0.22em] text-text-muted flex items-center gap-2">
                 <Layers className="w-3.5 h-3.5" />
-                Surface style
+                {t('surfaceStyle')}
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 {designStyles.map((style) => (
                   <button
                     key={style.id}
                     onClick={() => setDesignStyle(style.id)}
-                    className={`rounded-2xl border p-4 text-left transition-all ${
-                      designStyle === style.id
-                        ? 'border-accent bg-accent/10 shadow-lg'
-                        : 'border-white/10 bg-white/5 hover:border-white/20'
+                    className={`settings-choice rounded-2xl p-4 text-left transition-all ${
+                      designStyle === style.id ? 'is-active' : ''
                     }`}
                   >
-                    <div className="text-sm font-semibold text-white">{style.name}</div>
+                    <div className={`settings-design-preview ${style.previewClass}`} aria-hidden="true">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
+                    <div className="text-sm font-semibold">{style.name}</div>
                     <div className="mt-1 text-xs text-text-muted">{style.description}</div>
                   </button>
                 ))}
@@ -355,34 +435,34 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
           <section className="space-y-4">
             <h3 className="text-sm font-semibold uppercase tracking-wider text-text-muted flex items-center gap-2">
               <Database className="w-4 h-4" />
-              Workspace Overview
+              {t('workspaceOverview')}
             </h3>
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <div className="settings-card rounded-2xl p-4">
                 <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Chats</div>
                 <div className="mt-2 text-xl font-semibold text-white">{contacts?.length ?? 0}</div>
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <div className="settings-card rounded-2xl p-4">
                 <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Unread</div>
                 <div className="mt-2 text-xl font-semibold text-accent">{unreadChatCount}</div>
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <div className="settings-card rounded-2xl p-4">
                 <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Archived</div>
                 <div className="mt-2 text-xl font-semibold text-violet-200">{archivedChatCount}</div>
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <div className="settings-card rounded-2xl p-4">
                 <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Groups</div>
                 <div className="mt-2 text-xl font-semibold text-white">{groups?.length ?? 0}</div>
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <div className="settings-card rounded-2xl p-4">
                 <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Owned groups</div>
                 <div className="mt-2 text-xl font-semibold text-cyan-200">{ownedGroupCount}</div>
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <div className="settings-card rounded-2xl p-4">
                 <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Channels</div>
                 <div className="mt-2 text-xl font-semibold text-white">{channels?.length ?? 0}</div>
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4 sm:col-span-3">
+              <div className="settings-card rounded-2xl p-4 sm:col-span-3">
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Owned channels</div>
@@ -400,9 +480,40 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
           <section className="space-y-4">
             <h3 className="text-sm font-semibold uppercase tracking-wider text-text-muted flex items-center gap-2">
               <Shield className="w-4 h-4" />
-              Account
+              {t('account')}
             </h3>
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-4">
+            <div className="settings-card rounded-2xl p-4 space-y-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div className="flex items-center gap-2 text-sm font-medium">
+                    <Shield className="w-4 h-4 text-accent" />
+                    Device persistence
+                  </div>
+                  <p className="mt-2 text-xs leading-5 text-text-muted">
+                    Your account stays signed in after reloads on this browser. Forget this device if it is shared or no longer trusted.
+                  </p>
+                </div>
+                <div className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                  isIdentityRemembered ? 'bg-emerald-400/10 text-emerald-200' : 'bg-amber-400/10 text-amber-100'
+                }`}>
+                  {isIdentityRemembered ? 'Remembered' : 'Seed required'}
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  onClick={handleForgetDevice}
+                  disabled={!isIdentityRemembered}
+                  className="settings-secondary-button px-5 py-2.5 rounded-xl disabled:opacity-50 transition-all"
+                >
+                  Forget this device
+                </button>
+                <span className="text-xs text-text-muted">
+                  This does not delete chats, it only removes the auto-login key.
+                </span>
+              </div>
+              <div className="text-xs text-text-muted min-h-4">{securityMessage}</div>
+            </div>
+            <div className="settings-card rounded-2xl p-4 space-y-4">
               <div className="flex items-center gap-2 text-sm font-medium">
                 <Lock className="w-4 h-4 text-accent" />
                 App Lock
@@ -415,7 +526,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                   value={pinInput}
                   onChange={(e) => setPinInput(e.target.value.replace(/\D/g, '').slice(0, 4))}
                   placeholder={pinHash ? 'New 4-digit PIN' : '4-digit PIN'}
-                  className="w-full px-4 py-3 bg-black/30 rounded-xl border border-white/10 focus:border-accent outline-none transition-all"
+                  className="settings-input w-full px-4 py-3 rounded-xl outline-none transition-all"
                 />
                 <input
                   type="password"
@@ -424,23 +535,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                   value={pinConfirm}
                   onChange={(e) => setPinConfirm(e.target.value.replace(/\D/g, '').slice(0, 4))}
                   placeholder="Confirm PIN"
-                  className="w-full px-4 py-3 bg-black/30 rounded-xl border border-white/10 focus:border-accent outline-none transition-all"
+                  className="settings-input w-full px-4 py-3 rounded-xl outline-none transition-all"
                 />
               </div>
               <div className="flex flex-wrap gap-3">
                 <button onClick={() => void handleSavePin()} className="btn-premium px-5 py-2.5">
                   {pinHash ? 'Update PIN' : 'Enable PIN Lock'}
                 </button>
-                <button onClick={lockApp} disabled={!pinHash} className="px-5 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-50 transition-all">
+                <button onClick={lockApp} disabled={!pinHash} className="settings-secondary-button px-5 py-2.5 rounded-xl disabled:opacity-50 transition-all">
                   Lock Now
                 </button>
-                <button onClick={handleRemovePin} disabled={!pinHash} className="px-5 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-50 transition-all text-red-300">
+                <button onClick={handleRemovePin} disabled={!pinHash} className="settings-secondary-button px-5 py-2.5 rounded-xl disabled:opacity-50 transition-all text-red-300">
                   Disable PIN
                 </button>
               </div>
               <div className="text-xs text-text-muted min-h-4">{pinMessage}</div>
             </div>
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-4">
+            <div className="settings-card rounded-2xl p-4 space-y-4">
               <div className="flex items-center gap-2 text-sm font-medium">
                 <Database className="w-4 h-4 text-accent" />
                 Backup
@@ -453,7 +564,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                   <Download className="w-4 h-4" />
                   Export Backup
                 </button>
-                <label className="px-5 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 transition-all cursor-pointer flex items-center gap-2">
+                <label className="settings-secondary-button px-5 py-2.5 rounded-xl transition-all cursor-pointer flex items-center gap-2">
                   <Upload className="w-4 h-4" />
                   Import Backup
                   <input type="file" accept="application/json" className="hidden" onChange={(e) => void handleImportBackup(e)} />
@@ -475,9 +586,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
           <section className="space-y-4">
             <h3 className="text-sm font-semibold uppercase tracking-wider text-text-muted flex items-center gap-2">
               <Palette className="w-4 h-4" />
-              Productivity
+              {t('productivity')}
             </h3>
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
+            <div className="settings-card rounded-2xl p-4 space-y-3">
               <div className="text-sm font-medium">Keyboard Shortcuts</div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs text-text-muted">
                 <div className="rounded-xl bg-black/20 px-3 py-2">
@@ -499,28 +610,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
           <section className="space-y-4">
             <h3 className="text-sm font-semibold uppercase tracking-wider text-text-muted flex items-center gap-2">
               <Shield className="w-4 h-4" />
-              Release Diagnostics
+              {t('releaseDiagnostics')}
             </h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <div className="settings-card rounded-2xl p-4">
                 <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Secure transport</div>
                 <div className={`mt-2 text-sm font-medium ${connectionTone}`}>{connectionStatus}</div>
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <div className="settings-card rounded-2xl p-4">
                 <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Queued group sends</div>
                 <div className="mt-2 text-sm font-medium text-white">{pendingGroupEventsCount ?? 0}</div>
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <div className="settings-card rounded-2xl p-4">
                 <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Pending group invites</div>
                 <div className="mt-2 text-sm font-medium text-white">{pendingGroupInvitesCount ?? 0}</div>
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <div className="settings-card rounded-2xl p-4">
                 <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Recent call issues</div>
                 <div className={`mt-2 text-sm font-medium ${recentCallIssues.length > 0 ? 'text-amber-200' : 'text-emerald-300'}`}>
                   {recentCallIssues.length > 0 ? `${recentCallIssues.length} need review` : 'No recent issues'}
                 </div>
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <div className="settings-card rounded-2xl p-4">
                 <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Group sync</div>
                 <div className={`mt-2 text-sm font-medium ${
                   groupSyncStatus.state === 'error' ? 'text-red-300' : groupSyncStatus.state === 'syncing' ? 'text-amber-200' : 'text-emerald-300'
@@ -528,7 +639,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                   {groupSyncStatus.state}
                 </div>
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <div className="settings-card rounded-2xl p-4">
                 <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Channel sync</div>
                 <div className={`mt-2 text-sm font-medium ${
                   channelSyncStatus.state === 'error' ? 'text-red-300' : channelSyncStatus.state === 'syncing' ? 'text-amber-200' : 'text-emerald-300'
@@ -537,7 +648,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                 </div>
               </div>
             </div>
-            <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-xs text-text-muted">
+            <div className="settings-card rounded-2xl px-4 py-3 text-xs text-text-muted">
               Use this section before a release candidate run: pending group sends should be zero, transport should be connected, and repeated missed or failed calls should be investigated before shipping.
             </div>
             {(groupSyncStatus.error || channelSyncStatus.error) ? (
@@ -552,15 +663,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
           <section className="space-y-4">
             <h3 className="text-sm font-semibold uppercase tracking-wider text-text-muted flex items-center gap-2">
               <PhoneCall className="w-4 h-4" />
-              Call History
+              {t('callHistory')}
             </h3>
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-4 space-y-3">
+            <div className="settings-card rounded-2xl p-4 space-y-3">
               {recentCallIssues.length > 0 ? (
                 <div className="rounded-2xl border border-amber-300/20 bg-amber-300/10 px-4 py-3">
                   <div className="text-xs font-semibold uppercase tracking-[0.22em] text-amber-100/80">Needs Attention</div>
                   <div className="mt-2 space-y-2">
                     {recentCallIssues.slice(0, 3).map((entry) => {
-                      const contact = contacts?.find((item) => item.pubKey === entry.peerPubKey);
+                      const contact = contactByPubKey.get(entry.peerPubKey);
                       const displayName = contact?.name || `${entry.peerPubKey.substring(0, 16)}...`;
                       return (
                         <div key={`issue-${entry.id}`} className="flex items-center justify-between gap-3 text-xs text-amber-50">
@@ -579,7 +690,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
               ) : (
                 callHistory.map((entry) => {
                   const Icon = getCallIcon(entry.direction, entry.outcome);
-                  const contact = contacts?.find((item) => item.pubKey === entry.peerPubKey);
+                  const contact = contactByPubKey.get(entry.peerPubKey);
                   const displayName = contact?.name || `${entry.peerPubKey.substring(0, 16)}...`;
                   return (
                     <div key={entry.id} className="flex items-center justify-between rounded-xl bg-black/20 px-3 py-3">
@@ -610,15 +721,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
           </section>
         </div>
 
-        <div className="flex justify-end gap-3 border-t border-white/10 bg-black/20 px-4 py-4 sm:gap-4 sm:p-6">
-          <button onClick={onClose} className="px-6 py-2.5 rounded-xl text-sm font-medium hover:bg-white/5 transition-all">
-            Cancel
+        <div className="settings-footer flex justify-end gap-3 px-4 py-4 sm:gap-4 sm:p-6">
+          <button onClick={onClose} className="settings-secondary-button px-6 py-2.5 rounded-xl text-sm font-medium transition-all">
+            {t('cancel')}
           </button>
           <button onClick={handleSaveProfile} className="btn-premium px-8">
-            Save Changes
+            {t('saveChanges')}
           </button>
         </div>
       </div>
     </div>
   );
+
+  return createPortal(modal, document.body);
 };

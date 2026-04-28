@@ -6,6 +6,9 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { socketManager } from './lib/socket';
 import { initNotifications, isTauri } from './lib/notifications';
 import { OnboardingModal } from './components/OnboardingModal';
+import { db } from './lib/db';
+import { decodeBase64 } from 'tweetnacl-util';
+import { useI18n } from './lib/i18n';
 
 const Auth = lazy(async () => {
   const module = await import('./pages/Auth');
@@ -18,11 +21,51 @@ const Chat = lazy(async () => {
 });
 
 function App() {
-  const { mySecretKey, isLocked } = useAppStore();
+  const { mySecretKey, isLocked, isRestoringIdentity, restoreRememberedIdentity, setActivePeer } = useAppStore();
+  const { t } = useI18n();
   const [hasDismissedOnboarding, setHasDismissedOnboarding] = useState(
     () => localStorage.getItem('messk_onboarding_seen') === '1'
   );
   const showOnboarding = Boolean(mySecretKey && !isLocked && !hasDismissedOnboarding);
+
+  useEffect(() => {
+    void restoreRememberedIdentity();
+  }, [restoreRememberedIdentity]);
+
+  useEffect(() => {
+    if (!mySecretKey || isRestoringIdentity) {
+      return;
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    const chatPubKey = params.get('chat');
+    if (!chatPubKey) {
+      return;
+    }
+
+    try {
+      if (decodeBase64(chatPubKey).length !== 32) {
+        return;
+      }
+    } catch {
+      return;
+    }
+
+    void db.contacts.get(chatPubKey).then(async (existing) => {
+      if (!existing) {
+        await db.contacts.put({
+          pubKey: chatPubKey,
+          name: `${chatPubKey.substring(0, 8)}...`,
+          lastMessageAt: Date.now(),
+        });
+      }
+      void socketManager.refreshContactProfile(chatPubKey);
+      setActivePeer(chatPubKey);
+      params.delete('chat');
+      const nextQuery = params.toString();
+      window.history.replaceState(null, '', `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}${window.location.hash}`);
+    });
+  }, [isRestoringIdentity, mySecretKey, setActivePeer]);
 
   useEffect(() => {
     // Init native notifications & autostart (Tauri only)
@@ -49,10 +92,12 @@ function App() {
     <Router>
       <Toaster position="top-center" toastOptions={{
         style: {
-          background: '#1f2937',
-          color: '#fff',
-          borderRadius: '12px',
-          border: '1px solid #374151',
+          background: 'rgba(15, 23, 42, 0.92)',
+          color: '#f8fbff',
+          borderRadius: '18px',
+          border: '1px solid rgba(174, 209, 255, 0.16)',
+          boxShadow: '0 22px 60px rgba(0, 0, 0, 0.35)',
+          backdropFilter: 'blur(18px)',
         }
       }} />
       <Routes>
@@ -68,7 +113,11 @@ function App() {
                   }}
                 />
               ) : null}
-              {mySecretKey ? <Chat /> : <Auth />}
+              {isRestoringIdentity ? (
+                <div className="flex min-h-screen items-center justify-center bg-[#020617] text-sm font-semibold text-white/70">
+                  {t('restoringSession')}
+                </div>
+              ) : mySecretKey ? <Chat /> : <Auth />}
             </>
           </Suspense>
         } />

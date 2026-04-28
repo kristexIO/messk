@@ -6,6 +6,7 @@ import (
 	crypto_rand "crypto/rand"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -33,6 +34,14 @@ var (
 	buildTime  = "unknown"
 
 	defaultRateLimiter = newIPRateLimiter(getRateLimitPerMinute, time.Minute)
+
+	errInvalidProxyURL      = errors.New("invalid proxy url")
+	errForbiddenProxyTarget = errors.New("forbidden proxy target")
+)
+
+const (
+	maxGroupMembersPerCreate = 200
+	maxProxyRedirects        = 5
 )
 
 func main() {
@@ -263,6 +272,11 @@ func main() {
 				http.Error(w, "Missing title", http.StatusBadRequest)
 				return
 			}
+			members, err := sanitizeMemberPubKeys(payload.Members, pubKey)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 
 			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 			defer cancel()
@@ -271,11 +285,11 @@ func main() {
 				http.Error(w, "Internal error", http.StatusInternalServerError)
 				return
 			}
-			if err := db.CreateGroup(ctx, groupID, payload.Title, payload.Avatar, pubKey, payload.Members); err != nil {
+			if err := db.CreateGroup(ctx, groupID, payload.Title, payload.Avatar, pubKey, members); err != nil {
 				http.Error(w, "Failed to create group", http.StatusInternalServerError)
 				return
 			}
-			if err := dispatchGroupInvites(ctx, hub, db, groupID, pubKey, payload.Members); err != nil {
+			if err := dispatchGroupInvites(ctx, hub, db, groupID, pubKey, members); err != nil {
 				log.Printf("Failed to dispatch group invites for %s: %v", groupID, err)
 			}
 
@@ -760,7 +774,7 @@ func main() {
 	c := cors.New(cors.Options{
 		AllowedOrigins:   getAllowedOrigins(),
 		AllowCredentials: true,
-		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
+		AllowedMethods:   []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"*"},
 	})
 	handler := requestLoggingMiddleware(securityHeadersMiddleware(c.Handler(mux)))
@@ -798,6 +812,10 @@ func main() {
 		allowedPubKeys := []string{uploaderPubKey}
 		switch {
 		case recipientPubKey != "":
+			if !isValidPublicKey(recipientPubKey) {
+				http.Error(w, "Invalid recipient_pub_key", http.StatusBadRequest)
+				return
+			}
 			allowedPubKeys = append(allowedPubKeys, recipientPubKey)
 		case groupID != "":
 			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -868,6 +886,7 @@ func main() {
 			return
 		}
 		path := filepath.Join(getUploadDir(), filename)
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
 		http.ServeFile(w, r, path)
 	})
 
@@ -883,24 +902,27 @@ func main() {
 			return
 		}
 
-		parsedURL, err := url.Parse(target)
-		if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		parsedURL, err := validateProxyTargetURL(target)
+		if errors.Is(err, errInvalidProxyURL) {
 			http.Error(w, "Invalid url", http.StatusBadRequest)
 			return
 		}
-
-		host := parsedURL.Hostname()
-		if host == "" {
-			http.Error(w, "Invalid url", http.StatusBadRequest)
-			return
-		}
-		if isForbiddenProxyHost(host) {
+		if errors.Is(err, errForbiddenProxyTarget) {
 			http.Error(w, "Forbidden target", http.StatusForbidden)
 			return
 		}
+		if err != nil {
+			http.Error(w, "Invalid url", http.StatusBadRequest)
+			return
+		}
 
-		proxyClient := &http.Client{Timeout: 5 * time.Second}
-		resp, err := proxyClient.Get(target)
+		proxyClient := newSafeProxyClient(5 * time.Second)
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, parsedURL.String(), nil)
+		if err != nil {
+			http.Error(w, "Invalid url", http.StatusBadRequest)
+			return
+		}
+		resp, err := proxyClient.Do(req)
 		if err != nil {
 			http.Error(w, "Failed to fetch", http.StatusInternalServerError)
 			return
@@ -1116,6 +1138,31 @@ func splitScopedPath(path, prefix string) (string, string, bool) {
 	return parts[0], parts[1], true
 }
 
+func sanitizeMemberPubKeys(rawMembers []string, ownerPubKey string) ([]string, error) {
+	members := make([]string, 0, len(rawMembers))
+	seen := map[string]struct{}{ownerPubKey: {}}
+
+	for _, member := range rawMembers {
+		member = strings.TrimSpace(member)
+		if member == "" {
+			continue
+		}
+		if !isValidPublicKey(member) {
+			return nil, fmt.Errorf("invalid member pub_key")
+		}
+		if _, exists := seen[member]; exists {
+			continue
+		}
+		if len(members) >= maxGroupMembersPerCreate {
+			return nil, fmt.Errorf("too many group members")
+		}
+		seen[member] = struct{}{}
+		members = append(members, member)
+	}
+
+	return members, nil
+}
+
 type statusRecorder struct {
 	http.ResponseWriter
 	statusCode int
@@ -1230,7 +1277,20 @@ func isSafeUploadExtension(extension string) bool {
 		}
 		return false
 	}
+	if isExecutableUploadExtension(extension) {
+		return false
+	}
 	return true
+}
+
+func isExecutableUploadExtension(extension string) bool {
+	switch strings.ToLower(extension) {
+	case ".app", ".apk", ".bat", ".cmd", ".com", ".deb", ".dll", ".dmg", ".exe", ".hta",
+		".jar", ".js", ".jse", ".msi", ".ps1", ".rpm", ".scr", ".sh", ".vbe", ".vbs", ".wsf":
+		return true
+	default:
+		return false
+	}
 }
 
 func getMaxUploadBytes() int64 {
@@ -1314,6 +1374,44 @@ func isForbiddenProxyHost(host string) bool {
 	return false
 }
 
+func validateProxyTargetURL(rawURL string) (*url.URL, error) {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, errInvalidProxyURL
+	}
+	if err := validateParsedProxyURL(parsedURL); err != nil {
+		return nil, err
+	}
+	return parsedURL, nil
+}
+
+func validateParsedProxyURL(parsedURL *url.URL) error {
+	if parsedURL == nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		return errInvalidProxyURL
+	}
+
+	host := parsedURL.Hostname()
+	if host == "" {
+		return errInvalidProxyURL
+	}
+	if isForbiddenProxyHost(host) {
+		return errForbiddenProxyTarget
+	}
+	return nil
+}
+
+func newSafeProxyClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= maxProxyRedirects {
+				return fmt.Errorf("proxy redirect limit exceeded")
+			}
+			return validateParsedProxyURL(req.URL)
+		},
+	}
+}
+
 func isForbiddenProxyAddr(addr netip.Addr) bool {
 	return !addr.IsGlobalUnicast() ||
 		addr.IsPrivate() ||
@@ -1375,11 +1473,12 @@ func authorizeSessionSilently(hub *Hub, r *http.Request) (string, bool) {
 }
 
 type ipRateLimiter struct {
-	mu      sync.Mutex
-	clients map[string]rateLimitBucket
-	limit   func() int
-	window  time.Duration
-	now     func() time.Time
+	mu          sync.Mutex
+	clients     map[string]rateLimitBucket
+	limit       func() int
+	window      time.Duration
+	now         func() time.Time
+	lastCleanup time.Time
 }
 
 type rateLimitBucket struct {
@@ -1411,10 +1510,13 @@ func (l *ipRateLimiter) allow(remoteAddr string) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	for key, bucket := range l.clients {
-		if now.After(bucket.ResetAt) {
-			delete(l.clients, key)
+	if l.lastCleanup.IsZero() || now.Sub(l.lastCleanup) >= l.window {
+		for key, bucket := range l.clients {
+			if now.After(bucket.ResetAt) {
+				delete(l.clients, key)
+			}
 		}
+		l.lastCleanup = now
 	}
 
 	bucket, ok := l.clients[ip]

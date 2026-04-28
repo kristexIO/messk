@@ -29,6 +29,7 @@ export interface Contact {
   pubKey: string;
   name: string;
   avatar?: string | null;
+  username?: string | null;
   lastMessageAt?: number;
   pinned?: boolean;
   draft?: string;

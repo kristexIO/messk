@@ -2,7 +2,8 @@ import { create } from 'zustand';
 import { migrateLocalDataToEncryptedAtRest, persistIdentityKeyPair, setVaultKey, switchActiveDatabase } from '../lib/db';
 
 export type Theme = 'dark' | 'light' | 'cyberpunk' | 'forest';
-export type DesignStyle = 'glass' | 'neumorph';
+export type DesignStyle = 'glass' | 'neumorph' | 'telegram';
+export type Language = 'en' | 'ru' | 'fr' | 'de';
 
 export type CollectionSyncStatus = {
   state: 'idle' | 'syncing' | 'synced' | 'error';
@@ -31,6 +32,9 @@ interface AppState {
   pinHash: string | null;
   theme: Theme;
   designStyle: DesignStyle;
+  language: Language;
+  isRestoringIdentity: boolean;
+  isIdentityRemembered: boolean;
 
   // Actions
   setKeys: (publicKey: string, secretKey: string) => void;
@@ -47,6 +51,9 @@ interface AppState {
   lockApp: () => void;
   setTheme: (theme: Theme) => void;
   setDesignStyle: (designStyle: DesignStyle) => void;
+  setLanguage: (language: Language) => void;
+  restoreRememberedIdentity: () => Promise<void>;
+  forgetRememberedIdentity: () => void;
   logout: () => void;
 }
 
@@ -61,6 +68,44 @@ const loadSettings = () => {
 };
 
 const savedSettings = loadSettings();
+const REMEMBERED_IDENTITY_KEY = 'messenger_remembered_identity';
+
+const normalizeLanguage = (value: unknown): Language => {
+  return value === 'ru' || value === 'fr' || value === 'de' || value === 'en' ? value : 'en';
+};
+
+const normalizeTheme = (value: unknown): Theme => {
+  return value === 'light' || value === 'cyberpunk' || value === 'forest' || value === 'dark' ? value : 'dark';
+};
+
+const normalizeDesignStyle = (value: unknown): DesignStyle => {
+  return value === 'neumorph' || value === 'telegram' || value === 'glass' ? value : 'glass';
+};
+
+const loadRememberedIdentity = (): { publicKey: string; secretKey: string } | null => {
+  try {
+    const saved = localStorage.getItem(REMEMBERED_IDENTITY_KEY);
+    if (!saved) {
+      return null;
+    }
+    const parsed = JSON.parse(saved) as Partial<{ publicKey: string; secretKey: string }>;
+    if (typeof parsed.publicKey !== 'string' || typeof parsed.secretKey !== 'string') {
+      return null;
+    }
+    return { publicKey: parsed.publicKey, secretKey: parsed.secretKey };
+  } catch {
+    return null;
+  }
+};
+
+const rememberIdentity = (publicKey: string, secretKey: string) => {
+  localStorage.setItem(REMEMBERED_IDENTITY_KEY, JSON.stringify({ publicKey, secretKey }));
+};
+
+const removeRememberedIdentity = () => {
+  localStorage.removeItem(REMEMBERED_IDENTITY_KEY);
+};
+
 const loadProfileForKey = (publicKey: string): { nickname?: string | null; avatar?: string | null; username?: string | null } | null => {
   const profiles = loadSettings().profiles;
   if (!profiles || typeof profiles !== 'object') {
@@ -90,12 +135,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   channelSyncStatus: { state: 'idle', lastSyncAt: null, error: null },
   isLocked: false,
   pinHash: savedSettings.pinHash || null,
-  theme: savedSettings.theme || 'dark',
-  designStyle: savedSettings.designStyle || 'glass',
+  theme: normalizeTheme(savedSettings.theme),
+  designStyle: normalizeDesignStyle(savedSettings.designStyle),
+  language: normalizeLanguage(savedSettings.language),
+  isRestoringIdentity: true,
+  isIdentityRemembered: loadRememberedIdentity() !== null,
 
   setKeys: (publicKey, secretKey) => {
     switchActiveDatabase(publicKey);
     setVaultKey(secretKey);
+    rememberIdentity(publicKey, secretKey);
     const savedProfile = loadProfileForKey(publicKey);
     set({
       myPublicKey: publicKey,
@@ -103,6 +152,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       nickname: savedProfile?.nickname ?? null,
       avatar: savedProfile?.avatar ?? null,
       username: savedProfile?.username ?? null,
+      isRestoringIdentity: false,
+      isIdentityRemembered: true,
     });
     void persistIdentityKeyPair(publicKey, secretKey).catch((error) => {
       console.error('Failed to persist current identity key pair', error);
@@ -177,8 +228,47 @@ export const useAppStore = create<AppState>((set, get) => ({
       designStyle
     }));
   },
+
+  setLanguage: (language) => {
+    set({ language });
+    localStorage.setItem('messenger_settings', JSON.stringify({
+      ...loadSettings(),
+      language
+    }));
+  },
+
+  restoreRememberedIdentity: async () => {
+    const identity = loadRememberedIdentity();
+    if (!identity) {
+      set({ isRestoringIdentity: false, isIdentityRemembered: false });
+      return;
+    }
+
+    switchActiveDatabase(identity.publicKey);
+    setVaultKey(identity.secretKey);
+    const savedProfile = loadProfileForKey(identity.publicKey);
+    set({
+      myPublicKey: identity.publicKey,
+      mySecretKey: identity.secretKey,
+      nickname: savedProfile?.nickname ?? savedSettings.nickname ?? null,
+      avatar: savedProfile?.avatar ?? savedSettings.avatar ?? null,
+      username: savedProfile?.username ?? savedSettings.username ?? null,
+      isRestoringIdentity: false,
+      isIdentityRemembered: true,
+    });
+
+    void migrateLocalDataToEncryptedAtRest().catch((error) => {
+      console.error('Failed to migrate local encrypted data', error);
+    });
+  },
+
+  forgetRememberedIdentity: () => {
+    removeRememberedIdentity();
+    set({ isIdentityRemembered: false });
+  },
   
   logout: () => {
+    removeRememberedIdentity();
     switchActiveDatabase(null);
     setVaultKey(null);
     set({
@@ -192,7 +282,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       groupSyncStatus: { state: 'idle', lastSyncAt: null, error: null },
       channelSyncStatus: { state: 'idle', lastSyncAt: null, error: null },
       isLocked: false,
-      pinHash: null
+      pinHash: null,
+      isRestoringIdentity: false,
+      isIdentityRemembered: false,
     });
     // Keep theme and nickname on logout for convenience
   },
@@ -200,6 +292,6 @@ export const useAppStore = create<AppState>((set, get) => ({
 
 // Initialize theme on load
 if (typeof document !== 'undefined') {
-  document.documentElement.setAttribute('data-theme', savedSettings.theme || 'dark');
-  document.documentElement.setAttribute('data-style', savedSettings.designStyle || 'glass');
+  document.documentElement.setAttribute('data-theme', normalizeTheme(savedSettings.theme));
+  document.documentElement.setAttribute('data-style', normalizeDesignStyle(savedSettings.designStyle));
 }

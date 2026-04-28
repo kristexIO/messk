@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,13 +20,13 @@ func newTestClient(pubKey string) *Client {
 	}
 }
 
-func TestRouteToLocalDeliversMessageToRecipientAndSenderSessions(t *testing.T) {
+func TestRouteToLocalDeliversMessageToRecipient(t *testing.T) {
 	hub := NewHub(nil, nil, nil)
 	recipient := newTestClient("recipient")
 	senderMirror := newTestClient("sender")
 
-	hub.clients["recipient"] = map[*Client]bool{recipient: true}
-	hub.clients["sender"] = map[*Client]bool{senderMirror: true}
+	hub.clients["recipient"] = recipient
+	hub.clients["sender"] = senderMirror
 
 	msg := &Message{
 		Type:            "message",
@@ -42,16 +43,7 @@ func TestRouteToLocalDeliversMessageToRecipientAndSenderSessions(t *testing.T) {
 			t.Fatalf("recipient payload mismatch: %s", string(got))
 		}
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("recipient did not receive routed message")
-	}
-
-	select {
-	case got := <-senderMirror.send:
-		if string(got) != string(msg.Payload) {
-			t.Fatalf("sender mirror payload mismatch: %s", string(got))
-		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("sender mirror did not receive sync copy")
+		t.Fatal("recipient did not receive message")
 	}
 }
 
@@ -82,8 +74,8 @@ func TestRouteToLocalDoesNotMirrorTypingToSenderSessions(t *testing.T) {
 	recipient := newTestClient("recipient")
 	senderMirror := newTestClient("sender")
 
-	hub.clients["recipient"] = map[*Client]bool{recipient: true}
-	hub.clients["sender"] = map[*Client]bool{senderMirror: true}
+	hub.clients["recipient"] = recipient
+	hub.clients["sender"] = senderMirror
 
 	msg := &Message{
 		Type:            "typing",
@@ -104,6 +96,47 @@ func TestRouteToLocalDoesNotMirrorTypingToSenderSessions(t *testing.T) {
 	case <-senderMirror.send:
 		t.Fatal("typing event should not be mirrored to sender sessions")
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestDecodeRedisRouteIgnoresSelfPublishedMessages(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	payload, err := json.Marshal(redisRouteEnvelope{
+		Origin: hub.instanceID,
+		Message: Message{
+			Type:            "message",
+			SenderPubKey:    "sender",
+			RecipientPubKey: "recipient",
+			Payload:         []byte(`{"type":"message","msg_id":"self-echo"}`),
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal redis route: %v", err)
+	}
+
+	if _, ok := hub.decodeRedisRoute(payload); ok {
+		t.Fatal("expected self-published redis route to be ignored")
+	}
+}
+
+func TestDecodeRedisRouteAcceptsLegacyMessages(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	payload, err := json.Marshal(Message{
+		Type:            "message",
+		SenderPubKey:    "sender",
+		RecipientPubKey: "recipient",
+		Payload:         []byte(`{"type":"message","msg_id":"legacy"}`),
+	})
+	if err != nil {
+		t.Fatalf("marshal legacy route: %v", err)
+	}
+
+	msg, ok := hub.decodeRedisRoute(payload)
+	if !ok {
+		t.Fatal("expected legacy redis route to be accepted")
+	}
+	if string(msg.Payload) != `{"type":"message","msg_id":"legacy"}` {
+		t.Fatalf("legacy payload mismatch: %s", string(msg.Payload))
 	}
 }
 
@@ -181,6 +214,39 @@ func TestRouteToLocalDoesNotStoreOfflineTypingEvents(t *testing.T) {
 	}
 }
 
+func TestRouteToLocalDoesNotStoreOfflineWebRTCEvents(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "messenger-test.db")
+	db := InitDB(ctx, dbPath)
+	defer db.Close()
+
+	if err := db.SaveUserIfNotExists(ctx, "sender"); err != nil {
+		t.Fatalf("save sender user: %v", err)
+	}
+	if err := db.SaveUserIfNotExists(ctx, "recipient"); err != nil {
+		t.Fatalf("save recipient user: %v", err)
+	}
+
+	hub := NewHub(db, InitCache(), nil)
+	msg := &Message{
+		Type:            "call_offer",
+		SenderPubKey:    "sender",
+		RecipientPubKey: "recipient",
+		Payload:         []byte(`{"type":"call_offer"}`),
+	}
+
+	hub.routeToLocal(msg, true)
+	time.Sleep(150 * time.Millisecond)
+
+	stored, err := db.GetAndDeleteOfflineMessages(ctx, "recipient")
+	if err != nil {
+		t.Fatalf("read offline messages: %v", err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("expected no offline entries for WebRTC events, got %d", len(stored))
+	}
+}
+
 func TestSaveOfflineMessageDeduplicatesByMessageID(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "messenger-test.db")
@@ -247,7 +313,7 @@ func TestDropClientRemovesSessionToken(t *testing.T) {
 	hub := NewHub(nil, InitCache(), nil)
 	client := newTestClient("sender")
 	client.Token = "session-token"
-	hub.clients["sender"] = map[*Client]bool{client: true}
+	hub.clients["sender"] = client
 	hub.StoreSessionToken(client.Token, client.PubKey)
 
 	hub.dropClient(client, "test")

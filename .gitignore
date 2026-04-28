@@ -1,5 +1,7 @@
 # Local runtime data
 mess/messenger.db
+mess/*.db-shm
+mess/*.db-wal
 mess/uploads/
 mess/query
 

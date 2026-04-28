@@ -13,6 +13,8 @@ import { getMessageNotificationPreview, isMentioningPubKey } from './message-for
 const WS_URL = appConfig.wsUrl;
 const DIRECT_RETRY_BASE_DELAY_MS = 3_000;
 const DIRECT_RETRY_MAX_DELAY_MS = 30_000;
+const SOCKET_FAST_RECONNECT_ATTEMPTS = 5;
+const SOCKET_IDLE_RECONNECT_DELAY_MS = 60_000;
 
 type IncomingEnvelope = {
   type: string;
@@ -206,6 +208,7 @@ export class SocketManager {
   private static instance: SocketManager;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempts = 0;
+  private lastConnectionErrorLogAt = 0;
   private authenticated = false;
   private sessionToken: string | null = null;
   private manualDisconnect = false;
@@ -253,15 +256,39 @@ export class SocketManager {
     return Math.min(DIRECT_RETRY_MAX_DELAY_MS, delay);
   }
 
+  private getReconnectDelay() {
+    if (this.reconnectAttempts >= SOCKET_FAST_RECONNECT_ATTEMPTS) {
+      return SOCKET_IDLE_RECONNECT_DELAY_MS;
+    }
+    return Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
+  }
+
+  private logConnectionProblem(error?: Event) {
+    const now = Date.now();
+    if (now - this.lastConnectionErrorLogAt < 15000) {
+      return;
+    }
+    this.lastConnectionErrorLogAt = now;
+    console.warn(`WebSocket is unavailable at ${WS_URL}. Check that the backend is running on the configured host and port.`, error);
+  }
+
   connect(pubKey: string) {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
     this.manualDisconnect = false;
-    useAppStore.getState().setConnectionStatus(this.reconnectAttempts > 0 ? 'reconnecting' : 'connecting');
+    useAppStore.getState().setConnectionStatus(
+      this.reconnectAttempts >= SOCKET_FAST_RECONNECT_ATTEMPTS
+        ? 'offline'
+        : this.reconnectAttempts > 0
+          ? 'reconnecting'
+          : 'connecting'
+    );
 
     const url = `${WS_URL}?pub=${encodeURIComponent(pubKey)}`;
-    console.log('Connecting to WS:', url);
+    if (this.reconnectAttempts === 0) {
+      console.info('Connecting to WS:', url);
+    }
     
     this.ws = new WebSocket(url);
     this.authenticated = false;
@@ -656,7 +683,6 @@ export class SocketManager {
     };
 
     this.ws.onclose = () => {
-      console.log('WebSocket closed, attempting reconnect...');
       this.ws = null;
       this.authenticated = false;
       this.sessionToken = null;
@@ -670,15 +696,24 @@ export class SocketManager {
         return;
       }
 
-      useAppStore.getState().setConnectionStatus('reconnecting');
-      const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
-      this.reconnectAttempts++;
+      const delay = this.getReconnectDelay();
+      const nextAttempt = this.reconnectAttempts + 1;
+      const isBackgroundRetry = nextAttempt > SOCKET_FAST_RECONNECT_ATTEMPTS;
+      useAppStore.getState().setConnectionStatus(isBackgroundRetry ? 'offline' : 'reconnecting');
+      if (nextAttempt === 1 || nextAttempt === SOCKET_FAST_RECONNECT_ATTEMPTS || nextAttempt % 10 === 0) {
+        console.info(
+          isBackgroundRetry
+            ? `WebSocket unavailable. Background retry ${nextAttempt} in ${Math.round(delay / 1000)}s.`
+            : `WebSocket disconnected. Reconnect attempt ${nextAttempt} in ${Math.round(delay / 1000)}s.`
+        );
+      }
+      this.reconnectAttempts = nextAttempt;
       
       this.reconnectTimer = setTimeout(() => this.connect(pubKey), delay);
     };
 
     this.ws.onerror = (err) => {
-      console.error('WebSocket Error:', err);
+      this.logConnectionProblem(err);
       useAppStore.getState().setConnectionStatus('offline');
       this.ws?.close();
     };

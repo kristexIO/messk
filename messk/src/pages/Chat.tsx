@@ -13,8 +13,9 @@ import { VoiceWaveform } from '../components/VoiceWaveform';
 import { toast } from 'react-hot-toast';
 import { appConfig } from '../lib/config';
 import { fetchWithTimeout, toNetworkErrorMessage, UPLOAD_REQUEST_TIMEOUT_MS } from '../lib/http';
-import { encodeRichTextMessage, parseRichTextMessage, type MessageMention } from '../lib/message-format';
+import { encodeRichTextMessage, isMentioningPubKey, parseRichTextMessage, type MessageMention } from '../lib/message-format';
 import { deriveMentionHandle, getPublicKeyFingerprint } from '../lib/identity';
+import { useI18n } from '../lib/i18n';
 import {
   addChannelSubscriber,
   addGroupMember,
@@ -215,7 +216,8 @@ const MessageBubble = React.memo(({
   onReact,
   canPin = false,
   isPinned = false,
-  onPin
+  onPin,
+  onMentionClick
 }: {
   msg: StoredMessage;
   isMine: boolean;
@@ -379,6 +381,7 @@ export const Chat: React.FC = () => {
     groupSyncStatus,
     channelSyncStatus
   } = useAppStore();
+  const { t } = useI18n();
   const [draftOverrides, setDraftOverrides] = React.useState<Record<string, string>>({});
   const [isUploading, setIsUploading] = React.useState(false);
   const [isRecording, setIsRecording] = React.useState(false);
@@ -489,15 +492,15 @@ export const Chat: React.FC = () => {
   const canPostInChannel = activeChannel?.role === 'owner' || activeChannel?.role === 'admin' || activeChannel?.role === 'poster';
   const canPinChannelPosts = activeChannel?.role === 'owner' || activeChannel?.role === 'admin';
   const activeGroupMembersKey = activeGroupMembers.join('|');
-  const displayedGroupMembers = activeGroupId
+  const displayedGroupMembers = React.useMemo(() => activeGroupId
     ? (groupMembersMeta.length ? groupMembersMeta : activeGroupMembers.map((memberPubKey) => ({
-        memberPubKey,
-        role: memberPubKey === myPublicKey ? activeGroup?.role ?? 'member' : 'member',
-      })))
-    : [];
-  const displayedChannelSubscribers = activeChannelId
+      memberPubKey,
+      role: memberPubKey === myPublicKey ? activeGroup?.role ?? 'member' : 'member',
+    })))
+    : [], [activeGroup?.role, activeGroupId, activeGroupMembers, groupMembersMeta, myPublicKey]);
+  const displayedChannelSubscribers = React.useMemo(() => activeChannelId
     ? (channelSubscribersMeta.length ? channelSubscribersMeta : [])
-    : [];
+    : [], [activeChannelId, channelSubscribersMeta]);
   const messageInput = activeThreadId
     ? (draftOverrides[activeThreadId] ?? (activePeerKey ? activeContact?.draft ?? '' : ''))
     : '';
@@ -625,7 +628,7 @@ export const Chat: React.FC = () => {
 
   useEffect(() => {
     if (!activePeerKey) {
-      setActivePeerFingerprint('');
+      void Promise.resolve().then(() => setActivePeerFingerprint(''));
       return;
     }
     void getPublicKeyFingerprint(activePeerKey)
@@ -634,20 +637,23 @@ export const Chat: React.FC = () => {
   }, [activePeerKey]);
 
   useEffect(() => {
-    setMentionQuery('');
-    setMentionStartIndex(null);
-    setMentionSelectionIndex(0);
+    void Promise.resolve().then(() => {
+      setMentionQuery('');
+      setMentionStartIndex(null);
+      setMentionSelectionIndex(0);
+    });
   }, [activeThreadId]);
 
   useEffect(() => {
+    let newIndex = mentionSelectionIndex;
     if (!mentionSuggestions.length) {
-      if (mentionSelectionIndex !== 0) {
-        setMentionSelectionIndex(0);
-      }
-      return;
+      newIndex = 0;
+    } else if (mentionSelectionIndex >= mentionSuggestions.length) {
+      newIndex = 0;
     }
-    if (mentionSelectionIndex >= mentionSuggestions.length) {
-      setMentionSelectionIndex(0);
+
+    if (newIndex !== mentionSelectionIndex) {
+      void Promise.resolve().then(() => setMentionSelectionIndex(newIndex));
     }
   }, [mentionSelectionIndex, mentionSuggestions.length]);
 
@@ -1404,6 +1410,13 @@ export const Chat: React.FC = () => {
     window.dispatchEvent(new CustomEvent('start_call', { detail: { video } }));
   };
 
+  const handleInitEdit = (msg: StoredMessage) => {
+    handleEditMessage(msg);
+  };
+
+  const handleReaction = (msg: StoredMessage, reaction: string) => {
+    void handleReactToMessage(msg, reaction);
+  };
   const handleEditMessage = async (msg: StoredMessage) => {
     if ((!activePeerKey && !activeGroupId && !activeChannelId) || !myPublicKey || msg.deletedAt) return;
     if (activeChannelId && msg.senderPublicKey !== myPublicKey && activeChannel?.role !== 'owner' && activeChannel?.role !== 'admin') {
@@ -1488,17 +1501,17 @@ export const Chat: React.FC = () => {
   );
 
   return (
-    <div className="app-shell-height flex overflow-hidden">
+    <div className="messk-shell app-shell-height flex overflow-hidden">
       <Sidebar />
 
       <div className={`
         ${activePeerKey || activeGroupId || activeChannelId ? 'flex' : 'hidden md:flex'}
-        w-full flex-col flex-1 relative
+        chat-stage w-full flex-col flex-1 relative
       `}>
         {activePeerKey ? (
           <>
             <CallOverlay />
-            <header className="premium-glass z-20 flex min-h-20 flex-shrink-0 items-center justify-between border-b border-white/5 px-4 py-3 sm:px-6">
+            <header className="chat-header premium-glass z-20 flex min-h-20 flex-shrink-0 items-center justify-between border-b border-white/5 px-4 py-3 sm:px-6">
               <div className="flex min-w-0 items-center gap-3 sm:gap-4">
                 <button
                   className="md:hidden p-2 -ml-2 text-text-muted hover:text-white"
@@ -1654,7 +1667,7 @@ export const Chat: React.FC = () => {
 
             <div
               ref={messageListRef}
-              className="flex-1 overflow-y-auto bg-black/10 p-3 space-y-4 custom-scrollbar sm:p-6 sm:space-y-6"
+              className="message-list flex-1 overflow-y-auto bg-black/10 p-3 space-y-4 custom-scrollbar sm:p-6 sm:space-y-6"
               role="log"
               aria-live="polite"
               aria-label={`Messages with ${contactName}`}
@@ -1685,16 +1698,16 @@ export const Chat: React.FC = () => {
                   ))}
                 </div>
               ) : messages.length === 0 ? (
-                <div className="h-full flex flex-col items-center justify-center text-center opacity-40">
+                <div className="empty-thread-card h-full flex flex-col items-center justify-center text-center">
                   <ShieldCheck className="w-16 h-16 mb-4 text-accent" />
                   <h3 className="text-lg font-medium">New Secure Session</h3>
                   <p className="text-sm max-w-[240px] mt-1">Messages are encrypted before leaving your device.</p>
                 </div>
               ) : filteredMessages?.length === 0 ? (
-                <div className="h-full flex flex-col items-center justify-center text-center opacity-40">
+                <div className="empty-thread-card h-full flex flex-col items-center justify-center text-center">
                   <Search className="w-14 h-14 mb-4 text-accent" />
                   <h3 className="text-lg font-medium">No Matches</h3>
-                  <p className="text-sm max-w-[260px] mt-1">No messages match “{messageSearch}”.</p>
+                  <p className="text-sm max-w-[260px] mt-1">No messages match "{messageSearch}".</p>
                 </div>
               ) : (
                 visibleMessages?.map((msg) => (
@@ -1736,11 +1749,11 @@ export const Chat: React.FC = () => {
               </button>
             ) : null}
 
-            <div className="premium-glass border-t border-white/5 bg-transparent p-3 sm:p-6">
+            <div className="chat-composer premium-glass border-t border-white/5 bg-transparent p-3 sm:p-6">
               <form onSubmit={handleSendMessage} className="mx-auto flex max-w-5xl items-end gap-2 sm:gap-3">
                 <input type="file" className="hidden" ref={fileInputRef} onChange={handleFileChange} />
 
-                <div className="relative flex flex-1 items-end gap-2 rounded-2xl border border-white/10 bg-white/5 p-2 transition-all focus-within:border-accent/40 focus-within:bg-white/10">
+                <div className="composer-input relative flex flex-1 items-end gap-2 rounded-2xl border border-white/10 bg-white/5 p-2 transition-all focus-within:border-accent/40 focus-within:bg-white/10">
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
@@ -1822,16 +1835,10 @@ export const Chat: React.FC = () => {
                 ) : null}
               </form>
             </div>
-            {userIdentityModalVisible && (
-              <UserIdentityModal
-                pubKey={selectedIdentityPubKey}
-                onClose={() => setUserIdentityModalVisible(false)}
-              />
-            )}
           </>
         ) : activeGroup ? (
           <>
-            <header className="premium-glass z-20 flex min-h-20 flex-shrink-0 items-center justify-between border-b border-white/5 px-4 py-3 sm:px-6">
+            <header className="chat-header premium-glass z-20 flex min-h-20 flex-shrink-0 items-center justify-between border-b border-white/5 px-4 py-3 sm:px-6">
               <div className="flex min-w-0 items-center gap-3 sm:gap-4">
                 <button
                   className="md:hidden p-2 -ml-2 text-text-muted hover:text-white"
@@ -1922,7 +1929,7 @@ export const Chat: React.FC = () => {
                 ) : null}
                 <div
                   ref={messageListRef}
-                  className="flex-1 overflow-y-auto bg-black/10 p-3 space-y-4 custom-scrollbar sm:p-6 sm:space-y-6"
+                  className="message-list flex-1 overflow-y-auto bg-black/10 p-3 space-y-4 custom-scrollbar sm:p-6 sm:space-y-6"
                   role="log"
                   aria-live="polite"
                   aria-label={`Messages in ${activeGroup.title}`}
@@ -1966,7 +1973,7 @@ export const Chat: React.FC = () => {
                       </React.Fragment>
                     ))
                   ) : (
-                    <div className="h-full flex flex-col items-center justify-center text-center opacity-40">
+                    <div className="empty-thread-card h-full flex flex-col items-center justify-center text-center">
                       <Users className="w-16 h-16 mb-4 text-accent" />
                       <h3 className="text-lg font-medium">Group is ready</h3>
                       <p className="text-sm max-w-[280px] mt-1">Send the first message and bring the whole team into one room.</p>
@@ -1975,10 +1982,10 @@ export const Chat: React.FC = () => {
                   <div ref={messagesEndRef} />
                 </div>
 
-                <div className="premium-glass border-t border-white/5 bg-transparent p-3 sm:p-6">
+                <div className="chat-composer premium-glass border-t border-white/5 bg-transparent p-3 sm:p-6">
                   <form onSubmit={handleSendMessage} className="mx-auto flex max-w-5xl items-end gap-2 sm:gap-3">
                     <input type="file" className="hidden" ref={fileInputRef} onChange={handleFileChange} />
-                    <div className="relative flex flex-1 items-end gap-2 rounded-2xl border border-white/10 bg-white/5 p-2 transition-all focus-within:border-accent/40 focus-within:bg-white/10">
+                    <div className="composer-input relative flex flex-1 items-end gap-2 rounded-2xl border border-white/10 bg-white/5 p-2 transition-all focus-within:border-accent/40 focus-within:bg-white/10">
                       <button
                         type="button"
                         onClick={() => fileInputRef.current?.click()}
@@ -2145,16 +2152,10 @@ export const Chat: React.FC = () => {
                 </div>
               </aside>
             </div>
-            {userIdentityModalVisible && (
-              <UserIdentityModal
-                pubKey={selectedIdentityPubKey}
-                onClose={() => setUserIdentityModalVisible(false)}
-              />
-            )}
           </>
         ) : activeChannel ? (
           <>
-            <header className="premium-glass z-20 flex min-h-20 flex-shrink-0 items-center justify-between border-b border-white/5 px-4 py-3 sm:px-6">
+            <header className="chat-header premium-glass z-20 flex min-h-20 flex-shrink-0 items-center justify-between border-b border-white/5 px-4 py-3 sm:px-6">
               <div className="flex items-center gap-4">
                 <button
                   className="md:hidden p-2 -ml-2 text-text-muted hover:text-white"
@@ -2216,7 +2217,7 @@ export const Chat: React.FC = () => {
                 ) : null}
                 <div
                   ref={messageListRef}
-                  className="flex-1 overflow-y-auto bg-black/10 p-3 space-y-4 custom-scrollbar sm:p-6 sm:space-y-6"
+                  className="message-list flex-1 overflow-y-auto bg-black/10 p-3 space-y-4 custom-scrollbar sm:p-6 sm:space-y-6"
                   role="log"
                   aria-live="polite"
                   aria-label={`Posts in ${activeChannel.title}`}
@@ -2263,7 +2264,7 @@ export const Chat: React.FC = () => {
                       </React.Fragment>
                     ))
                   ) : (
-                    <div className="h-full flex flex-col items-center justify-center text-center opacity-40">
+                    <div className="empty-thread-card h-full flex flex-col items-center justify-center text-center">
                       <Megaphone className="w-16 h-16 mb-4 text-violet-200" />
                       <h3 className="text-lg font-medium">Channel is ready</h3>
                       <p className="text-sm max-w-[320px] mt-1">
@@ -2276,11 +2277,11 @@ export const Chat: React.FC = () => {
                   <div ref={messagesEndRef} />
                 </div>
 
-                <div className="premium-glass border-t border-white/5 bg-transparent p-3 sm:p-6">
+                <div className="chat-composer premium-glass border-t border-white/5 bg-transparent p-3 sm:p-6">
                   {canPostInChannel ? (
                     <form onSubmit={handleSendMessage} className="mx-auto flex max-w-5xl items-end gap-2 sm:gap-3">
                       <input type="file" className="hidden" ref={fileInputRef} onChange={handleFileChange} />
-                      <div className="relative flex flex-1 items-end gap-2 rounded-2xl border border-white/10 bg-white/5 p-2 transition-all focus-within:border-violet-300/40 focus-within:bg-white/10">
+                      <div className="composer-input relative flex flex-1 items-end gap-2 rounded-2xl border border-white/10 bg-white/5 p-2 transition-all focus-within:border-violet-300/40 focus-within:bg-white/10">
                         <button
                           type="button"
                           onClick={() => fileInputRef.current?.click()}
@@ -2543,26 +2544,26 @@ export const Chat: React.FC = () => {
             </div>
           </>
         ) : (
-          <div className="flex-1 flex flex-col items-center justify-center px-6 text-center opacity-80">
-            <div className="w-32 h-32 rounded-full border-2 border-dashed border-white/20 flex items-center justify-center mb-6 opacity-40">
+          <div className="chat-empty-state flex-1 flex flex-col items-center justify-center px-6 text-center opacity-80">
+            <div className="empty-orb w-32 h-32 rounded-full border-2 border-dashed border-white/20 flex items-center justify-center mb-6">
               <ShieldCheck className="w-16 h-16" />
             </div>
-            <p className="text-xl font-medium">Select a contact or group to get started</p>
+            <p className="text-xl font-medium">{t('emptyTitle')}</p>
             <p className="mt-2 max-w-md text-sm text-text-muted">
-              Secure messages, attachments, voice notes, backups and the new group spaces all live in one workspace.
+              {t('emptySubtitle')}
             </p>
             <div className="mt-6 grid w-full max-w-2xl grid-cols-1 gap-3 md:grid-cols-3">
-              <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left">
-                <div className="text-xs font-semibold uppercase tracking-wide text-accent">Find Faster</div>
-                <div className="mt-1 text-sm text-text-muted">Use `Ctrl + F` inside a chat to jump straight into message search.</div>
+              <div className="feature-tile rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left">
+                <div className="text-xs font-semibold uppercase tracking-wide text-accent">{t('findFaster')}</div>
+                <div className="mt-1 text-sm text-text-muted">{t('findFasterText')}</div>
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left">
-                <div className="text-xs font-semibold uppercase tracking-wide text-accent">Build Rooms</div>
-                <div className="mt-1 text-sm text-text-muted">Create focused groups for product squads, launches and communities.</div>
+              <div className="feature-tile rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left">
+                <div className="text-xs font-semibold uppercase tracking-wide text-accent">{t('buildRooms')}</div>
+                <div className="mt-1 text-sm text-text-muted">{t('buildRoomsText')}</div>
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left">
-                <div className="text-xs font-semibold uppercase tracking-wide text-accent">Recover Safely</div>
-                <div className="mt-1 text-sm text-text-muted">Encrypted backups protect profile, contacts and history while excluding secret keys.</div>
+              <div className="feature-tile rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left">
+                <div className="text-xs font-semibold uppercase tracking-wide text-accent">{t('recoverSafely')}</div>
+                <div className="mt-1 text-sm text-text-muted">{t('recoverSafelyText')}</div>
               </div>
             </div>
           </div>
