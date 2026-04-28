@@ -1503,6 +1503,7 @@ export const Chat: React.FC = () => {
   return (
     <div className="messk-shell app-shell-height flex overflow-hidden">
       <Sidebar />
+      <CallOverlay />
 
       <div className={`
         ${activePeerKey || activeGroupId || activeChannelId ? 'flex' : 'hidden md:flex'}
@@ -1510,7 +1511,6 @@ export const Chat: React.FC = () => {
       `}>
         {activePeerKey ? (
           <>
-            <CallOverlay />
             <header className="chat-header premium-glass z-20 flex min-h-20 flex-shrink-0 items-center justify-between border-b border-white/5 px-4 py-3 sm:px-6">
               <div className="flex min-w-0 items-center gap-3 sm:gap-4">
                 <button

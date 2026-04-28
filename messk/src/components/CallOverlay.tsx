@@ -264,7 +264,15 @@ export const CallOverlay: React.FC = () => {
     );
 
   const handleStartCallAction = async (video: boolean, targetPubKey = activePeerKey) => {
-    if (!targetPubKey) return;
+    if (!targetPubKey) {
+      presentStatus('Open a direct chat before starting a call', 'warning', false);
+      return;
+    }
+    if (!socketManager.isRealtimeReady()) {
+      setLastRetryTarget({ peerPubKey: targetPubKey, video });
+      presentStatus('Secure signaling is offline. Reconnect and try again.', 'danger', false);
+      return;
+    }
     try {
       const generation = callGenerationRef.current + 1;
       callGenerationRef.current = generation;
@@ -318,6 +326,10 @@ export const CallOverlay: React.FC = () => {
 
   const handleAccept = async () => {
     if (!callerPubKey || !incomingSDP) return;
+    if (!socketManager.isRealtimeReady()) {
+      presentStatus('Secure signaling is offline. Reconnect and try again.', 'danger', false);
+      return;
+    }
     try {
       const generation = callGenerationRef.current + 1;
       callGenerationRef.current = generation;

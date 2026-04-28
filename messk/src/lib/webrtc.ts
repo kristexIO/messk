@@ -55,6 +55,10 @@ export class WebRTCManager {
   }
 
   async startCall(recipientPubKey: string, isVideo: boolean) {
+    if (!socketManager.isRealtimeReady()) {
+      throw new Error('Secure signaling is not ready yet');
+    }
+
     this.peerConnection = this.createPeerConnection(recipientPubKey);
     this.remoteDescriptionReady = false;
     
@@ -67,15 +71,24 @@ export class WebRTCManager {
     const offer = await this.peerConnection.createOffer();
     await this.peerConnection.setLocalDescription(offer);
 
-    socketManager.sendSignal(recipientPubKey, 'call_offer', {
-      sdp: offer,
+    if (!socketManager.sendSignal(recipientPubKey, 'call_offer', {
+      sdp: {
+        type: offer.type,
+        sdp: offer.sdp ?? '',
+      },
       isVideo
-    });
+    })) {
+      throw new Error('Secure signaling is not ready yet');
+    }
 
     return this.localStream;
   }
 
   async handleOffer(senderPubKey: string, offer: RTCSessionDescriptionInit, isVideo: boolean) {
+    if (!socketManager.isRealtimeReady()) {
+      throw new Error('Secure signaling is not ready yet');
+    }
+
     this.peerConnection = this.createPeerConnection(senderPubKey);
     this.remoteDescriptionReady = false;
     
@@ -91,7 +104,14 @@ export class WebRTCManager {
     const answer = await this.peerConnection.createAnswer();
     await this.peerConnection.setLocalDescription(answer);
 
-    socketManager.sendSignal(senderPubKey, 'call_answer', { sdp: answer });
+    if (!socketManager.sendSignal(senderPubKey, 'call_answer', {
+      sdp: {
+        type: answer.type,
+        sdp: answer.sdp ?? '',
+      },
+    })) {
+      throw new Error('Secure signaling is not ready yet');
+    }
 
     return this.localStream;
   }
@@ -135,8 +155,8 @@ export class WebRTCManager {
     });
 
     pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        socketManager.sendSignal(peerPubKey, 'ice_candidate', event.candidate);
+      if (event.candidate && socketManager.isRealtimeReady()) {
+        socketManager.sendSignal(peerPubKey, 'ice_candidate', event.candidate.toJSON());
       }
     };
 

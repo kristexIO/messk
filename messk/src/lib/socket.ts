@@ -735,6 +735,10 @@ export class SocketManager {
     window.dispatchEvent(new CustomEvent('socket_disconnected'));
   }
 
+  isRealtimeReady() {
+    return Boolean(this.ws && this.ws.readyState === WebSocket.OPEN && this.authenticated);
+  }
+
   getSessionHeaders(): HeadersInit {
     return this.sessionToken ? { 'X-Session-Token': this.sessionToken } : {};
   }
@@ -1946,13 +1950,16 @@ export class SocketManager {
   }
 
   sendSignal(recipientPubKey: string, type: 'call_offer' | 'call_answer' | 'call_reject' | 'call_end' | 'ice_candidate', signalData: unknown) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.authenticated) return;
-    this.ws.send(JSON.stringify({
+    if (!recipientPubKey || !this.isRealtimeReady()) return false;
+    const ws = this.ws;
+    if (!ws) return false;
+    ws.send(JSON.stringify({
       type,
       recipient_pub_key: recipientPubKey,
       sender_pub_key: useAppStore.getState().myPublicKey,
       data: JSON.stringify(signalData)
     }));
+    return true;
   }
 }
 
