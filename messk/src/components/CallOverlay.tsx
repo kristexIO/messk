@@ -46,9 +46,16 @@ async function logCallEvent(input: {
 
 function errorToStatus(error: unknown): string | null {
   if (error instanceof Error && error.message.trim()) {
-    if (error.message.includes('secure') || error.message.includes('Socket disconnected')) {
+    const normalizedMessage = error.message.trim();
+    const loweredMessage = normalizedMessage.toLowerCase();
+    if (
+      loweredMessage.includes('secure') ||
+      loweredMessage.includes('socket disconnected') ||
+      loweredMessage.includes('authentication timeout')
+    ) {
       return 'Secure signaling is not ready yet';
     }
+    return normalizedMessage;
   }
   if (!(error instanceof DOMException)) {
     return null;
@@ -73,7 +80,7 @@ function errorToStatus(error: unknown): string | null {
 }
 
 export const CallOverlay: React.FC = () => {
-  const { activePeerKey } = useAppStore();
+  const { activePeerKey, myPublicKey } = useAppStore();
   const [callState, setCallState] = useState<'idle' | 'incoming' | 'outgoing' | 'active'>('idle');
   const [isVideo, setIsVideo] = useState(false);
   const [callerPubKey, setCallerPubKey] = useState<string | null>(null);
@@ -268,10 +275,13 @@ export const CallOverlay: React.FC = () => {
       presentStatus('Open a direct chat before starting a call', 'warning', false);
       return;
     }
+    if (myPublicKey && targetPubKey === myPublicKey) {
+      presentStatus('Open another account or device to test calls. You cannot call yourself here.', 'warning', false);
+      return;
+    }
     if (!socketManager.isRealtimeReady()) {
       setLastRetryTarget({ peerPubKey: targetPubKey, video });
-      presentStatus('Secure signaling is offline. Reconnect and try again.', 'danger', false);
-      return;
+      presentStatus('Reconnecting secure signaling...', 'warning', false);
     }
     try {
       const generation = callGenerationRef.current + 1;
@@ -319,6 +329,7 @@ export const CallOverlay: React.FC = () => {
         resetCallState('Connection timeout', { tone: 'danger', allowRetry: true, autoResetStatus: false });
       }, CONNECT_TIMEOUT_MS);
     } catch (error) {
+      console.error('Failed to start call', error);
       logTerminalOutcome('failed');
       resetCallState(errorToStatus(error) ?? 'Call setup failed', { tone: 'danger', allowRetry: true, autoResetStatus: false });
     }
@@ -327,8 +338,7 @@ export const CallOverlay: React.FC = () => {
   const handleAccept = async () => {
     if (!callerPubKey || !incomingSDP) return;
     if (!socketManager.isRealtimeReady()) {
-      presentStatus('Secure signaling is offline. Reconnect and try again.', 'danger', false);
-      return;
+      presentStatus('Reconnecting secure signaling...', 'warning', false);
     }
     try {
       const generation = callGenerationRef.current + 1;
@@ -356,6 +366,7 @@ export const CallOverlay: React.FC = () => {
         resetCallState('Connection timeout', { tone: 'danger', autoResetStatus: false });
       }, CONNECT_TIMEOUT_MS);
     } catch (error) {
+      console.error('Failed to answer call', error);
       socketManager.sendSignal(callerPubKey, 'call_reject', { reason: 'failed' });
       logTerminalOutcome('failed');
       resetCallState(errorToStatus(error) ?? 'Failed to answer', { tone: 'danger', autoResetStatus: false });

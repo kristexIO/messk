@@ -222,6 +222,14 @@ export class SocketManager {
   private lastKnownProfilesRefreshAt = 0;
   private outboxFlushTimer: ReturnType<typeof setInterval> | null = null;
 
+  private releaseAuthWaiters() {
+    if (this.authWaiters.length === 0) {
+      return;
+    }
+    this.authWaiters.forEach((resolve) => resolve());
+    this.authWaiters = [];
+  }
+
   static getInstance(): SocketManager {
     if (!SocketManager.instance) {
       SocketManager.instance = new SocketManager();
@@ -330,9 +338,7 @@ export class SocketManager {
           this.sessionToken = env.session_token ?? null;
           this.reconnectAttempts = 0;
           useAppStore.getState().setConnectionStatus('connected');
-          // Release waiters
-          this.authWaiters.forEach(resolve => resolve());
-          this.authWaiters = [];
+          this.releaseAuthWaiters();
           this.startOutboxLoop();
           // Upload prekeys if we don't have enough
           this.ensurePreKeys(pubKey);
@@ -355,6 +361,7 @@ export class SocketManager {
           console.error('WebSocket authentication failed!');
           this.authenticated = false;
           this.sessionToken = null;
+          this.releaseAuthWaiters();
           useAppStore.getState().setConnectionStatus('offline');
           this.ws?.close();
           return;
@@ -687,6 +694,7 @@ export class SocketManager {
       this.authenticated = false;
       this.sessionToken = null;
       this.stopOutboxLoop();
+      this.releaseAuthWaiters();
       this.pendingPreKeyResolvers.forEach((resolve) => resolve(null));
       this.pendingPreKeyResolvers.clear();
       window.dispatchEvent(new CustomEvent('socket_disconnected'));
@@ -723,6 +731,7 @@ export class SocketManager {
     this.manualDisconnect = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.stopOutboxLoop();
+    this.releaseAuthWaiters();
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -737,6 +746,50 @@ export class SocketManager {
 
   isRealtimeReady() {
     return Boolean(this.ws && this.ws.readyState === WebSocket.OPEN && this.authenticated);
+  }
+
+  async ensureRealtimeReady(timeoutMs = 5000) {
+    if (this.isRealtimeReady()) {
+      return true;
+    }
+
+    const { myPublicKey } = useAppStore.getState();
+    const wsState = this.ws?.readyState;
+    if (
+      myPublicKey &&
+      (!this.ws || wsState === WebSocket.CLOSING || wsState === WebSocket.CLOSED)
+    ) {
+      this.connect(myPublicKey);
+    }
+
+    if (this.isRealtimeReady()) {
+      return true;
+    }
+
+    if (!this.ws) {
+      return false;
+    }
+
+    if (this.ws.readyState !== WebSocket.OPEN && this.ws.readyState !== WebSocket.CONNECTING) {
+      return false;
+    }
+
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const waiter = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        this.authWaiters = this.authWaiters.filter((candidate) => candidate !== waiter);
+        resolve();
+      };
+      const timer = setTimeout(waiter, timeoutMs);
+      this.authWaiters.push(waiter);
+    });
+
+    return this.isRealtimeReady();
   }
 
   getSessionHeaders(): HeadersInit {

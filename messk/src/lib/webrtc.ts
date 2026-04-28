@@ -55,7 +55,7 @@ export class WebRTCManager {
   }
 
   async startCall(recipientPubKey: string, isVideo: boolean) {
-    if (!socketManager.isRealtimeReady()) {
+    if (!(await socketManager.ensureRealtimeReady())) {
       throw new Error('Secure signaling is not ready yet');
     }
 
@@ -85,7 +85,7 @@ export class WebRTCManager {
   }
 
   async handleOffer(senderPubKey: string, offer: RTCSessionDescriptionInit, isVideo: boolean) {
-    if (!socketManager.isRealtimeReady()) {
+    if (!(await socketManager.ensureRealtimeReady())) {
       throw new Error('Secure signaling is not ready yet');
     }
 

@@ -1406,6 +1406,7 @@ export const Chat: React.FC = () => {
   }, [activeChannelId, activeContact, activeGroupId, activePeerKey, activeThreadId, messageSearch, setActiveChannel, setActiveGroup, setActivePeer]);
 
   const contactName = activeContact?.name || (activePeerKey ? activePeerKey.substring(0, 8) + '...' : '');
+  const isSelfCallTarget = Boolean(activePeerKey && myPublicKey && activePeerKey === myPublicKey);
   const triggerCallStart = (video: boolean) => {
     window.dispatchEvent(new CustomEvent('start_call', { detail: { video } }));
   };
@@ -1602,16 +1603,30 @@ export const Chat: React.FC = () => {
                   ) : null}
                 </div>
                 <button
+                  type="button"
+                  disabled={isSelfCallTarget}
                   onClick={() => triggerCallStart(false)}
-                  className="rounded-xl p-2 text-text-muted transition-all hover:bg-white/5 hover:text-white sm:p-2.5"
+                  className={`rounded-xl p-2 transition-all sm:p-2.5 ${
+                    isSelfCallTarget
+                      ? 'cursor-not-allowed text-text-muted/40'
+                      : 'text-text-muted hover:bg-white/5 hover:text-white'
+                  }`}
                   aria-label="Start voice call"
+                  title={isSelfCallTarget ? 'You cannot call your own identity on the same device' : 'Start voice call'}
                 >
                   <Phone className="w-5 h-5" />
                 </button>
                 <button
+                  type="button"
+                  disabled={isSelfCallTarget}
                   onClick={() => triggerCallStart(true)}
-                  className="rounded-xl p-2 text-text-muted transition-all hover:bg-white/5 hover:text-white sm:p-2.5"
+                  className={`rounded-xl p-2 transition-all sm:p-2.5 ${
+                    isSelfCallTarget
+                      ? 'cursor-not-allowed text-text-muted/40'
+                      : 'text-text-muted hover:bg-white/5 hover:text-white'
+                  }`}
                   aria-label="Start video call"
+                  title={isSelfCallTarget ? 'You cannot call your own identity on the same device' : 'Start video call'}
                 >
                   <Video className="w-5 h-5" />
                 </button>
