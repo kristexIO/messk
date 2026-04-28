@@ -104,6 +104,7 @@ export const CallOverlay: React.FC = () => {
   const statusResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const callGenerationRef = useRef(0);
   const callPeerRef = useRef<string | null>(null);
+  const pendingRemoteCandidatesRef = useRef<Array<{ senderPubKey: string; candidate: RTCIceCandidateInit }>>([]);
   const callDirectionRef = useRef<'incoming' | 'outgoing'>('outgoing');
   const callMediaRef = useRef<'audio' | 'video'>('audio');
   const lastLoggedOutcomeRef = useRef<'connected' | 'missed' | 'declined' | 'ended' | 'failed' | null>(null);
@@ -218,6 +219,7 @@ export const CallOverlay: React.FC = () => {
     setCallDirection('outgoing');
     setCallMedia('audio');
     callPeerRef.current = null;
+    pendingRemoteCandidatesRef.current = [];
     if (nextStatus) {
       presentStatus(nextStatus, options?.tone ?? 'neutral', options?.autoResetStatus ?? true);
     }
@@ -355,6 +357,15 @@ export const CallOverlay: React.FC = () => {
         rtcManagerRef.current?.endCall();
         return;
       }
+      const bufferedCandidates = pendingRemoteCandidatesRef.current.filter(
+        (entry) => entry.senderPubKey === callerPubKey
+      );
+      pendingRemoteCandidatesRef.current = pendingRemoteCandidatesRef.current.filter(
+        (entry) => entry.senderPubKey !== callerPubKey
+      );
+      for (const entry of bufferedCandidates) {
+        await rtcManagerRef.current.handleCandidate(entry.candidate);
+      }
       await attachStream(localVideoRef.current, stream);
       clearConnectTimeout();
       connectTimeoutRef.current = setTimeout(() => {
@@ -458,7 +469,14 @@ export const CallOverlay: React.FC = () => {
       if (callPeerRef.current !== sender_pub_key) {
         return;
       }
-      await rtcManagerRef.current?.handleCandidate(parsedData);
+      if (!rtcManagerRef.current) {
+        pendingRemoteCandidatesRef.current.push({
+          senderPubKey: sender_pub_key,
+          candidate: parsedData,
+        });
+        return;
+      }
+      await rtcManagerRef.current.handleCandidate(parsedData);
     }
   });
 
