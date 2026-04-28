@@ -22,6 +22,15 @@ $LocalRoot = (Resolve-Path $LocalRoot).Path
 $archivePath = Join-Path ([System.IO.Path]::GetTempPath()) "messan_deploy_bundle.tar.gz"
 $remoteArchivePath = "/root/messan_deploy_bundle.tar.gz"
 $remoteScriptPath = "/root/messan_run_deploy.sh"
+$commitSHA = "archive-deploy"
+try {
+  $resolvedCommit = (& git -C $LocalRoot rev-parse --short=12 HEAD 2>$null).Trim()
+  if (-not [string]::IsNullOrWhiteSpace($resolvedCommit)) {
+    $commitSHA = $resolvedCommit
+  }
+} catch {
+  $commitSHA = "archive-deploy"
+}
 
 & python -m pip install paramiko
 if ($LASTEXITCODE -ne 0) {
@@ -176,7 +185,7 @@ TEST_TMP_DIR=\$(mktemp -d)
 DB_PATH=\$TEST_TMP_DIR/test.db UPLOAD_DIR=\$TEST_TMP_DIR/uploads /usr/local/bin/go test ./...
 rm -rf \$TEST_TMP_DIR
 APP_VERSION=\$(node -p "JSON.parse(require('fs').readFileSync('\$RELEASE_DIR/source/messk/package.json','utf8')).version")
-COMMIT_SHA=archive-deploy
+COMMIT_SHA=__COMMIT_SHA__
 BUILD_TIME=\$(date -u +%Y-%m-%dT%H:%M:%SZ)
 /usr/local/bin/go build -trimpath -ldflags="-s -w -X main.appVersion=\${APP_VERSION} -X main.commitSHA=\${COMMIT_SHA} -X main.buildTime=\${BUILD_TIME}" -o \$APP_ROOT/bin/messenger-server .
 
@@ -376,6 +385,7 @@ curl -fsS http://127.0.0.1:8080/version
 $remoteDeployScript = (
   $remoteDeployTemplate.Replace("__DOMAIN__", $Domain)
 ).Replace("__HOST__", $ServerHost).
+  Replace("__COMMIT_SHA__", $commitSHA).
   Replace("__KEEP_RELEASES__", [string]$KeepReleases).
   Replace("__REMOTE_ARCHIVE__", $remoteArchivePath).
   Replace("\$", "$")
