@@ -22,7 +22,7 @@ type Message struct {
 
 // Hub СѓРїСЂР°РІР»СЏРµС‚ Р°РєС‚РёРІРЅС‹РјРё СЃРѕРµРґРёРЅРµРЅРёСЏРјРё Рё РјР°СЂС€СЂСѓС‚РёР·Р°С†РёРµР№.
 type Hub struct {
-	clients      map[string]*Client // Возвращаем мапу один-к-одному
+	clients      map[string]map[*Client]struct{}
 	register     chan *Client
 	unregister   chan *Client
 	routeMessage chan *Message
@@ -63,7 +63,7 @@ func NewHub(db *DB, cache *Cache, rdb *redis.Client) *Hub {
 	return &Hub{
 		register:     make(chan *Client, 256),
 		unregister:   make(chan *Client, 256),
-		clients:      make(map[string]*Client),
+		clients:      make(map[string]map[*Client]struct{}),
 		routeMessage: make(chan *Message, 256),
 		redisMessage: make(chan *Message, 256),
 		instanceID:   newHubInstanceID(),
@@ -79,6 +79,56 @@ func newHubInstanceID() string {
 		return time.Now().UTC().Format("20060102150405.000000000")
 	}
 	return hex.EncodeToString(b[:])
+}
+
+func (h *Hub) addClientSession(client *Client) bool {
+	if client == nil || client.PubKey == "" {
+		return false
+	}
+
+	sessions := h.clients[client.PubKey]
+	if sessions == nil {
+		sessions = make(map[*Client]struct{})
+		h.clients[client.PubKey] = sessions
+	}
+	wasOffline := len(sessions) == 0
+	sessions[client] = struct{}{}
+	return wasOffline
+}
+
+func (h *Hub) removeClientSession(client *Client) bool {
+	if client == nil || client.PubKey == "" {
+		return false
+	}
+
+	sessions, ok := h.clients[client.PubKey]
+	if !ok {
+		return false
+	}
+	delete(sessions, client)
+	if len(sessions) == 0 {
+		delete(h.clients, client.PubKey)
+		return true
+	}
+	return false
+}
+
+func (h *Hub) deliverToPubKey(pubKey string, payload []byte, slowReason string) bool {
+	sessions, ok := h.clients[pubKey]
+	if !ok || len(sessions) == 0 {
+		return false
+	}
+
+	delivered := false
+	for client := range sessions {
+		select {
+		case client.send <- payload:
+			delivered = true
+		default:
+			h.dropClient(client, slowReason)
+		}
+	}
+	return delivered
 }
 
 func (h *Hub) Run() {
@@ -101,10 +151,7 @@ func (h *Hub) Run() {
 	for {
 		select {
 		case client := <-h.register:
-			if oldClient, ok := h.clients[client.PubKey]; ok {
-				oldClient.cancel()
-			}
-			h.clients[client.PubKey] = client
+			firstSession := h.addClientSession(client)
 			log.Printf("Client registered: %s", client.PubKey)
 
 			go func(c *Client) {
@@ -117,7 +164,7 @@ func (h *Hub) Run() {
 					}
 				}
 
-				if h.cache != nil {
+				if firstSession && h.cache != nil {
 					if err := h.cache.SetOnlineStatus(ctx, c.PubKey, true); err != nil {
 						log.Printf("Cache error setting online %s: %v", c.PubKey, err)
 					}
@@ -191,6 +238,9 @@ func (h *Hub) publishRoute(msg *Message) {
 }
 
 func (h *Hub) routeToLocal(msg *Message, allowPublish bool) {
+	if msg == nil {
+		return
+	}
 	if isGroupRoutedType(msg.Type) {
 		h.routeGroupMessage(msg, allowPublish)
 		return
@@ -200,32 +250,14 @@ func (h *Hub) routeToLocal(msg *Message, allowPublish bool) {
 		return
 	}
 
-	// РћС‚РїСЂР°РІР»СЏРµРј РїРѕР»СѓС‡Р°С‚РµР»СЋ
-	client, foundLocally := h.clients[msg.RecipientPubKey]
-
-	if foundLocally {
-		select {
-		case client.send <- msg.Payload:
-		default:
-			h.dropClient(client, "slow recipient")
-			foundLocally = false
-		}
-	}
-
-	// Р•СЃР»Рё РЅРµ РЅР°С€Р»Рё Р»РѕРєР°Р»СЊРЅРѕ, РЅРѕ СЂР°Р·СЂРµС€РµРЅРѕ РїСѓР±Р»РёРєРѕРІР°С‚СЊ РІ Redis
-	if !foundLocally && allowPublish && h.rdb != nil {
+	if allowPublish && h.rdb != nil {
 		h.publishRoute(msg)
-
-		if shouldPersistOffline(msg.Type) {
-			h.saveOfflineMessage(msg)
-		}
-	} else if !foundLocally && allowPublish {
-		if shouldPersistOffline(msg.Type) {
-			h.saveOfflineMessage(msg)
-		}
 	}
 
-	// РЎРёРЅС…СЂРѕРЅРёР·Р°С†РёСЏ РјРµР¶РґСѓ СѓСЃС‚СЂРѕР№СЃС‚РІР°РјРё (РћС‚РїСЂР°РІРёС‚РµР»СЋ) - удалено так как больше нет мульти-сессий
+	delivered := h.deliverToPubKey(msg.RecipientPubKey, msg.Payload, "slow recipient")
+	if !delivered && allowPublish && shouldPersistOffline(msg.Type) {
+		h.saveOfflineMessage(msg)
+	}
 }
 
 func (h *Hub) routeChannelMessage(msg *Message, allowPublish bool) {
@@ -259,12 +291,7 @@ func (h *Hub) routeChannelMessage(msg *Message, allowPublish bool) {
 		if subscriberPubKey == "" {
 			continue
 		}
-		if client, ok := h.clients[subscriberPubKey]; ok {
-			select {
-			case client.send <- msg.Payload:
-			default:
-				h.dropClient(client, "slow channel subscriber")
-			}
+		if h.deliverToPubKey(subscriberPubKey, msg.Payload, "slow channel subscriber") {
 			continue
 		}
 
@@ -326,12 +353,7 @@ func (h *Hub) routeGroupMessage(msg *Message, allowPublish bool) {
 		if memberPubKey == "" {
 			continue
 		}
-		if client, ok := h.clients[memberPubKey]; ok {
-			select {
-			case client.send <- msg.Payload:
-			default:
-				h.dropClient(client, "slow group recipient")
-			}
+		if h.deliverToPubKey(memberPubKey, msg.Payload, "slow group recipient") {
 			continue
 		}
 
@@ -366,21 +388,19 @@ func (h *Hub) dropClient(client *Client, reason string) {
 		return
 	}
 
-	if currentClient, ok := h.clients[client.PubKey]; ok && currentClient == client {
-		delete(h.clients, client.PubKey)
-		log.Printf("Client dropped: %s (%s)", client.PubKey, reason)
-		if h.cache != nil {
-			go func(pubKey string) {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				if err := h.cache.SetOnlineStatus(ctx, pubKey, false); err != nil {
-					log.Printf("Cache error setting offline %s: %v", pubKey, err)
-				}
-			}(client.PubKey)
-		}
-		if client.Token != "" {
-			h.DeleteSessionToken(client.Token)
-		}
+	lastSessionGone := h.removeClientSession(client)
+	log.Printf("Client dropped: %s (%s)", client.PubKey, reason)
+	if client.Token != "" {
+		h.DeleteSessionToken(client.Token)
+	}
+	if lastSessionGone && h.cache != nil {
+		go func(pubKey string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := h.cache.SetOnlineStatus(ctx, pubKey, false); err != nil {
+				log.Printf("Cache error setting offline %s: %v", pubKey, err)
+			}
+		}(client.PubKey)
 	}
 	if client.conn != nil {
 		client.conn.Close()

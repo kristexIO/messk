@@ -118,6 +118,8 @@ const loadProfileForKey = (publicKey: string): { nickname?: string | null; avata
   return profile;
 };
 
+export const getSavedProfileForKey = (publicKey: string) => loadProfileForKey(publicKey);
+
 export const useAppStore = create<AppState>((set, get) => ({
   myPublicKey: null,
   mySecretKey: null,

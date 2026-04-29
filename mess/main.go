@@ -769,6 +769,160 @@ func main() {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	}))
+	mux.HandleFunc("/group-invite-links", rateLimit(func(w http.ResponseWriter, r *http.Request) {
+		pubKey, ok := authorizeSession(hub, w, r)
+		if !ok {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var payload struct {
+			GroupID string `json:"groupId"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		payload.GroupID = strings.TrimSpace(payload.GroupID)
+		if payload.GroupID == "" {
+			http.Error(w, "Missing groupId", http.StatusBadRequest)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		role, err := db.GetGroupMemberRole(ctx, payload.GroupID, pubKey)
+		if err == sql.ErrNoRows {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		if err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
+		if role != "owner" && role != "admin" {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+
+		token, err := db.CreateGroupInviteLink(ctx, payload.GroupID, pubKey)
+		if err != nil {
+			http.Error(w, "Failed to create invite link", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"token": token})
+	}))
+	mux.HandleFunc("/channel-invite-links", rateLimit(func(w http.ResponseWriter, r *http.Request) {
+		pubKey, ok := authorizeSession(hub, w, r)
+		if !ok {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var payload struct {
+			ChannelID string `json:"channelId"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		payload.ChannelID = strings.TrimSpace(payload.ChannelID)
+		if payload.ChannelID == "" {
+			http.Error(w, "Missing channelId", http.StatusBadRequest)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		role, err := db.GetChannelSubscriberRole(ctx, payload.ChannelID, pubKey)
+		if err == sql.ErrNoRows {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		if err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
+		if role != "owner" && role != "admin" {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+
+		token, err := db.CreateChannelInviteLink(ctx, payload.ChannelID, pubKey)
+		if err != nil {
+			http.Error(w, "Failed to create invite link", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"token": token})
+	}))
+	mux.HandleFunc("/invite-links/join", rateLimit(func(w http.ResponseWriter, r *http.Request) {
+		pubKey, ok := authorizeSession(hub, w, r)
+		if !ok {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var payload struct {
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		payload.Token = strings.TrimSpace(payload.Token)
+		if payload.Token == "" {
+			http.Error(w, "Missing token", http.StatusBadRequest)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		if err := db.SaveUserIfNotExists(ctx, pubKey); err != nil {
+			http.Error(w, "Failed to ensure user", http.StatusInternalServerError)
+			return
+		}
+
+		if groupID, err := db.JoinGroupByInviteToken(ctx, payload.Token, pubKey); err == nil {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"entityType": "group",
+				"entityId":   groupID,
+			})
+			return
+		} else if err != sql.ErrNoRows {
+			http.Error(w, "Failed to join invite", http.StatusInternalServerError)
+			return
+		}
+
+		channelID, err := db.JoinChannelByInviteToken(ctx, payload.Token, pubKey)
+		if err == sql.ErrNoRows {
+			http.Error(w, "Invite link not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, "Failed to join invite", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"entityType": "channel",
+			"entityId":   channelID,
+		})
+	}))
 
 	// CORS Middleware
 	c := cors.New(cors.Options{

@@ -20,13 +20,20 @@ func newTestClient(pubKey string) *Client {
 	}
 }
 
+func setTestClient(hub *Hub, client *Client) {
+	if hub.clients[client.PubKey] == nil {
+		hub.clients[client.PubKey] = make(map[*Client]struct{})
+	}
+	hub.clients[client.PubKey][client] = struct{}{}
+}
+
 func TestRouteToLocalDeliversMessageToRecipient(t *testing.T) {
 	hub := NewHub(nil, nil, nil)
 	recipient := newTestClient("recipient")
 	senderMirror := newTestClient("sender")
 
-	hub.clients["recipient"] = recipient
-	hub.clients["sender"] = senderMirror
+	setTestClient(hub, recipient)
+	setTestClient(hub, senderMirror)
 
 	msg := &Message{
 		Type:            "message",
@@ -74,8 +81,8 @@ func TestRouteToLocalDoesNotMirrorTypingToSenderSessions(t *testing.T) {
 	recipient := newTestClient("recipient")
 	senderMirror := newTestClient("sender")
 
-	hub.clients["recipient"] = recipient
-	hub.clients["sender"] = senderMirror
+	setTestClient(hub, recipient)
+	setTestClient(hub, senderMirror)
 
 	msg := &Message{
 		Type:            "typing",
@@ -313,7 +320,7 @@ func TestDropClientRemovesSessionToken(t *testing.T) {
 	hub := NewHub(nil, InitCache(), nil)
 	client := newTestClient("sender")
 	client.Token = "session-token"
-	hub.clients["sender"] = client
+	setTestClient(hub, client)
 	hub.StoreSessionToken(client.Token, client.PubKey)
 
 	hub.dropClient(client, "test")
@@ -321,7 +328,7 @@ func TestDropClientRemovesSessionToken(t *testing.T) {
 	if _, ok := hub.ValidateSessionToken(client.Token); ok {
 		t.Fatal("expected session token to be removed when client is dropped")
 	}
-	if _, ok := hub.clients["sender"]; ok {
+	if sessions, ok := hub.clients["sender"]; ok && len(sessions) > 0 {
 		t.Fatal("expected client map entry to be removed after final session drop")
 	}
 }

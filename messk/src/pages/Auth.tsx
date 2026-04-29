@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { generateSeedPhrase, deriveKeysFromPhraseAsync, isValidSeedPhrase } from '../lib/seed';
-import { useAppStore } from '../store';
+import { getSavedProfileForKey, useAppStore } from '../store';
 import type { Language } from '../store';
 import { KeyRound, ShieldCheck, AtSign, Loader2, Copy, Check, ChevronRight, Camera, ArrowLeft, UserRound } from 'lucide-react';
 import { prepareDatabaseForIdentity } from '../lib/db';
@@ -12,6 +12,7 @@ import { useI18n } from '../lib/i18n';
 type RemoteProfile = {
   nickname?: string;
   avatar?: string;
+  username?: string;
 };
 
 async function loadRemoteProfile(pubKey: string): Promise<RemoteProfile | null> {
@@ -124,7 +125,45 @@ export const Auth: React.FC = () => {
     setMode('profile');
   };
 
-  const performLogin = async (seedPhrase: string) => {
+  const handleRestoreStart = async () => {
+    const normalizedPhrase = phrase.trim().toLowerCase().replace(/\s+/g, ' ');
+    if (!isValidSeedPhrase(normalizedPhrase)) {
+      setError(t('invalidSeed'));
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const keys = await deriveKeysFromPhraseAsync(normalizedPhrase);
+      const remoteProfile = await loadRemoteProfile(keys.publicKey);
+      const localProfile = getSavedProfileForKey(keys.publicKey);
+      const hasExistingProfile = Boolean(
+        remoteProfile?.nickname?.trim() ||
+        remoteProfile?.avatar?.trim() ||
+        remoteProfile?.username?.trim() ||
+        localProfile?.nickname?.trim() ||
+        localProfile?.avatar?.trim() ||
+        localProfile?.username?.trim()
+      );
+
+      if (hasExistingProfile) {
+        setPendingPhrase(normalizedPhrase);
+        setProfileSource('import');
+        setProfileNickname(remoteProfile?.nickname?.trim() || localProfile?.nickname?.trim() || '');
+        setProfileAvatar(remoteProfile?.avatar?.trim() || localProfile?.avatar?.trim() || '');
+        await performLogin(normalizedPhrase, remoteProfile);
+        return;
+      }
+
+      continueToProfile(normalizedPhrase, 'import');
+    } catch {
+      setError(t('cryptoFailed'));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const performLogin = async (seedPhrase: string, prefetchedRemoteProfile?: RemoteProfile | null) => {
     setIsLoading(true);
     try {
       if (!isValidSeedPhrase(seedPhrase)) {
@@ -133,7 +172,12 @@ export const Auth: React.FC = () => {
       }
       const keys = await deriveKeysFromPhraseAsync(seedPhrase);
       await prepareDatabaseForIdentity(keys.publicKey);
-      const remoteProfile = profileSource === 'import' ? await loadRemoteProfile(keys.publicKey) : null;
+      const remoteProfile =
+        prefetchedRemoteProfile !== undefined
+          ? prefetchedRemoteProfile
+          : profileSource === 'import'
+            ? await loadRemoteProfile(keys.publicKey)
+            : null;
       setKeys(keys.publicKey, keys.secretKey);
       const currentProfile = useAppStore.getState();
       const nickname =
@@ -146,7 +190,11 @@ export const Auth: React.FC = () => {
         remoteProfile?.avatar?.trim() ||
         currentProfile.avatar ||
         null;
-      setProfile(nickname, avatar, currentProfile.username ?? null);
+      const username =
+        remoteProfile?.username?.trim() ||
+        currentProfile.username?.trim() ||
+        null;
+      setProfile(nickname, avatar, username);
     } catch {
       setError(t('cryptoFailed'));
     } finally {
@@ -356,7 +404,7 @@ export const Auth: React.FC = () => {
               {t('cancel')}
             </button>
             <button 
-              onClick={() => continueToProfile(phrase.trim(), 'import')}
+              onClick={() => void handleRestoreStart()}
               disabled={phrase.trim().split(/\s+/).length !== 12 || isLoading}
               className="btn-premium flex-1"
             >

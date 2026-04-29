@@ -4,7 +4,7 @@ import { socketManager } from '../lib/socket';
 import { clearThreadStats, db, syncThreadStats, type StoredMessage } from '../lib/db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import Dexie from 'dexie';
-import { Send, ArrowLeft, ShieldCheck, Check, CheckCheck, Trash2, Paperclip, FileIcon, Download, Loader2, Mic, Square, Play, Phone, Video, Pencil, Search, X, Archive, Bell, BellOff, ArrowDownCircle, Users, Crown, WifiOff, Clock3, UserPlus, UserMinus, Shield, Megaphone, Pin, AtSign } from 'lucide-react';
+import { Send, ArrowLeft, ShieldCheck, Check, CheckCheck, Trash2, Paperclip, FileIcon, Download, Loader2, Mic, Square, Play, Phone, Video, Pencil, Search, X, Archive, Bell, BellOff, ArrowDownCircle, Users, Crown, WifiOff, Clock3, UserPlus, UserMinus, Shield, Megaphone, Pin, AtSign, Link2 } from 'lucide-react';
 import { UserIdentityModal } from '../components/UserIdentityModal';
 import { Sidebar } from '../components/Sidebar';
 import { encryptFile, decryptFile } from '../lib/attachments';
@@ -19,6 +19,8 @@ import { useI18n } from '../lib/i18n';
 import {
   addChannelSubscriber,
   addGroupMember,
+  createChannelInviteLink,
+  createGroupInviteLink,
   deleteChannel,
   deleteGroup,
   leaveChannel,
@@ -1179,6 +1181,17 @@ export const Chat: React.FC = () => {
     }
   };
 
+  const handleCopyGroupInviteLink = async () => {
+    if (!activeGroupId) return;
+    try {
+      const url = await createGroupInviteLink(activeGroupId);
+      await navigator.clipboard.writeText(url);
+      toast.success('Group invite link copied.');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to create group invite link');
+    }
+  };
+
   const validatePublicKey = (value: string) => {
     try {
       return decodeBase64(value).length === 32;
@@ -1328,6 +1341,17 @@ export const Chat: React.FC = () => {
       setActiveChannel(null);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to update channel');
+    }
+  };
+
+  const handleCopyChannelInviteLink = async () => {
+    if (!activeChannelId) return;
+    try {
+      const url = await createChannelInviteLink(activeChannelId);
+      await navigator.clipboard.writeText(url);
+      toast.success('Channel invite link copied.');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to create channel invite link');
     }
   };
 
@@ -1885,6 +1909,16 @@ export const Chat: React.FC = () => {
 
             <div className="px-4 pt-3 sm:px-6 sm:pt-4">
               <div className="flex flex-wrap gap-2">
+                {canManageGroupMembers ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyGroupInviteLink()}
+                    className="inline-flex items-center gap-2 rounded-xl border border-accent/25 bg-accent/10 px-3 py-2 text-xs text-white transition-all hover:border-accent/45 hover:bg-accent/20"
+                  >
+                    <Link2 className="h-3.5 w-3.5" />
+                    Copy invite link
+                  </button>
+                ) : null}
                 {activeGroup.role !== 'owner' ? (
                   <button
                     type="button"
@@ -2079,7 +2113,17 @@ export const Chat: React.FC = () => {
                 <div className="text-sm font-semibold uppercase tracking-[0.22em] text-text-muted">Members</div>
                 {canManageGroupMembers ? (
                   <form onSubmit={handleAddGroupMember} className="mt-4 rounded-2xl border border-white/10 bg-black/10 p-3">
-                    <div className="text-xs font-medium text-white">Invite member</div>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-xs font-medium text-white">Invite member</div>
+                      <button
+                        type="button"
+                        onClick={() => void handleCopyGroupInviteLink()}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-accent/25 bg-accent/10 px-2.5 py-1 text-[11px] font-medium text-white transition-all hover:border-accent/45 hover:bg-accent/20"
+                      >
+                        <Link2 className="h-3.5 w-3.5" />
+                        Copy link
+                      </button>
+                    </div>
                     <input
                       value={groupMemberInput}
                       onChange={(e) => setGroupMemberInput(e.target.value)}
@@ -2202,6 +2246,16 @@ export const Chat: React.FC = () => {
 
             <div className="px-6 pt-4">
               <div className="flex flex-wrap gap-2">
+                {canManageChannelSubscribers ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyChannelInviteLink()}
+                    className="inline-flex items-center gap-2 rounded-xl border border-violet-300/25 bg-violet-300/10 px-3 py-2 text-xs text-white transition-all hover:border-violet-300/45 hover:bg-violet-300/20"
+                  >
+                    <Link2 className="h-3.5 w-3.5" />
+                    Copy invite link
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   onClick={() => void handleLeaveChannel()}
@@ -2380,7 +2434,17 @@ export const Chat: React.FC = () => {
                 <div className="text-sm font-semibold uppercase tracking-[0.22em] text-text-muted">Subscribers</div>
                 {canManageChannelSubscribers ? (
                   <form onSubmit={handleAddChannelSubscriber} className="mt-4 rounded-2xl border border-white/10 bg-black/10 p-3">
-                    <div className="text-xs font-medium text-white">Invite subscriber</div>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-xs font-medium text-white">Invite subscriber</div>
+                      <button
+                        type="button"
+                        onClick={() => void handleCopyChannelInviteLink()}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-violet-300/25 bg-violet-300/10 px-2.5 py-1 text-[11px] font-medium text-white transition-all hover:border-violet-300/45 hover:bg-violet-300/20"
+                      >
+                        <Link2 className="h-3.5 w-3.5" />
+                        Copy link
+                      </button>
+                    </div>
                     <input
                       value={channelSubscriberInput}
                       onChange={(e) => setChannelSubscriberInput(e.target.value)}

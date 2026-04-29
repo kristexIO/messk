@@ -425,3 +425,30 @@ export async function deleteChannel(channelId: string) {
   lastChannelsSyncAt = 0;
   await db.channelThreads.delete(channelId);
 }
+
+export async function createGroupInviteLink(groupId: string) {
+  const payload = await fetchJson<{ token: string }>(`${appConfig.backendOrigin}/group-invite-links`, {
+    method: 'POST',
+    body: JSON.stringify({ groupId }),
+  });
+
+  const origin = typeof window !== 'undefined' ? window.location.origin : appConfig.backendOrigin;
+  return `${origin}/?invite=${encodeURIComponent(payload.token)}`;
+}
+
+export async function createChannelInviteLink(channelId: string) {
+  const payload = await fetchJson<{ token: string }>(`${appConfig.backendOrigin}/channel-invite-links`, {
+    method: 'POST',
+    body: JSON.stringify({ channelId }),
+  });
+
+  const origin = typeof window !== 'undefined' ? window.location.origin : appConfig.backendOrigin;
+  return `${origin}/?invite=${encodeURIComponent(payload.token)}`;
+}
+
+export async function joinInviteLink(token: string) {
+  return fetchJson<{ entityType: 'group' | 'channel'; entityId: string }>(`${appConfig.backendOrigin}/invite-links/join`, {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+  });
+}

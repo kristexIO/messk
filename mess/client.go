@@ -37,6 +37,7 @@ var bufferPool = sync.Pool{
 
 var routedEnvelopeTypes = map[string]bool{
 	"message":          true,
+	"self_sync":        true,
 	"group_message":    true,
 	"group_edit":       true,
 	"group_delete":     true,

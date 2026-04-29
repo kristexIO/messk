@@ -15,6 +15,12 @@ const DIRECT_RETRY_BASE_DELAY_MS = 3_000;
 const DIRECT_RETRY_MAX_DELAY_MS = 30_000;
 const SOCKET_FAST_RECONNECT_ATTEMPTS = 5;
 const SOCKET_IDLE_RECONNECT_DELAY_MS = 60_000;
+const messageStatusRank: Record<StoredMessage['status'], number> = {
+  pending: 0,
+  sent: 1,
+  delivered: 2,
+  read: 3,
+};
 
 type IncomingEnvelope = {
   type: string;
@@ -71,6 +77,45 @@ type GroupEditPayload = {
 type GroupReactionPayload = {
   reaction: string | null;
 };
+
+type SelfSyncDirectMessagePayload = {
+  kind: 'direct_message';
+  msgId: string;
+  peerPubKey: string;
+  senderPubKey: string;
+  text: string;
+  timestamp: number;
+  status: StoredMessage['status'];
+};
+
+type SelfSyncDirectEditPayload = {
+  kind: 'direct_edit';
+  msgId: string;
+  peerPubKey: string;
+  text: string;
+  editedAt: number;
+};
+
+type SelfSyncDirectDeletePayload = {
+  kind: 'direct_delete';
+  msgId: string;
+  peerPubKey: string;
+  deletedAt: number;
+};
+
+type SelfSyncDirectReactionPayload = {
+  kind: 'direct_reaction';
+  msgId: string;
+  peerPubKey: string;
+  actorPubKey: string;
+  reaction: string | null;
+};
+
+type SelfSyncPayload =
+  | SelfSyncDirectMessagePayload
+  | SelfSyncDirectEditPayload
+  | SelfSyncDirectDeletePayload
+  | SelfSyncDirectReactionPayload;
 
 function getGroupSenderKeyId(groupId: string, senderPubKey: string) {
   return `${groupId}:${senderPubKey}`;
@@ -159,6 +204,72 @@ function parseGroupReactionPayload(value: string): GroupReactionPayload | null {
     const parsed = JSON.parse(value) as Partial<GroupReactionPayload>;
     if (parsed.reaction === null || typeof parsed.reaction === 'string') {
       return { reaction: parsed.reaction ?? null };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function parseSelfSyncPayload(value: string): SelfSyncPayload | null {
+  try {
+    const parsed = JSON.parse(value) as Partial<SelfSyncPayload>;
+    if (!isNonEmptyString(parsed.kind) || !isNonEmptyString(parsed.msgId) || !isNonEmptyString(parsed.peerPubKey)) {
+      return null;
+    }
+    if (parsed.kind === 'direct_message') {
+      if (
+        !isNonEmptyString(parsed.senderPubKey) ||
+        typeof parsed.text !== 'string' ||
+        typeof parsed.timestamp !== 'number' ||
+        (parsed.status !== 'pending' && parsed.status !== 'sent' && parsed.status !== 'delivered' && parsed.status !== 'read')
+      ) {
+        return null;
+      }
+      return {
+        kind: 'direct_message',
+        msgId: parsed.msgId,
+        peerPubKey: parsed.peerPubKey,
+        senderPubKey: parsed.senderPubKey,
+        text: parsed.text,
+        timestamp: parsed.timestamp,
+        status: parsed.status,
+      };
+    }
+    if (parsed.kind === 'direct_edit') {
+      if (typeof parsed.text !== 'string' || typeof parsed.editedAt !== 'number') {
+        return null;
+      }
+      return {
+        kind: 'direct_edit',
+        msgId: parsed.msgId,
+        peerPubKey: parsed.peerPubKey,
+        text: parsed.text,
+        editedAt: parsed.editedAt,
+      };
+    }
+    if (parsed.kind === 'direct_delete') {
+      if (typeof parsed.deletedAt !== 'number') {
+        return null;
+      }
+      return {
+        kind: 'direct_delete',
+        msgId: parsed.msgId,
+        peerPubKey: parsed.peerPubKey,
+        deletedAt: parsed.deletedAt,
+      };
+    }
+    if (parsed.kind === 'direct_reaction') {
+      if (!isNonEmptyString(parsed.actorPubKey) || (parsed.reaction !== null && typeof parsed.reaction !== 'string')) {
+        return null;
+      }
+      return {
+        kind: 'direct_reaction',
+        msgId: parsed.msgId,
+        peerPubKey: parsed.peerPubKey,
+        actorPubKey: parsed.actorPubKey,
+        reaction: parsed.reaction ?? null,
+      };
     }
     return null;
   } catch {
@@ -342,6 +453,7 @@ export class SocketManager {
           this.startOutboxLoop();
           // Upload prekeys if we don't have enough
           this.ensurePreKeys(pubKey);
+          void this.refreshOwnProfile(pubKey);
           void this.syncMyProfile();
           void this.refreshKnownProfiles();
           void this.flushOutgoingDirectMessages();
@@ -534,6 +646,89 @@ export class SocketManager {
           await this.handleIncomingChannelPin(env);
           return;
         }
+        if (env.type === 'self_sync') {
+          if (!env.data || env.sender_pub_key !== pubKey) return;
+
+          const plaintext = decryptMessage(env.data, mySecretKey, pubKey);
+          if (!plaintext) {
+            return;
+          }
+
+          const payload = parseSelfSyncPayload(plaintext);
+          if (!payload) {
+            return;
+          }
+
+          const existingMsg = await db.messages.where('msgId').equals(payload.msgId).first();
+          if (payload.kind === 'direct_message') {
+            if (existingMsg?.id) {
+              if (messageStatusRank[payload.status] > messageStatusRank[existingMsg.status]) {
+                await updateMessageAndSync(existingMsg.id, { status: payload.status });
+              }
+              return;
+            }
+
+            await addMessageAndSync({
+              msgId: payload.msgId,
+              peerPublicKey: payload.peerPubKey,
+              senderPublicKey: payload.senderPubKey,
+              text: payload.text,
+              timestamp: payload.timestamp,
+              status: payload.status,
+              reactions: {}
+            });
+
+            const existingContact = await db.contacts.get(payload.peerPubKey);
+            await db.contacts.put({
+              pubKey: payload.peerPubKey,
+              name: existingContact?.name || payload.peerPubKey.substring(0, 8) + '...',
+              avatar: existingContact?.avatar,
+              username: existingContact?.username,
+              lastMessageAt: payload.timestamp,
+              pinned: existingContact?.pinned,
+              draft: existingContact?.draft,
+              archived: existingContact?.archived,
+              mutedUntil: existingContact?.mutedUntil,
+            });
+            void this.refreshContactProfile(payload.peerPubKey);
+            return;
+          }
+
+          if (!existingMsg?.id) {
+            return;
+          }
+
+          if (payload.kind === 'direct_edit') {
+            await updateMessageAndSync(existingMsg.id, {
+              text: payload.text,
+              editedAt: payload.editedAt,
+              deletedAt: undefined,
+            });
+            return;
+          }
+
+          if (payload.kind === 'direct_delete') {
+            await updateMessageAndSync(existingMsg.id, {
+              text: '[Message deleted]',
+              deletedAt: payload.deletedAt,
+              editedAt: undefined,
+              reactions: {},
+            });
+            return;
+          }
+
+          if (payload.kind === 'direct_reaction') {
+            const nextReactions = { ...(existingMsg.reactions ?? {}) };
+            if (payload.reaction) {
+              nextReactions[payload.actorPubKey] = payload.reaction;
+            } else {
+              delete nextReactions[payload.actorPubKey];
+            }
+            await updateMessageAndSync(existingMsg.id, { reactions: nextReactions });
+            return;
+          }
+          return;
+        }
         if (env.type === 'message' || env.type === 'offline_message') {
           const isForMe = env.recipient_pub_key === pubKey;
           const isFromMe = env.sender_pub_key === pubKey;
@@ -635,6 +830,17 @@ export class SocketManager {
                   await db.contacts.update(peerPubKey, { lastMessageAt: Date.now() });
                 }
                 void this.refreshContactProfile(peerPubKey);
+                if (senderPubKey !== pubKey) {
+                  this.sendSelfSyncDirectMessage({
+                    kind: 'direct_message',
+                    msgId,
+                    peerPubKey,
+                    senderPubKey,
+                    text: plaintext,
+                    timestamp: Date.now(),
+                    status: 'delivered',
+                  });
+                }
 
             // Send delivery receipt back
             if (this.authenticated && senderPubKey !== pubKey) {
@@ -822,6 +1028,45 @@ export class SocketManager {
     } catch (error) {
       console.warn('Failed to sync profile', error);
       throw error;
+    }
+  }
+
+  async refreshOwnProfile(pubKey?: string, force = false) {
+    const targetPubKey = pubKey ?? useAppStore.getState().myPublicKey;
+    if (!targetPubKey) {
+      return;
+    }
+
+    try {
+      const response = await fetchWithTimeout(`${appConfig.profileUrl}?pub=${encodeURIComponent(targetPubKey)}`, {
+        headers: this.getSessionHeaders(),
+      });
+      if (!response.ok) return;
+
+      const profile = await response.json() as {
+        nickname?: string;
+        avatar?: string;
+        username?: string;
+      };
+      const current = useAppStore.getState();
+      const nextNickname = profile.nickname?.trim() || current.nickname?.trim();
+      const nextAvatar = profile.avatar?.trim() || current.avatar || null;
+      const nextUsername = profile.username?.trim() || current.username?.trim() || null;
+
+      if (!force && !nextNickname && !nextAvatar && !nextUsername) {
+        return;
+      }
+      if (!nextNickname && !nextAvatar && !nextUsername) {
+        return;
+      }
+
+      current.setProfile(
+        nextNickname || current.nickname || `User ${targetPubKey.substring(0, 6)}`,
+        nextAvatar,
+        nextUsername
+      );
+    } catch (error) {
+      console.warn('Failed to refresh own profile', error);
     }
   }
 
@@ -1188,6 +1433,26 @@ export class SocketManager {
     return Boolean(this.ws && this.ws.readyState === WebSocket.OPEN && this.authenticated);
   }
 
+  private sendSelfSyncDirectMessage(payload: SelfSyncPayload) {
+    const { myPublicKey, mySecretKey } = useAppStore.getState();
+    if (!this.canSendImmediately() || !myPublicKey || !mySecretKey) {
+      return;
+    }
+
+    try {
+      const encryptedPayload = encryptMessage(JSON.stringify(payload), mySecretKey, myPublicKey);
+      this.ws?.send(JSON.stringify({
+        type: 'self_sync',
+        msg_id: `${payload.msgId}:self`,
+        recipient_pub_key: myPublicKey,
+        sender_pub_key: myPublicKey,
+        data: encryptedPayload,
+      }));
+    } catch (error) {
+      console.warn('Failed to send self-sync payload', error);
+    }
+  }
+
   private async enqueueOutgoingDirectMessage(message: OutgoingDirectMessage) {
     await db.outgoingDirectMessages.put(message);
   }
@@ -1203,6 +1468,21 @@ export class SocketManager {
       recipient_pub_key: message.recipientPubKey,
       sender_pub_key: message.senderPubKey,
       data: message.data,
+    }));
+  }
+
+  private sendSelfSyncEnvelope(message: OutgoingDirectMessage) {
+    const { myPublicKey } = useAppStore.getState();
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.authenticated || !myPublicKey || !message.syncData) {
+      return;
+    }
+
+    this.ws.send(JSON.stringify({
+      type: 'self_sync',
+      msg_id: `${message.id}:self`,
+      recipient_pub_key: myPublicKey,
+      sender_pub_key: myPublicKey,
+      data: message.syncData,
     }));
   }
 
@@ -1222,6 +1502,15 @@ export class SocketManager {
     const msg = await db.messages.where('msgId').equals(msgId).first();
     if (msg?.id && msg.status === 'pending') {
       await updateMessageAndSync(msg.id, { status: 'sent' });
+      this.sendSelfSyncDirectMessage({
+        kind: 'direct_message',
+        msgId,
+        peerPubKey: msg.peerPublicKey,
+        senderPubKey: msg.senderPublicKey,
+        text: msg.text,
+        timestamp: msg.timestamp,
+        status: 'sent',
+      });
     }
   }
 
@@ -1248,6 +1537,7 @@ export class SocketManager {
         }
         try {
           this.sendDirectEnvelope(message);
+          this.sendSelfSyncEnvelope(message);
           await this.markDirectAttempt(message);
         } catch (error) {
           console.warn('Failed to flush queued direct message', message.id, error);
@@ -1620,12 +1910,22 @@ export class SocketManager {
     }
 
     const msgId = crypto.randomUUID();
+    const createdAt = Date.now();
     const queuedMessage: OutgoingDirectMessage = {
       id: msgId,
       recipientPubKey,
       senderPubKey: myPublicKey,
       data: await this.encryptInSession(recipientPubKey, plaintext, mySecretKey, myPublicKey),
-      createdAt: Date.now(),
+      syncData: encryptMessage(JSON.stringify({
+        kind: 'direct_message',
+        msgId,
+        peerPubKey: recipientPubKey,
+        senderPubKey: myPublicKey,
+        text: plaintext,
+        timestamp: createdAt,
+        status: 'pending',
+      } satisfies SelfSyncDirectMessagePayload), mySecretKey, myPublicKey),
+      createdAt,
       attempts: 0,
     };
 
@@ -1634,7 +1934,7 @@ export class SocketManager {
       peerPublicKey: recipientPubKey,
       senderPublicKey: myPublicKey,
       text: plaintext,
-      timestamp: queuedMessage.createdAt,
+      timestamp: createdAt,
       status: 'pending',
       reactions: {}
     });
@@ -1642,6 +1942,7 @@ export class SocketManager {
 
     if (this.canSendImmediately()) {
       this.sendDirectEnvelope(queuedMessage);
+      this.sendSelfSyncEnvelope(queuedMessage);
       await this.markDirectAttempt(queuedMessage);
     } else {
       toast('Queued and will send when connection is back.', { icon: 'вЏі' });
@@ -1951,8 +2252,16 @@ export class SocketManager {
     }));
 
     const msg = await db.messages.where('msgId').equals(msgId).first();
+    const editedAt = Date.now();
     if (msg?.id) {
-      await updateMessageAndSync(msg.id, { text: plaintext, editedAt: Date.now(), deletedAt: undefined });
+      await updateMessageAndSync(msg.id, { text: plaintext, editedAt, deletedAt: undefined });
+      this.sendSelfSyncDirectMessage({
+        kind: 'direct_edit',
+        msgId,
+        peerPubKey: recipientPubKey,
+        text: plaintext,
+        editedAt,
+      });
     }
   }
 
@@ -1968,12 +2277,19 @@ export class SocketManager {
     }));
 
     const msg = await db.messages.where('msgId').equals(msgId).first();
+    const deletedAt = Date.now();
     if (msg?.id) {
       await updateMessageAndSync(msg.id, {
         text: '[Message deleted]',
-        deletedAt: Date.now(),
+        deletedAt,
         editedAt: undefined,
         reactions: {}
+      });
+      this.sendSelfSyncDirectMessage({
+        kind: 'direct_delete',
+        msgId,
+        peerPubKey: recipientPubKey,
+        deletedAt,
       });
     }
   }
@@ -1999,6 +2315,13 @@ export class SocketManager {
         delete reactions[myPublicKey];
       }
       await updateMessageAndSync(msg.id, { reactions });
+      this.sendSelfSyncDirectMessage({
+        kind: 'direct_reaction',
+        msgId,
+        peerPubKey: recipientPubKey,
+        actorPubKey: myPublicKey,
+        reaction,
+      });
     }
   }
 

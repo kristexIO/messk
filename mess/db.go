@@ -140,6 +140,24 @@ func InitDB(ctx context.Context, dataSourceName string) *DB {
 			FOREIGN KEY (subscriber_pub_key) REFERENCES users(pub_key) ON DELETE CASCADE
 		);
 
+		CREATE TABLE IF NOT EXISTS group_invite_links (
+			token TEXT PRIMARY KEY,
+			group_id TEXT NOT NULL,
+			created_by_pub_key TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (group_id) REFERENCES groups_meta(id) ON DELETE CASCADE,
+			FOREIGN KEY (created_by_pub_key) REFERENCES users(pub_key) ON DELETE CASCADE
+		);
+
+		CREATE TABLE IF NOT EXISTS channel_invite_links (
+			token TEXT PRIMARY KEY,
+			channel_id TEXT NOT NULL,
+			created_by_pub_key TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
+			FOREIGN KEY (created_by_pub_key) REFERENCES users(pub_key) ON DELETE CASCADE
+		);
+
 		-- Performance Indexes
 		CREATE INDEX IF NOT EXISTS idx_offline_recipient ON offline_messages(recipient_pub_key);
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_offline_recipient_msg_id ON offline_messages(recipient_pub_key, msg_id) WHERE msg_id IS NOT NULL;
@@ -147,6 +165,8 @@ func InitDB(ctx context.Context, dataSourceName string) *DB {
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_prekeys_user_prekey ON prekeys(user_pub_key, prekey_pub_key);
 		CREATE INDEX IF NOT EXISTS idx_group_members_member ON group_members(member_pub_key);
 		CREATE INDEX IF NOT EXISTS idx_channel_subscribers_member ON channel_subscribers(subscriber_pub_key);
+		CREATE INDEX IF NOT EXISTS idx_group_invite_links_group ON group_invite_links(group_id);
+		CREATE INDEX IF NOT EXISTS idx_channel_invite_links_channel ON channel_invite_links(channel_id);
 	`)
 	if err != nil {
 		log.Fatalf("Failed to initialize database schema: %v", err)
@@ -675,6 +695,112 @@ func (db *DB) DeleteChannel(ctx context.Context, channelID, ownerPubKey string) 
 		WHERE id = ? AND owner_pub_key = ?
 	`, channelID, ownerPubKey)
 	return err
+}
+
+func (db *DB) CreateGroupInviteLink(ctx context.Context, groupID, createdByPubKey string) (string, error) {
+	token, err := newEntityID("glnk")
+	if err != nil {
+		return "", err
+	}
+
+	_, err = db.db.ExecContext(ctx, `
+		INSERT INTO group_invite_links (token, group_id, created_by_pub_key)
+		VALUES (?, ?, ?)
+	`, token, groupID, createdByPubKey)
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+func (db *DB) CreateChannelInviteLink(ctx context.Context, channelID, createdByPubKey string) (string, error) {
+	token, err := newEntityID("clnk")
+	if err != nil {
+		return "", err
+	}
+
+	_, err = db.db.ExecContext(ctx, `
+		INSERT INTO channel_invite_links (token, channel_id, created_by_pub_key)
+		VALUES (?, ?, ?)
+	`, token, channelID, createdByPubKey)
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+func (db *DB) JoinGroupByInviteToken(ctx context.Context, token, memberPubKey string) (string, error) {
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	var groupID string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT group_id
+		FROM group_invite_links
+		WHERE token = ?
+	`, strings.TrimSpace(token)).Scan(&groupID); err != nil {
+		return "", err
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO users (pub_key)
+		VALUES (?)
+		ON CONFLICT (pub_key) DO NOTHING
+	`, memberPubKey); err != nil {
+		return "", err
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO group_members (group_id, member_pub_key, role)
+		VALUES (?, ?, 'member')
+	`, groupID, memberPubKey); err != nil {
+		return "", err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return groupID, nil
+}
+
+func (db *DB) JoinChannelByInviteToken(ctx context.Context, token, subscriberPubKey string) (string, error) {
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	var channelID string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT channel_id
+		FROM channel_invite_links
+		WHERE token = ?
+	`, strings.TrimSpace(token)).Scan(&channelID); err != nil {
+		return "", err
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO users (pub_key)
+		VALUES (?)
+		ON CONFLICT (pub_key) DO NOTHING
+	`, subscriberPubKey); err != nil {
+		return "", err
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO channel_subscribers (channel_id, subscriber_pub_key, role)
+		VALUES (?, ?, 'subscriber')
+	`, channelID, subscriberPubKey); err != nil {
+		return "", err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return channelID, nil
 }
 
 // SaveOfflineMessage сохраняет сообщение для оффлайн пользователя

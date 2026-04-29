@@ -117,6 +117,7 @@ export interface OutgoingDirectMessage {
   recipientPubKey: string;
   senderPubKey: string;
   data: string;
+  syncData?: string;
   createdAt: number;
   lastAttemptAt?: number;
   attempts: number;

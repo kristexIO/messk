@@ -9,6 +9,8 @@ import { OnboardingModal } from './components/OnboardingModal';
 import { db } from './lib/db';
 import { decodeBase64 } from 'tweetnacl-util';
 import { useI18n } from './lib/i18n';
+import { joinInviteLink, syncChannels, syncGroups } from './lib/community';
+import { toast } from 'react-hot-toast';
 
 const Auth = lazy(async () => {
   const module = await import('./pages/Auth');
@@ -21,7 +23,7 @@ const Chat = lazy(async () => {
 });
 
 function App() {
-  const { mySecretKey, isLocked, isRestoringIdentity, restoreRememberedIdentity, setActivePeer } = useAppStore();
+  const { myPublicKey, mySecretKey, isLocked, isRestoringIdentity, restoreRememberedIdentity, setActivePeer, setActiveGroup, setActiveChannel } = useAppStore();
   const { t } = useI18n();
   const [hasDismissedOnboarding, setHasDismissedOnboarding] = useState(
     () => localStorage.getItem('messk_onboarding_seen') === '1'
@@ -31,6 +33,13 @@ function App() {
   useEffect(() => {
     void restoreRememberedIdentity();
   }, [restoreRememberedIdentity]);
+
+  useEffect(() => {
+    if (!myPublicKey || isRestoringIdentity) {
+      return;
+    }
+    void socketManager.refreshOwnProfile(myPublicKey);
+  }, [isRestoringIdentity, myPublicKey]);
 
   useEffect(() => {
     if (!mySecretKey || isRestoringIdentity) {
@@ -66,6 +75,64 @@ function App() {
       window.history.replaceState(null, '', `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}${window.location.hash}`);
     });
   }, [isRestoringIdentity, mySecretKey, setActivePeer]);
+
+  useEffect(() => {
+    if (!mySecretKey || isRestoringIdentity) {
+      return;
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    const inviteToken = params.get('invite');
+    if (!inviteToken) {
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      let shouldClearInvite = false;
+      try {
+        const ready = await socketManager.ensureRealtimeReady();
+        if (!ready || cancelled) {
+          return;
+        }
+        shouldClearInvite = true;
+        const joined = await joinInviteLink(inviteToken);
+        if (cancelled) {
+          return;
+        }
+
+        if (joined.entityType === 'group') {
+          await syncGroups(true);
+          if (cancelled) {
+            return;
+          }
+          setActiveGroup(joined.entityId);
+          toast.success('Joined group via invite link.');
+        } else {
+          await syncChannels(true);
+          if (cancelled) {
+            return;
+          }
+          setActiveChannel(joined.entityId);
+          toast.success('Joined channel via invite link.');
+        }
+      } catch (error) {
+        if (!cancelled) {
+          toast.error(error instanceof Error ? error.message : 'Failed to use invite link.');
+        }
+      } finally {
+        if (shouldClearInvite) {
+          params.delete('invite');
+          const nextQuery = params.toString();
+          window.history.replaceState(null, '', `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}${window.location.hash}`);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isRestoringIdentity, mySecretKey, setActiveChannel, setActiveGroup]);
 
   useEffect(() => {
     // Init native notifications & autostart (Tauri only)
