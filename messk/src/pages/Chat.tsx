@@ -1,4 +1,4 @@
-import React, { useDeferredValue, useEffect, useRef } from 'react';
+﻿import React, { useDeferredValue, useEffect, useRef } from 'react';
 import { useAppStore } from '../store';
 import { socketManager } from '../lib/socket';
 import { clearThreadStats, db, syncThreadStats, type StoredMessage } from '../lib/db';
@@ -25,16 +25,26 @@ import {
   deleteGroup,
   leaveChannel,
   leaveGroup,
+  listChannelInviteLinks,
+  listChannelModerationAudit,
   listChannelSubscribers,
+  listGroupInviteLinks,
+  listGroupModerationAudit,
   listGroupMembers,
   removeChannelSubscriber,
   removeGroupMember,
+  revokeChannelInviteLink,
+  revokeGroupInviteLink,
   transferChannelOwnership,
   transferGroupOwnership,
+  updateChannelSettings,
   updateChannelSubscriberRole,
-  updateGroupMemberRole
+  updateGroupMemberRole,
+  updateGroupSettings,
+  type InviteLinkRecord
 } from '../lib/community';
 import { decodeBase64 } from 'tweetnacl-util';
+import { useLocation, useNavigate } from 'react-router-dom';
 
 type DownloadFileFn = (url: string, key: string, name: string) => Promise<void>;
 
@@ -156,7 +166,18 @@ async function putChannelActivity(
   });
 }
 
-const QUICK_REACTIONS = ['👍', '❤️', '🔥'];
+const QUICK_REACTIONS = ['\u{1F44D}', '\u2764\uFE0F', '\u{1F525}'];
+
+const LEGACY_REACTION_MAP: Record<string, string> = {
+  'рџ‘Ќ': '\u{1F44D}',
+  'вќ¤пёЏ': '\u2764\uFE0F',
+  'рџ”Ґ': '\u{1F525}',
+};
+
+function normalizeReactionValue(value: string | null | undefined): string | null {
+  if (!value) return null;
+  return LEGACY_REACTION_MAP[value] ?? value;
+}
 const INITIAL_MESSAGE_RENDER_LIMIT = 120;
 const MESSAGE_RENDER_STEP = 120;
 
@@ -216,10 +237,16 @@ const MessageBubble = React.memo(({
   onEdit,
   onDelete,
   onReact,
+  canModerate = false,
   canPin = false,
   isPinned = false,
   onPin,
-  onMentionClick
+  onMentionClick,
+  isEditing = false,
+  editDraft = '',
+  onEditDraftChange,
+  onEditSave,
+  onEditCancel
 }: {
   msg: StoredMessage;
   isMine: boolean;
@@ -228,14 +255,22 @@ const MessageBubble = React.memo(({
   onEdit: (msg: StoredMessage) => void;
   onDelete: (msg: StoredMessage) => void;
   onReact: (msg: StoredMessage, reaction: string) => void;
+  canModerate?: boolean;
   canPin?: boolean;
   isPinned?: boolean;
   onPin?: (msg: StoredMessage) => void;
   onMentionClick?: (pubKey: string) => void;
+  isEditing?: boolean;
+  editDraft?: string;
+  onEditDraftChange?: (value: string) => void;
+  onEditSave?: () => void;
+  onEditCancel?: () => void;
 }) => {
   const isDeleted = Boolean(msg.deletedAt);
   const reactionEntries = React.useMemo(
-    () => Object.entries(msg.reactions ?? {}),
+    () =>
+      Object.entries(msg.reactions ?? {})
+        .map(([senderKey, reaction]) => [senderKey, normalizeReactionValue(reaction) ?? reaction] as const),
     [msg.reactions]
   );
   const hasReactions = reactionEntries.length > 0;
@@ -247,6 +282,13 @@ const MessageBubble = React.memo(({
     () => new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     [msg.timestamp]
   );
+
+  const editInputRef = React.useRef<HTMLTextAreaElement | null>(null);
+  React.useEffect(() => {
+    if (!isEditing) return;
+    editInputRef.current?.focus();
+    editInputRef.current?.setSelectionRange(editInputRef.current.value.length, editInputRef.current.value.length);
+  }, [isEditing]);
 
   return (
     <div className={`group flex w-full animate-in slide-in-from-bottom-2 duration-300 ${isMine ? 'justify-end' : 'justify-start'}`}>
@@ -269,7 +311,7 @@ const MessageBubble = React.memo(({
                 {reaction}
               </button>
             ))}
-            {isMine ? (
+            {isMine || canModerate ? (
               <>
                 <button
                   type="button"
@@ -319,6 +361,29 @@ const MessageBubble = React.memo(({
             </div>
           ) : parsedContent.kind === 'voice' ? (
             <VoiceMessage voiceData={parsedContent.payload} downloadFile={downloadFile} />
+          ) : isEditing ? (
+            <div className="space-y-2">
+              <textarea
+                ref={editInputRef}
+                value={editDraft ?? ''}
+                onChange={(e) => onEditDraftChange?.(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    onEditCancel?.();
+                  }
+                  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    onEditSave?.();
+                  }
+                }}
+                className="w-full min-h-[80px] rounded-xl border border-white/15 bg-black/20 px-3 py-2 text-[14px] outline-none"
+              />
+              <div className="flex justify-end gap-2">
+                <button type="button" onClick={onEditCancel} className="rounded-lg border border-white/20 px-3 py-1.5 text-xs">Cancel</button>
+                <button type="button" onClick={onEditSave} className="rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-xs text-white">Save</button>
+              </div>
+            </div>
           ) : (
             renderTextWithMentions(parsedContent.text, parsedContent.mentions, onMentionClick)
           )}
@@ -329,10 +394,10 @@ const MessageBubble = React.memo(({
               <button
                 key={`${msg.msgId}-${senderKey}`}
                 type="button"
-                onClick={() => onReact(msg, reaction)}
+                onClick={() => onReact(msg, normalizeReactionValue(reaction) ?? reaction)}
                 className="rounded-full border border-white/10 bg-black/15 px-2 py-0.5 text-xs text-white/80 transition-colors hover:bg-black/25"
               >
-                {reaction}
+                {normalizeReactionValue(reaction) ?? reaction}
               </button>
             ))}
           </div>
@@ -343,6 +408,11 @@ const MessageBubble = React.memo(({
               {msg.editedBy && msg.editedBy !== msg.senderPublicKey ? 'edited by moderator' : 'edited'}
             </span>
           ) : null}
+          {msg.editedAt && !msg.deletedAt ? (
+            <span className="text-[10px] font-medium">
+              {new Date(msg.editedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </span>
+          ) : null}
           {msg.deletedAt && msg.deletedBy && msg.deletedBy !== msg.senderPublicKey ? (
             <span className="text-[10px] font-medium">removed by moderator</span>
           ) : null}
@@ -350,7 +420,16 @@ const MessageBubble = React.memo(({
             {formattedTimestamp}
           </span>
           {isMine && (
-            <span className="flex-shrink-0">
+            <span className="flex items-center gap-1.5 flex-shrink-0">
+              <span className="text-[10px] font-medium uppercase tracking-wide">
+                {msg.status === 'pending'
+                  ? 'pending'
+                  : msg.status === 'read' && !isGroupMessage
+                    ? 'read'
+                    : msg.status === 'delivered'
+                      ? (isGroupMessage ? 'distributed' : 'delivered')
+                      : 'sent'}
+              </span>
               {msg.status === 'pending' ? (
                 <Clock3 className="w-3.5 h-3.5 text-amber-200" />
               ) : msg.status === 'read' && !isGroupMessage ? (
@@ -384,6 +463,8 @@ export const Chat: React.FC = () => {
     channelSyncStatus
   } = useAppStore();
   const { t } = useI18n();
+  const navigate = useNavigate();
+  const location = useLocation();
   const [draftOverrides, setDraftOverrides] = React.useState<Record<string, string>>({});
   const [isUploading, setIsUploading] = React.useState(false);
   const [isRecording, setIsRecording] = React.useState(false);
@@ -404,6 +485,16 @@ export const Chat: React.FC = () => {
   const [mentionStartIndex, setMentionStartIndex] = React.useState<number | null>(null);
   const [mentionSelectionIndex, setMentionSelectionIndex] = React.useState(0);
   const [activePeerFingerprint, setActivePeerFingerprint] = React.useState('');
+  const isRoomSettingsOpen = location.pathname === '/room-settings';
+  const [roomSettingsTab, setRoomSettingsTab] = React.useState<'general' | 'members' | 'roles' | 'invites' | 'moderation' | 'danger'>('general');
+  const [moderationEntries, setModerationEntries] = React.useState<Array<{ id: number; actorPubKey: string; action: string; target: string; details: string; createdAt: string }>>([]);
+  const [inviteTTLMinutes, setInviteTTLMinutes] = React.useState('0');
+  const [inviteMaxUses, setInviteMaxUses] = React.useState('0');
+  const [invitePassword, setInvitePassword] = React.useState('');
+  const [inviteLinks, setInviteLinks] = React.useState<InviteLinkRecord[]>([]);
+  const [inviteBusyToken, setInviteBusyToken] = React.useState<string | null>(null);
+  const [editingMsgId, setEditingMsgId] = React.useState<string | null>(null);
+  const [editingDraft, setEditingDraft] = React.useState('');
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -491,6 +582,8 @@ export const Chat: React.FC = () => {
   const isChatMuted = Boolean(activeContact?.mutedUntil && activeContact.mutedUntil > nowTs);
   const canManageGroupMembers = activeGroup?.role === 'owner' || activeGroup?.role === 'admin';
   const canManageChannelSubscribers = activeChannel?.role === 'owner' || activeChannel?.role === 'admin';
+  const canViewGroupMembers = canManageGroupMembers;
+  const canViewChannelSubscribers = canManageChannelSubscribers;
   const canPostInChannel = activeChannel?.role === 'owner' || activeChannel?.role === 'admin' || activeChannel?.role === 'poster';
   const canPinChannelPosts = activeChannel?.role === 'owner' || activeChannel?.role === 'admin';
   const activeGroupMembersKey = activeGroupMembers.join('|');
@@ -639,6 +732,52 @@ export const Chat: React.FC = () => {
   }, [activePeerKey]);
 
   useEffect(() => {
+    if (!isRoomSettingsOpen) {
+      return;
+    }
+    void Promise.resolve().then(() => setRoomSettingsTab('general'));
+  }, [isRoomSettingsOpen, activeGroupId, activeChannelId]);
+
+  useEffect(() => {
+    if (!isRoomSettingsOpen || roomSettingsTab !== 'moderation') {
+      return;
+    }
+    if (activeGroupId && canManageGroupMembers) {
+      void listGroupModerationAudit(activeGroupId).then((entries) => setModerationEntries(entries)).catch(() => setModerationEntries([]));
+      return;
+    }
+    if (activeChannelId && canManageChannelSubscribers) {
+      void listChannelModerationAudit(activeChannelId).then((entries) => setModerationEntries(entries)).catch(() => setModerationEntries([]));
+      return;
+    }
+    void Promise.resolve().then(() => setModerationEntries([]));
+  }, [activeChannelId, activeGroupId, canManageChannelSubscribers, canManageGroupMembers, isRoomSettingsOpen, roomSettingsTab]);
+
+  const loadInviteLinks = React.useCallback(async () => {
+    try {
+      if (activeGroupId && canManageGroupMembers) {
+        setInviteLinks(await listGroupInviteLinks(activeGroupId));
+        return;
+      }
+      if (activeChannelId && canManageChannelSubscribers) {
+        setInviteLinks(await listChannelInviteLinks(activeChannelId));
+        return;
+      }
+      setInviteLinks([]);
+    } catch {
+      setInviteLinks([]);
+    }
+  }, [activeChannelId, activeGroupId, canManageChannelSubscribers, canManageGroupMembers]);
+
+  useEffect(() => {
+    if (!isRoomSettingsOpen || roomSettingsTab !== 'invites') return;
+    const timer = window.setTimeout(() => {
+      void loadInviteLinks();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [isRoomSettingsOpen, loadInviteLinks, roomSettingsTab]);
+
+  useEffect(() => {
     void Promise.resolve().then(() => {
       setMentionQuery('');
       setMentionStartIndex(null);
@@ -667,24 +806,24 @@ export const Chat: React.FC = () => {
   }, [lastVisibleMessageId]);
 
   useEffect(() => {
-    if (!activeGroupId) return;
+    if (!activeGroupId || !canViewGroupMembers) return;
 
     void listGroupMembers(activeGroupId)
       .then((members) => setGroupMembersMeta(members))
       .catch((error) => {
         console.warn('Failed to load group members metadata', error);
       });
-  }, [activeGroupId, activeGroup?.memberCount, activeGroup?.role, activeGroupMembersKey]);
+  }, [activeGroup?.memberCount, activeGroup?.role, activeGroupId, activeGroupMembersKey, canViewGroupMembers]);
 
   useEffect(() => {
-    if (!activeChannelId) return;
+    if (!activeChannelId || !canViewChannelSubscribers) return;
 
     void listChannelSubscribers(activeChannelId)
       .then((subscribers) => setChannelSubscribersMeta(subscribers))
       .catch((error) => {
         console.warn('Failed to load channel subscribers metadata', error);
       });
-  }, [activeChannelId, activeChannel?.subscriberCount, activeChannel?.role]);
+  }, [activeChannel?.role, activeChannel?.subscriberCount, activeChannelId, canViewChannelSubscribers]);
 
   useEffect(() => {
     if (!activePeerKey) return;
@@ -1184,11 +1323,33 @@ export const Chat: React.FC = () => {
   const handleCopyGroupInviteLink = async () => {
     if (!activeGroupId) return;
     try {
-      const url = await createGroupInviteLink(activeGroupId);
+      const ttlMinutes = Number.parseInt(inviteTTLMinutes, 10);
+      const maxUses = Number.parseInt(inviteMaxUses, 10);
+      const url = await createGroupInviteLink(activeGroupId, {
+        ttlMinutes: Number.isFinite(ttlMinutes) && ttlMinutes > 0 ? ttlMinutes : undefined,
+        maxUses: Number.isFinite(maxUses) && maxUses > 0 ? maxUses : undefined,
+        password: invitePassword.trim() || undefined,
+      });
       await navigator.clipboard.writeText(url);
       toast.success('Group invite link copied.');
+      await loadInviteLinks();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to create group invite link');
+    }
+  };
+
+  const handleUpdateGroupSettings = async () => {
+    if (!activeGroupId || !activeGroup || !canManageGroupMembers) return;
+    const nextTitle = window.prompt('Group title', activeGroup.title)?.trim();
+    if (!nextTitle) return;
+    const nextAvatarRaw = window.prompt('Group avatar URL (leave blank to remove)', activeGroup.avatar ?? '') ?? '';
+    const nextAvatar = nextAvatarRaw.trim();
+    try {
+      await updateGroupSettings(activeGroupId, { title: nextTitle, avatar: nextAvatar || null });
+      await db.groupThreads.update(activeGroupId, { title: nextTitle, avatar: nextAvatar || null });
+      toast.success('Group settings updated.');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to update group settings');
     }
   };
 
@@ -1347,11 +1508,50 @@ export const Chat: React.FC = () => {
   const handleCopyChannelInviteLink = async () => {
     if (!activeChannelId) return;
     try {
-      const url = await createChannelInviteLink(activeChannelId);
+      const ttlMinutes = Number.parseInt(inviteTTLMinutes, 10);
+      const maxUses = Number.parseInt(inviteMaxUses, 10);
+      const url = await createChannelInviteLink(activeChannelId, {
+        ttlMinutes: Number.isFinite(ttlMinutes) && ttlMinutes > 0 ? ttlMinutes : undefined,
+        maxUses: Number.isFinite(maxUses) && maxUses > 0 ? maxUses : undefined,
+        password: invitePassword.trim() || undefined,
+      });
       await navigator.clipboard.writeText(url);
       toast.success('Channel invite link copied.');
+      await loadInviteLinks();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to create channel invite link');
+    }
+  };
+
+  const handleRevokeInvite = async (token: string) => {
+    setInviteBusyToken(token);
+    try {
+      if (activeGroupId) {
+        await revokeGroupInviteLink(activeGroupId, token);
+      } else if (activeChannelId) {
+        await revokeChannelInviteLink(activeChannelId, token);
+      }
+      toast.success('Invite link revoked.');
+      await loadInviteLinks();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to revoke invite link');
+    } finally {
+      setInviteBusyToken(null);
+    }
+  };
+
+  const handleUpdateChannelSettings = async () => {
+    if (!activeChannelId || !activeChannel || !canManageChannelSubscribers) return;
+    const nextTitle = window.prompt('Channel title', activeChannel.title)?.trim();
+    if (!nextTitle) return;
+    const nextAvatarRaw = window.prompt('Channel avatar URL (leave blank to remove)', activeChannel.avatar ?? '') ?? '';
+    const nextAvatar = nextAvatarRaw.trim();
+    try {
+      await updateChannelSettings(activeChannelId, { title: nextTitle, avatar: nextAvatar || null });
+      await db.channelThreads.update(activeChannelId, { title: nextTitle, avatar: nextAvatar || null });
+      toast.success('Channel settings updated.');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to update channel settings');
     }
   };
 
@@ -1436,7 +1636,11 @@ export const Chat: React.FC = () => {
   };
 
   const handleInitEdit = (msg: StoredMessage) => {
-    handleEditMessage(msg);
+    const parsed = parseRichTextMessage(msg.text);
+    setEditingMsgId(msg.msgId);
+    setEditingDraft(parsed.text);
+    const target = document.querySelector<HTMLElement>(`[data-msg-id="${msg.msgId}"]`);
+    target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
 
   const handleReaction = (msg: StoredMessage, reaction: string) => {
@@ -1448,9 +1652,13 @@ export const Chat: React.FC = () => {
       toast.error('Only owners, admins or the original author can edit this channel post.');
       return;
     }
-    const nextText = window.prompt('Edit message', msg.text);
-    if (!nextText || nextText.trim() === msg.text.trim()) return;
-    const encodedText = encodeRichTextMessage(nextText.trim(), mentionHandleDirectory);
+    const currentParsed = parseRichTextMessage(msg.text);
+    const nextText = editingDraft.trim();
+    if (!nextText || nextText === currentParsed.text.trim()) {
+      setEditingMsgId(null);
+      return;
+    }
+    const encodedText = encodeRichTextMessage(nextText, mentionHandleDirectory);
 
     try {
       if (activeGroupId) {
@@ -1466,6 +1674,8 @@ export const Chat: React.FC = () => {
         if (!mySecretKey) return;
         await socketManager.sendEdit(activePeerKey, msg.msgId, encodedText);
       }
+      setEditingMsgId(null);
+      setEditingDraft('');
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to edit message');
     }
@@ -1473,6 +1683,10 @@ export const Chat: React.FC = () => {
 
   const handleDeleteMessage = async (msg: StoredMessage) => {
     if ((!activePeerKey && !activeGroupId && !activeChannelId) || !myPublicKey || msg.deletedAt) return;
+    if (activeGroupId && msg.senderPublicKey !== myPublicKey && activeGroup?.role !== 'owner' && activeGroup?.role !== 'admin') {
+      toast.error('Only owners, admins or the original author can delete this group message.');
+      return;
+    }
     if (activeChannelId && msg.senderPublicKey !== myPublicKey && activeChannel?.role !== 'owner' && activeChannel?.role !== 'admin') {
       toast.error('Only owners, admins or the original author can delete this channel post.');
       return;
@@ -1494,8 +1708,9 @@ export const Chat: React.FC = () => {
 
   const handleReactToMessage = async (msg: StoredMessage, reaction: string) => {
     if ((!activePeerKey && !activeGroupId && !activeChannelId) || msg.deletedAt || !myPublicKey) return;
-    const currentReaction = msg.reactions?.[myPublicKey];
-    const nextReaction = currentReaction === reaction ? null : reaction;
+    const currentReaction = normalizeReactionValue(msg.reactions?.[myPublicKey]);
+    const targetReaction = normalizeReactionValue(reaction) ?? reaction;
+    const nextReaction = currentReaction === targetReaction ? null : targetReaction;
     if (activeGroupId && mySecretKey) {
       await socketManager.sendGroupReaction(activeGroupId, msg.msgId, nextReaction, myPublicKey, mySecretKey);
     } else if (activeChannelId) {
@@ -1529,6 +1744,213 @@ export const Chat: React.FC = () => {
     <div className="messk-shell app-shell-height flex overflow-hidden">
       <Sidebar />
       <CallOverlay />
+      {isRoomSettingsOpen && (activeGroup || activeChannel) ? (
+        <div className="fixed inset-0 z-[140] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur">
+          <div className="w-full max-w-xl rounded-3xl border border-white/15 bg-slate-900/95 p-5 shadow-2xl">
+            <div className="mb-4 flex items-center justify-between">
+              <div className="text-lg font-semibold text-white">
+                {activeGroup ? 'Group settings' : 'Channel settings'}
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate('/')}
+                className="rounded-xl border border-white/15 p-2 text-white/80 hover:bg-white/10"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mb-4 grid grid-cols-3 gap-2">
+              {(['general', 'members', 'roles', 'invites', 'moderation', 'danger'] as const).map((tab) => (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => setRoomSettingsTab(tab)}
+                  className={`rounded-xl border px-2 py-1.5 text-xs font-medium transition-all ${
+                    roomSettingsTab === tab
+                      ? 'border-accent/50 bg-accent/20 text-white'
+                      : 'border-white/10 bg-white/5 text-text-muted hover:text-white'
+                  }`}
+                >
+                  {tab}
+                </button>
+              ))}
+            </div>
+
+            <div className="space-y-3 max-h-[62vh] overflow-y-auto custom-scrollbar pr-1">
+              {roomSettingsTab === 'general' ? (
+                <>
+                  {activeGroup && canManageGroupMembers ? (
+                    <>
+                      <button type="button" onClick={() => void handleUpdateGroupSettings()} className="w-full rounded-xl border border-white/20 bg-white/5 px-3 py-2 text-left text-sm text-white">
+                        Change title/avatar
+                      </button>
+                      <div className="rounded-xl border border-white/10 bg-black/10 px-3 py-2 text-xs text-text-muted">
+                        Role: <span className="text-white">{activeGroup.role}</span>
+                      </div>
+                    </>
+                  ) : null}
+                  {activeChannel && canManageChannelSubscribers ? (
+                    <>
+                      <button type="button" onClick={() => void handleUpdateChannelSettings()} className="w-full rounded-xl border border-white/20 bg-white/5 px-3 py-2 text-left text-sm text-white">
+                        Change title/avatar
+                      </button>
+                      <div className="rounded-xl border border-white/10 bg-black/10 px-3 py-2 text-xs text-text-muted">
+                        Role: <span className="text-white">{activeChannel.role}</span>
+                      </div>
+                    </>
+                  ) : null}
+                </>
+              ) : null}
+
+              {roomSettingsTab === 'members' ? (
+                <>
+                  {activeGroup && canManageGroupMembers ? displayedGroupMembers.map((member) => (
+                    <div key={member.memberPubKey} className="rounded-xl border border-white/10 bg-black/10 px-3 py-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm text-white truncate">{resolveParticipantName(member.memberPubKey)}</div>
+                        <div className="text-xs text-text-muted">{member.memberPubKey === myPublicKey ? activeGroup.role : member.role}</div>
+                      </div>
+                      {member.memberPubKey !== myPublicKey && member.role !== 'owner' ? (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {(activeGroup.role === 'owner' || (activeGroup.role === 'admin' && member.role === 'member')) ? (
+                            <button type="button" onClick={() => void handleRemoveMember(member.memberPubKey)} className="rounded-lg border border-red-400/30 bg-red-400/10 px-2 py-1 text-xs text-red-100">Remove</button>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  )) : null}
+                  {activeChannel && canManageChannelSubscribers ? displayedChannelSubscribers.map((subscriber) => (
+                    <div key={subscriber.subscriberPubKey} className="rounded-xl border border-white/10 bg-black/10 px-3 py-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm text-white truncate">{resolveParticipantName(subscriber.subscriberPubKey)}</div>
+                        <div className="text-xs text-text-muted">{subscriber.role}</div>
+                      </div>
+                      {subscriber.subscriberPubKey !== myPublicKey && subscriber.role !== 'owner' ? (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {(activeChannel.role === 'owner' || (activeChannel.role === 'admin' && subscriber.role !== 'admin')) ? (
+                            <button type="button" onClick={() => void handleRemoveChannelSubscriber(subscriber.subscriberPubKey)} className="rounded-lg border border-red-400/30 bg-red-400/10 px-2 py-1 text-xs text-red-100">Remove</button>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  )) : null}
+                </>
+              ) : null}
+
+              {roomSettingsTab === 'roles' ? (
+                <>
+                  {activeGroup && canManageGroupMembers ? displayedGroupMembers.map((member) => (
+                    <div key={`role:${member.memberPubKey}`} className="rounded-xl border border-white/10 bg-black/10 px-3 py-2">
+                      <div className="mb-2 text-sm text-white truncate">{resolveParticipantName(member.memberPubKey)}</div>
+                      {member.memberPubKey !== myPublicKey && member.role !== 'owner' && activeGroup.role === 'owner' ? (
+                        <div className="flex flex-wrap gap-2">
+                          {member.role === 'admin'
+                            ? <button type="button" onClick={() => void handleDemoteMember(member.memberPubKey)} className="rounded-lg border border-white/20 px-2 py-1 text-xs text-white">Demote</button>
+                            : <button type="button" onClick={() => void handlePromoteMember(member.memberPubKey)} className="rounded-lg border border-accent/30 bg-accent/10 px-2 py-1 text-xs text-white">Promote admin</button>}
+                          <button type="button" onClick={() => void handleTransferOwnership(member.memberPubKey)} className="rounded-lg border border-amber-300/30 bg-amber-300/10 px-2 py-1 text-xs text-amber-100">Transfer owner</button>
+                        </div>
+                      ) : null}
+                    </div>
+                  )) : null}
+                  {activeChannel && canManageChannelSubscribers ? displayedChannelSubscribers.map((subscriber) => (
+                    <div key={`role:${subscriber.subscriberPubKey}`} className="rounded-xl border border-white/10 bg-black/10 px-3 py-2">
+                      <div className="mb-2 text-sm text-white truncate">{resolveParticipantName(subscriber.subscriberPubKey)}</div>
+                      {subscriber.subscriberPubKey !== myPublicKey && subscriber.role !== 'owner' && activeChannel.role === 'owner' ? (
+                        <div className="flex flex-wrap gap-2">
+                          <button type="button" onClick={() => void handleUpdateChannelRole(subscriber.subscriberPubKey, 'admin', 'Subscriber promoted to admin.')} className="rounded-lg border border-violet-300/30 bg-violet-300/10 px-2 py-1 text-xs text-white">Make admin</button>
+                          <button type="button" onClick={() => void handleUpdateChannelRole(subscriber.subscriberPubKey, 'poster', 'Subscriber can now post to the channel.')} className="rounded-lg border border-cyan-300/30 bg-cyan-300/10 px-2 py-1 text-xs text-cyan-100">Make poster</button>
+                          <button type="button" onClick={() => void handleTransferChannelOwner(subscriber.subscriberPubKey)} className="rounded-lg border border-amber-300/30 bg-amber-300/10 px-2 py-1 text-xs text-amber-100">Transfer owner</button>
+                        </div>
+                      ) : null}
+                    </div>
+                  )) : null}
+                </>
+              ) : null}
+
+              {roomSettingsTab === 'invites' ? (
+                <>
+                  <div className="rounded-xl border border-white/10 bg-black/10 p-3">
+                    <div className="mb-2 text-xs font-medium uppercase tracking-[0.2em] text-text-muted">Invite settings</div>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                      <label className="text-xs text-text-muted">
+                        TTL (minutes)
+                        <input value={inviteTTLMinutes} onChange={(event) => setInviteTTLMinutes(event.target.value)} className="mt-1 w-full rounded-lg border border-white/15 bg-slate-900/70 px-2 py-1 text-sm text-white" placeholder="0 = no expiry" />
+                      </label>
+                      <label className="text-xs text-text-muted">
+                        Max uses
+                        <input value={inviteMaxUses} onChange={(event) => setInviteMaxUses(event.target.value)} className="mt-1 w-full rounded-lg border border-white/15 bg-slate-900/70 px-2 py-1 text-sm text-white" placeholder="0 = unlimited" />
+                      </label>
+                      <label className="text-xs text-text-muted">
+                        Password
+                        <input value={invitePassword} onChange={(event) => setInvitePassword(event.target.value)} className="mt-1 w-full rounded-lg border border-white/15 bg-slate-900/70 px-2 py-1 text-sm text-white" placeholder="optional" />
+                      </label>
+                    </div>
+                  </div>
+                  {activeGroup && canManageGroupMembers ? (
+                    <button type="button" onClick={() => void handleCopyGroupInviteLink()} className="w-full rounded-xl border border-accent/30 bg-accent/10 px-3 py-2 text-left text-sm text-white">Copy group invite link</button>
+                  ) : null}
+                  {activeChannel && canManageChannelSubscribers ? (
+                    <button type="button" onClick={() => void handleCopyChannelInviteLink()} className="w-full rounded-xl border border-violet-300/30 bg-violet-300/10 px-3 py-2 text-left text-sm text-white">Copy channel invite link</button>
+                  ) : null}
+                  <div className="space-y-2">
+                    {inviteLinks.map((link) => (
+                      <div key={link.token} className="rounded-xl border border-white/10 bg-black/10 px-3 py-2">
+                        <div className="text-xs text-white break-all">{link.token}</div>
+                        <div className="mt-1 text-[11px] text-text-muted">
+                          uses: {link.usesCount}{link.maxUses ? `/${link.maxUses}` : ''} • {link.expiresAt ? `expires ${new Date(link.expiresAt).toLocaleString()}` : 'no expiry'} • {link.hasPassword ? 'password' : 'no password'} • {link.revoked ? 'revoked' : 'active'}
+                        </div>
+                        <div className="mt-2 flex gap-2">
+                          <button type="button" onClick={() => navigator.clipboard.writeText(`${window.location.origin}/?invite=${encodeURIComponent(link.token)}`)} className="rounded-lg border border-white/20 px-2 py-1 text-xs text-white">Copy</button>
+                          <button type="button" disabled={inviteBusyToken === link.token || link.revoked} onClick={() => void handleRevokeInvite(link.token)} className="rounded-lg border border-red-400/30 bg-red-400/10 px-2 py-1 text-xs text-red-100 disabled:opacity-60">Revoke</button>
+                        </div>
+                      </div>
+                    ))}
+                    {inviteLinks.length === 0 ? (
+                      <div className="rounded-xl border border-white/10 bg-black/10 px-3 py-2 text-xs text-text-muted">No invite links created yet.</div>
+                    ) : null}
+                  </div>
+                </>
+              ) : null}
+
+              {roomSettingsTab === 'moderation' ? (
+                <>
+                  {moderationEntries.length ? moderationEntries.map((entry) => (
+                    <div key={entry.id} className="rounded-xl border border-white/10 bg-black/10 px-3 py-2">
+                      <div className="text-sm text-white">
+                        {resolveParticipantName(entry.actorPubKey)}: {entry.action}
+                      </div>
+                      <div className="mt-1 text-xs text-text-muted">
+                        {entry.target ? `target ${entry.target.substring(0, 10)}...` : 'no target'}
+                        {entry.details ? ` • ${entry.details}` : ''}
+                      </div>
+                    </div>
+                  )) : (
+                    <div className="rounded-xl border border-white/10 bg-black/10 px-3 py-2 text-sm text-text-muted">
+                      No moderation events yet.
+                    </div>
+                  )}
+                </>
+              ) : null}
+
+              {roomSettingsTab === 'danger' ? (
+                <>
+                  {activeGroup ? (
+                    <button type="button" onClick={() => void handleLeaveGroup()} className="w-full rounded-xl border border-red-400/30 bg-red-400/10 px-3 py-2 text-left text-sm text-red-100">
+                      {activeGroup.role === 'owner' ? 'Delete group' : 'Leave group'}
+                    </button>
+                  ) : null}
+                  {activeChannel ? (
+                    <button type="button" onClick={() => void handleLeaveChannel()} className="w-full rounded-xl border border-red-400/30 bg-red-400/10 px-3 py-2 text-left text-sm text-red-100">
+                      {activeChannel.role === 'owner' ? 'Delete channel' : 'Leave channel'}
+                    </button>
+                  ) : null}
+                </>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <div className={`
         ${activePeerKey || activeGroupId || activeChannelId ? 'flex' : 'hidden md:flex'}
@@ -1768,6 +2190,11 @@ export const Chat: React.FC = () => {
                         onDelete={handleDeleteMessage}
                         onReact={handleReaction}
                         onMentionClick={handleMentionClick}
+                        isEditing={editingMsgId === msg.msgId}
+                        editDraft={editingDraft}
+                        onEditDraftChange={setEditingDraft}
+                        onEditSave={() => void handleEditMessage(msg)}
+                        onEditCancel={() => { setEditingMsgId(null); setEditingDraft(''); }}
                       />
                     </div>
                   </React.Fragment>
@@ -1901,45 +2328,23 @@ export const Chat: React.FC = () => {
                   </div>
                 </div>
               </div>
-              <div className="inline-flex items-center gap-2 rounded-full border border-amber-300/20 bg-amber-300/10 px-3 py-1.5 text-xs font-medium text-amber-100">
-                <Crown className="h-3.5 w-3.5" />
-                {activeGroup.role}
-              </div>
-            </header>
-
-            <div className="px-4 pt-3 sm:px-6 sm:pt-4">
-              <div className="flex flex-wrap gap-2">
-                {canManageGroupMembers ? (
+              <div className="flex items-center gap-2">
+                {canViewGroupMembers ? (
                   <button
                     type="button"
-                    onClick={() => void handleCopyGroupInviteLink()}
-                    className="inline-flex items-center gap-2 rounded-xl border border-accent/25 bg-accent/10 px-3 py-2 text-xs text-white transition-all hover:border-accent/45 hover:bg-accent/20"
+                    onClick={() => navigate('/room-settings')}
+                    className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/10"
                   >
-                    <Link2 className="h-3.5 w-3.5" />
-                    Copy invite link
+                    <Pencil className="h-3.5 w-3.5" />
+                    Room settings
                   </button>
                 ) : null}
-                {activeGroup.role !== 'owner' ? (
-                  <button
-                    type="button"
-                    onClick={() => void handleLeaveGroup()}
-                    className="inline-flex items-center gap-2 rounded-xl border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-200 transition-all hover:border-red-400/35 hover:bg-red-400/15"
-                  >
-                    <UserMinus className="h-3.5 w-3.5" />
-                    Leave group
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => void handleLeaveGroup()}
-                    className="inline-flex items-center gap-2 rounded-xl border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-200 transition-all hover:border-red-400/35 hover:bg-red-400/15"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                    Delete group
-                  </button>
-                )}
+                <div className="inline-flex items-center gap-2 rounded-full border border-amber-300/20 bg-amber-300/10 px-3 py-1.5 text-xs font-medium text-amber-100">
+                  <Crown className="h-3.5 w-3.5" />
+                  {activeGroup?.role}
+                </div>
               </div>
-            </div>
+            </header>
 
             <div className="grid flex-1 overflow-hidden lg:grid-cols-[minmax(0,1fr)_320px]">
               <div className="flex min-h-0 flex-col">
@@ -2016,7 +2421,13 @@ export const Chat: React.FC = () => {
                           onEdit={handleInitEdit}
                           onDelete={handleDeleteMessage}
                           onReact={handleReaction}
+                          canModerate={activeGroup?.role === 'owner' || activeGroup?.role === 'admin'}
                           onMentionClick={handleMentionClick}
+                          isEditing={editingMsgId === msg.msgId}
+                          editDraft={editingDraft}
+                          onEditDraftChange={setEditingDraft}
+                          onEditSave={() => void handleEditMessage(msg)}
+                          onEditCancel={() => { setEditingMsgId(null); setEditingDraft(''); }}
                         />
                         </div>
                       </React.Fragment>
@@ -2109,6 +2520,7 @@ export const Chat: React.FC = () => {
                 </div>
               </div>
 
+              {canViewGroupMembers ? (
               <aside className="hidden border-l border-white/5 bg-white/[0.02] p-5 lg:flex lg:flex-col">
                 <div className="text-sm font-semibold uppercase tracking-[0.22em] text-text-muted">Members</div>
                 {canManageGroupMembers ? (
@@ -2154,12 +2566,12 @@ export const Chat: React.FC = () => {
                           </div>
                         </div>
                         <div className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[11px] text-text-muted">
-                          {member.memberPubKey === myPublicKey ? activeGroup.role : member.role}
+                          {member.memberPubKey === myPublicKey ? activeGroup?.role : member.role}
                         </div>
                       </div>
-                      {canManageGroupMembers && member.memberPubKey !== myPublicKey && member.role !== 'owner' ? (
+                      {(isRoomSettingsOpen && canManageGroupMembers) ? (
                         <div className="mt-3 flex flex-wrap gap-2">
-                          {activeGroup.role === 'owner' ? (
+                          {activeGroup?.role === 'owner' ? (
                             <>
                               {member.role === 'admin' ? (
                                 <button
@@ -2193,7 +2605,7 @@ export const Chat: React.FC = () => {
                               </button>
                             </>
                           ) : null}
-                          {(activeGroup.role === 'owner' || (activeGroup.role === 'admin' && member.role === 'member')) ? (
+                          {(activeGroup?.role === 'owner' || (activeGroup?.role === 'admin' && member.role === 'member')) ? (
                             <button
                               type="button"
                               onClick={() => void handleRemoveMember(member.memberPubKey)}
@@ -2210,6 +2622,7 @@ export const Chat: React.FC = () => {
                   ))}
                 </div>
               </aside>
+              ) : null}
             </div>
           </>
         ) : activeChannel ? (
@@ -2238,34 +2651,23 @@ export const Chat: React.FC = () => {
                   </div>
                 </div>
               </div>
-              <div className="inline-flex items-center gap-2 rounded-full border border-violet-300/20 bg-violet-300/10 px-3 py-1.5 text-xs font-medium text-violet-100">
-                <Crown className="h-3.5 w-3.5" />
-                {activeChannel.role}
-              </div>
-            </header>
-
-            <div className="px-6 pt-4">
-              <div className="flex flex-wrap gap-2">
-                {canManageChannelSubscribers ? (
+              <div className="flex items-center gap-2">
+                {canManageChannelSubscribers || canViewChannelSubscribers ? (
                   <button
                     type="button"
-                    onClick={() => void handleCopyChannelInviteLink()}
-                    className="inline-flex items-center gap-2 rounded-xl border border-violet-300/25 bg-violet-300/10 px-3 py-2 text-xs text-white transition-all hover:border-violet-300/45 hover:bg-violet-300/20"
+                    onClick={() => navigate('/room-settings')}
+                    className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/10"
                   >
-                    <Link2 className="h-3.5 w-3.5" />
-                    Copy invite link
+                    <Pencil className="h-3.5 w-3.5" />
+                    Room settings
                   </button>
                 ) : null}
-                <button
-                  type="button"
-                  onClick={() => void handleLeaveChannel()}
-                  className="inline-flex items-center gap-2 rounded-xl border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-200 transition-all hover:border-red-400/35 hover:bg-red-400/15"
-                >
-                  {activeChannel.role === 'owner' ? <Trash2 className="h-3.5 w-3.5" /> : <UserMinus className="h-3.5 w-3.5" />}
-                  {activeChannel.role === 'owner' ? 'Delete channel' : 'Leave channel'}
-                </button>
+                <div className="inline-flex items-center gap-2 rounded-full border border-violet-300/20 bg-violet-300/10 px-3 py-1.5 text-xs font-medium text-violet-100">
+                  <Crown className="h-3.5 w-3.5" />
+                  {activeChannel?.role}
+                </div>
               </div>
-            </div>
+            </header>
 
             <div className="grid flex-1 overflow-hidden lg:grid-cols-[minmax(0,1fr)_340px]">
               <div className="flex min-h-0 flex-col">
@@ -2324,10 +2726,16 @@ export const Chat: React.FC = () => {
                             onEdit={handleInitEdit}
                             onDelete={handleDeleteMessage}
                             onReact={handleReaction}
+                            canModerate={activeChannel?.role === 'owner' || activeChannel?.role === 'admin'}
                             canPin={canPinChannelPosts}
                             isPinned={activeChannel?.pinnedMsgId === msg.msgId}
                             onPin={handleToggleChannelPin}
                             onMentionClick={handleMentionClick}
+                            isEditing={editingMsgId === msg.msgId}
+                            editDraft={editingDraft}
+                            onEditDraftChange={setEditingDraft}
+                            onEditSave={() => void handleEditMessage(msg)}
+                            onEditCancel={() => { setEditingMsgId(null); setEditingDraft(''); }}
                           />
                         </div>
                       </React.Fragment>
@@ -2430,6 +2838,7 @@ export const Chat: React.FC = () => {
                 </div>
               </div>
 
+              {canViewChannelSubscribers ? (
               <aside className="hidden border-l border-white/5 bg-white/[0.02] p-5 lg:flex lg:flex-col">
                 <div className="text-sm font-semibold uppercase tracking-[0.22em] text-text-muted">Subscribers</div>
                 {canManageChannelSubscribers ? (
@@ -2482,9 +2891,9 @@ export const Chat: React.FC = () => {
                         </div>
                       </div>
 
-                      {canManageChannelSubscribers && subscriber.subscriberPubKey !== myPublicKey && subscriber.role !== 'owner' ? (
+                      {(isRoomSettingsOpen && canManageChannelSubscribers) ? (
                         <div className="mt-3 flex flex-wrap gap-2">
-                          {activeChannel.role === 'owner' ? (
+                          {activeChannel?.role === 'owner' ? (
                             <>
                               {subscriber.role === 'admin' ? (
                                 <button
@@ -2541,7 +2950,7 @@ export const Chat: React.FC = () => {
                             </>
                           ) : null}
 
-                          {(activeChannel.role === 'owner' || (activeChannel.role === 'admin' && subscriber.role !== 'admin')) ? (
+                          {(activeChannel?.role === 'owner' || (activeChannel?.role === 'admin' && subscriber.role !== 'admin')) ? (
                             <button
                               type="button"
                               onClick={() => void handleRemoveChannelSubscriber(subscriber.subscriberPubKey)}
@@ -2620,6 +3029,7 @@ export const Chat: React.FC = () => {
                   </div>
                 </div>
               </aside>
+              ) : null}
             </div>
           </>
         ) : (

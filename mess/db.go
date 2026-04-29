@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -49,6 +52,39 @@ type ChannelSubscriberRecord struct {
 	Role             string    `json:"role"`
 	JoinedAt         time.Time `json:"joinedAt"`
 }
+
+type ModerationAuditRecord struct {
+	ID          int64     `json:"id"`
+	EntityType  string    `json:"entityType"`
+	EntityID    string    `json:"entityId"`
+	ActorPubKey string    `json:"actorPubKey"`
+	Action      string    `json:"action"`
+	Target      string    `json:"target"`
+	Details     string    `json:"details"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+type InviteLinkRecord struct {
+	Token           string     `json:"token"`
+	EntityType      string     `json:"entityType"`
+	EntityID        string     `json:"entityId"`
+	CreatedByPubKey string     `json:"createdByPubKey"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	ExpiresAt       *time.Time `json:"expiresAt,omitempty"`
+	MaxUses         *int       `json:"maxUses,omitempty"`
+	UsesCount       int        `json:"usesCount"`
+	HasPassword     bool       `json:"hasPassword"`
+	Revoked         bool       `json:"revoked"`
+}
+
+var (
+	ErrInviteNotFound         = sql.ErrNoRows
+	ErrInviteRevoked          = errors.New("invite revoked")
+	ErrInviteExpired          = errors.New("invite expired")
+	ErrInviteUsageLimit       = errors.New("invite usage limit reached")
+	ErrInvitePasswordRequired = errors.New("invite password required")
+	ErrInvitePasswordInvalid  = errors.New("invite password invalid")
+)
 
 func InitDB(ctx context.Context, dataSourceName string) *DB {
 	db, err := sql.Open("sqlite", dataSourceName)
@@ -158,6 +194,17 @@ func InitDB(ctx context.Context, dataSourceName string) *DB {
 			FOREIGN KEY (created_by_pub_key) REFERENCES users(pub_key) ON DELETE CASCADE
 		);
 
+		CREATE TABLE IF NOT EXISTS moderation_audit (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			entity_type TEXT NOT NULL,
+			entity_id TEXT NOT NULL,
+			actor_pub_key TEXT NOT NULL,
+			action TEXT NOT NULL,
+			target TEXT NOT NULL DEFAULT '',
+			details TEXT NOT NULL DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
 		-- Performance Indexes
 		CREATE INDEX IF NOT EXISTS idx_offline_recipient ON offline_messages(recipient_pub_key);
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_offline_recipient_msg_id ON offline_messages(recipient_pub_key, msg_id) WHERE msg_id IS NOT NULL;
@@ -167,6 +214,7 @@ func InitDB(ctx context.Context, dataSourceName string) *DB {
 		CREATE INDEX IF NOT EXISTS idx_channel_subscribers_member ON channel_subscribers(subscriber_pub_key);
 		CREATE INDEX IF NOT EXISTS idx_group_invite_links_group ON group_invite_links(group_id);
 		CREATE INDEX IF NOT EXISTS idx_channel_invite_links_channel ON channel_invite_links(channel_id);
+		CREATE INDEX IF NOT EXISTS idx_moderation_audit_entity ON moderation_audit(entity_type, entity_id, created_at DESC);
 	`)
 	if err != nil {
 		log.Fatalf("Failed to initialize database schema: %v", err)
@@ -197,6 +245,36 @@ func InitDB(ctx context.Context, dataSourceName string) *DB {
 	}
 	if _, err := db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username) WHERE username IS NOT NULL`); err != nil {
 		log.Fatalf("Failed to create index for users.username: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE group_invite_links ADD COLUMN expires_at DATETIME`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		log.Fatalf("Failed to migrate group_invite_links.expires_at schema: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE group_invite_links ADD COLUMN max_uses INTEGER`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		log.Fatalf("Failed to migrate group_invite_links.max_uses schema: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE group_invite_links ADD COLUMN uses_count INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		log.Fatalf("Failed to migrate group_invite_links.uses_count schema: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE group_invite_links ADD COLUMN password_hash TEXT`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		log.Fatalf("Failed to migrate group_invite_links.password_hash schema: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE group_invite_links ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		log.Fatalf("Failed to migrate group_invite_links.revoked schema: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE channel_invite_links ADD COLUMN expires_at DATETIME`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		log.Fatalf("Failed to migrate channel_invite_links.expires_at schema: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE channel_invite_links ADD COLUMN max_uses INTEGER`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		log.Fatalf("Failed to migrate channel_invite_links.max_uses schema: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE channel_invite_links ADD COLUMN uses_count INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		log.Fatalf("Failed to migrate channel_invite_links.uses_count schema: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE channel_invite_links ADD COLUMN password_hash TEXT`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		log.Fatalf("Failed to migrate channel_invite_links.password_hash schema: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE channel_invite_links ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		log.Fatalf("Failed to migrate channel_invite_links.revoked schema: %v", err)
 	}
 
 	return &DB{db: db}
@@ -476,6 +554,15 @@ func (db *DB) UpdateGroupMemberRole(ctx context.Context, groupID, memberPubKey, 
 	return err
 }
 
+func (db *DB) UpdateGroupMeta(ctx context.Context, groupID, title, avatar string) error {
+	_, err := db.db.ExecContext(ctx, `
+		UPDATE groups_meta
+		SET title = ?, avatar = ?
+		WHERE id = ?
+	`, strings.TrimSpace(title), strings.TrimSpace(avatar), groupID)
+	return err
+}
+
 func (db *DB) RemoveGroupMember(ctx context.Context, groupID, memberPubKey string) error {
 	_, err := db.db.ExecContext(ctx, `
 		DELETE FROM group_members
@@ -647,6 +734,15 @@ func (db *DB) UpdateChannelSubscriberRole(ctx context.Context, channelID, subscr
 	return err
 }
 
+func (db *DB) UpdateChannelMeta(ctx context.Context, channelID, title, avatar string) error {
+	_, err := db.db.ExecContext(ctx, `
+		UPDATE channels
+		SET title = ?, avatar = ?
+		WHERE id = ?
+	`, strings.TrimSpace(title), strings.TrimSpace(avatar), channelID)
+	return err
+}
+
 func (db *DB) RemoveChannelSubscriber(ctx context.Context, channelID, subscriberPubKey string) error {
 	_, err := db.db.ExecContext(ctx, `
 		DELETE FROM channel_subscribers
@@ -697,39 +793,60 @@ func (db *DB) DeleteChannel(ctx context.Context, channelID, ownerPubKey string) 
 	return err
 }
 
-func (db *DB) CreateGroupInviteLink(ctx context.Context, groupID, createdByPubKey string) (string, error) {
+func hashInvitePassword(password string) string {
+	sum := sha256.Sum256([]byte(password))
+	return hex.EncodeToString(sum[:])
+}
+
+func (db *DB) CreateGroupInviteLink(ctx context.Context, groupID, createdByPubKey string, expiresAt *time.Time, maxUses *int, password string) (string, error) {
 	token, err := newEntityID("glnk")
 	if err != nil {
 		return "", err
 	}
+	var maxUsesValue any
+	if maxUses != nil && *maxUses > 0 {
+		maxUsesValue = *maxUses
+	}
+	var passwordHash any
+	if strings.TrimSpace(password) != "" {
+		passwordHash = hashInvitePassword(strings.TrimSpace(password))
+	}
 
 	_, err = db.db.ExecContext(ctx, `
-		INSERT INTO group_invite_links (token, group_id, created_by_pub_key)
-		VALUES (?, ?, ?)
-	`, token, groupID, createdByPubKey)
+		INSERT INTO group_invite_links (token, group_id, created_by_pub_key, expires_at, max_uses, uses_count, password_hash, revoked)
+		VALUES (?, ?, ?, ?, ?, 0, ?, 0)
+	`, token, groupID, createdByPubKey, expiresAt, maxUsesValue, passwordHash)
 	if err != nil {
 		return "", err
 	}
 	return token, nil
 }
 
-func (db *DB) CreateChannelInviteLink(ctx context.Context, channelID, createdByPubKey string) (string, error) {
+func (db *DB) CreateChannelInviteLink(ctx context.Context, channelID, createdByPubKey string, expiresAt *time.Time, maxUses *int, password string) (string, error) {
 	token, err := newEntityID("clnk")
 	if err != nil {
 		return "", err
 	}
+	var maxUsesValue any
+	if maxUses != nil && *maxUses > 0 {
+		maxUsesValue = *maxUses
+	}
+	var passwordHash any
+	if strings.TrimSpace(password) != "" {
+		passwordHash = hashInvitePassword(strings.TrimSpace(password))
+	}
 
 	_, err = db.db.ExecContext(ctx, `
-		INSERT INTO channel_invite_links (token, channel_id, created_by_pub_key)
-		VALUES (?, ?, ?)
-	`, token, channelID, createdByPubKey)
+		INSERT INTO channel_invite_links (token, channel_id, created_by_pub_key, expires_at, max_uses, uses_count, password_hash, revoked)
+		VALUES (?, ?, ?, ?, ?, 0, ?, 0)
+	`, token, channelID, createdByPubKey, expiresAt, maxUsesValue, passwordHash)
 	if err != nil {
 		return "", err
 	}
 	return token, nil
 }
 
-func (db *DB) JoinGroupByInviteToken(ctx context.Context, token, memberPubKey string) (string, error) {
+func (db *DB) JoinGroupByInviteToken(ctx context.Context, token, memberPubKey, password string) (string, error) {
 	tx, err := db.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
@@ -737,12 +854,35 @@ func (db *DB) JoinGroupByInviteToken(ctx context.Context, token, memberPubKey st
 	defer tx.Rollback()
 
 	var groupID string
+	var expiresAt sql.NullTime
+	var maxUses sql.NullInt64
+	var usesCount int
+	var passwordHash sql.NullString
+	var revoked int
 	if err := tx.QueryRowContext(ctx, `
-		SELECT group_id
+		SELECT group_id, expires_at, max_uses, uses_count, password_hash, revoked
 		FROM group_invite_links
 		WHERE token = ?
-	`, strings.TrimSpace(token)).Scan(&groupID); err != nil {
+	`, strings.TrimSpace(token)).Scan(&groupID, &expiresAt, &maxUses, &usesCount, &passwordHash, &revoked); err != nil {
 		return "", err
+	}
+	if revoked != 0 {
+		return "", ErrInviteRevoked
+	}
+	if expiresAt.Valid && time.Now().After(expiresAt.Time) {
+		return "", ErrInviteExpired
+	}
+	if maxUses.Valid && usesCount >= int(maxUses.Int64) {
+		return "", ErrInviteUsageLimit
+	}
+	if passwordHash.Valid {
+		normalized := strings.TrimSpace(password)
+		if normalized == "" {
+			return "", ErrInvitePasswordRequired
+		}
+		if hashInvitePassword(normalized) != passwordHash.String {
+			return "", ErrInvitePasswordInvalid
+		}
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -759,6 +899,13 @@ func (db *DB) JoinGroupByInviteToken(ctx context.Context, token, memberPubKey st
 	`, groupID, memberPubKey); err != nil {
 		return "", err
 	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE group_invite_links
+		SET uses_count = uses_count + 1
+		WHERE token = ?
+	`, strings.TrimSpace(token)); err != nil {
+		return "", err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return "", err
@@ -766,7 +913,7 @@ func (db *DB) JoinGroupByInviteToken(ctx context.Context, token, memberPubKey st
 	return groupID, nil
 }
 
-func (db *DB) JoinChannelByInviteToken(ctx context.Context, token, subscriberPubKey string) (string, error) {
+func (db *DB) JoinChannelByInviteToken(ctx context.Context, token, subscriberPubKey, password string) (string, error) {
 	tx, err := db.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
@@ -774,12 +921,35 @@ func (db *DB) JoinChannelByInviteToken(ctx context.Context, token, subscriberPub
 	defer tx.Rollback()
 
 	var channelID string
+	var expiresAt sql.NullTime
+	var maxUses sql.NullInt64
+	var usesCount int
+	var passwordHash sql.NullString
+	var revoked int
 	if err := tx.QueryRowContext(ctx, `
-		SELECT channel_id
+		SELECT channel_id, expires_at, max_uses, uses_count, password_hash, revoked
 		FROM channel_invite_links
 		WHERE token = ?
-	`, strings.TrimSpace(token)).Scan(&channelID); err != nil {
+	`, strings.TrimSpace(token)).Scan(&channelID, &expiresAt, &maxUses, &usesCount, &passwordHash, &revoked); err != nil {
 		return "", err
+	}
+	if revoked != 0 {
+		return "", ErrInviteRevoked
+	}
+	if expiresAt.Valid && time.Now().After(expiresAt.Time) {
+		return "", ErrInviteExpired
+	}
+	if maxUses.Valid && usesCount >= int(maxUses.Int64) {
+		return "", ErrInviteUsageLimit
+	}
+	if passwordHash.Valid {
+		normalized := strings.TrimSpace(password)
+		if normalized == "" {
+			return "", ErrInvitePasswordRequired
+		}
+		if hashInvitePassword(normalized) != passwordHash.String {
+			return "", ErrInvitePasswordInvalid
+		}
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -796,11 +966,104 @@ func (db *DB) JoinChannelByInviteToken(ctx context.Context, token, subscriberPub
 	`, channelID, subscriberPubKey); err != nil {
 		return "", err
 	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE channel_invite_links
+		SET uses_count = uses_count + 1
+		WHERE token = ?
+	`, strings.TrimSpace(token)); err != nil {
+		return "", err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
 	return channelID, nil
+}
+
+func (db *DB) RevokeGroupInviteLink(ctx context.Context, groupID, token string) error {
+	_, err := db.db.ExecContext(ctx, `UPDATE group_invite_links SET revoked = 1 WHERE group_id = ? AND token = ?`, groupID, strings.TrimSpace(token))
+	return err
+}
+
+func (db *DB) RevokeChannelInviteLink(ctx context.Context, channelID, token string) error {
+	_, err := db.db.ExecContext(ctx, `UPDATE channel_invite_links SET revoked = 1 WHERE channel_id = ? AND token = ?`, channelID, strings.TrimSpace(token))
+	return err
+}
+
+func (db *DB) ListGroupInviteLinks(ctx context.Context, groupID string) ([]InviteLinkRecord, error) {
+	rows, err := db.db.QueryContext(ctx, `
+		SELECT token, group_id, created_by_pub_key, created_at, expires_at, max_uses, uses_count, password_hash, revoked
+		FROM group_invite_links
+		WHERE group_id = ?
+		ORDER BY created_at DESC
+	`, groupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	records := make([]InviteLinkRecord, 0)
+	for rows.Next() {
+		var rec InviteLinkRecord
+		rec.EntityType = "group"
+		var expiresAt sql.NullTime
+		var maxUses sql.NullInt64
+		var passwordHash sql.NullString
+		var revoked int
+		if err := rows.Scan(&rec.Token, &rec.EntityID, &rec.CreatedByPubKey, &rec.CreatedAt, &expiresAt, &maxUses, &rec.UsesCount, &passwordHash, &revoked); err != nil {
+			return nil, err
+		}
+		if expiresAt.Valid {
+			t := expiresAt.Time
+			rec.ExpiresAt = &t
+		}
+		if maxUses.Valid {
+			v := int(maxUses.Int64)
+			rec.MaxUses = &v
+		}
+		rec.HasPassword = passwordHash.Valid && passwordHash.String != ""
+		rec.Revoked = revoked != 0
+		records = append(records, rec)
+	}
+	return records, rows.Err()
+}
+
+func (db *DB) ListChannelInviteLinks(ctx context.Context, channelID string) ([]InviteLinkRecord, error) {
+	rows, err := db.db.QueryContext(ctx, `
+		SELECT token, channel_id, created_by_pub_key, created_at, expires_at, max_uses, uses_count, password_hash, revoked
+		FROM channel_invite_links
+		WHERE channel_id = ?
+		ORDER BY created_at DESC
+	`, channelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	records := make([]InviteLinkRecord, 0)
+	for rows.Next() {
+		var rec InviteLinkRecord
+		rec.EntityType = "channel"
+		var expiresAt sql.NullTime
+		var maxUses sql.NullInt64
+		var passwordHash sql.NullString
+		var revoked int
+		if err := rows.Scan(&rec.Token, &rec.EntityID, &rec.CreatedByPubKey, &rec.CreatedAt, &expiresAt, &maxUses, &rec.UsesCount, &passwordHash, &revoked); err != nil {
+			return nil, err
+		}
+		if expiresAt.Valid {
+			t := expiresAt.Time
+			rec.ExpiresAt = &t
+		}
+		if maxUses.Valid {
+			v := int(maxUses.Int64)
+			rec.MaxUses = &v
+		}
+		rec.HasPassword = passwordHash.Valid && passwordHash.String != ""
+		rec.Revoked = revoked != 0
+		records = append(records, rec)
+	}
+	return records, rows.Err()
 }
 
 // SaveOfflineMessage сохраняет сообщение для оффлайн пользователя
@@ -962,4 +1225,39 @@ func (db *DB) GetSignedPreKey(ctx context.Context, pubKey string) (string, strin
 		return "", "", err
 	}
 	return spk.String, sig.String, nil
+}
+
+func (db *DB) InsertModerationAudit(ctx context.Context, entityType, entityID, actorPubKey, action, target, details string) error {
+	_, err := db.db.ExecContext(ctx, `
+		INSERT INTO moderation_audit (entity_type, entity_id, actor_pub_key, action, target, details)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, strings.TrimSpace(entityType), strings.TrimSpace(entityID), strings.TrimSpace(actorPubKey), strings.TrimSpace(action), strings.TrimSpace(target), strings.TrimSpace(details))
+	return err
+}
+
+func (db *DB) ListModerationAudit(ctx context.Context, entityType, entityID string, limit int) ([]ModerationAuditRecord, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := db.db.QueryContext(ctx, `
+		SELECT id, entity_type, entity_id, actor_pub_key, action, target, details, created_at
+		FROM moderation_audit
+		WHERE entity_type = ? AND entity_id = ?
+		ORDER BY created_at DESC
+		LIMIT ?
+	`, strings.TrimSpace(entityType), strings.TrimSpace(entityID), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]ModerationAuditRecord, 0, limit)
+	for rows.Next() {
+		var rec ModerationAuditRecord
+		if err := rows.Scan(&rec.ID, &rec.EntityType, &rec.EntityID, &rec.ActorPubKey, &rec.Action, &rec.Target, &rec.Details, &rec.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
 }

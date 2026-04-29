@@ -131,6 +131,52 @@ func main() {
 		})
 	})
 	mux.HandleFunc("/version", versionHandler)
+	mux.HandleFunc("/sessions", rateLimit(func(w http.ResponseWriter, r *http.Request) {
+		pubKey, ok := authorizeSession(hub, w, r)
+		if !ok {
+			return
+		}
+		currentToken := extractSessionToken(r)
+		switch r.Method {
+		case http.MethodGet:
+			sessions := hub.ListSessions(pubKey)
+			logEvent("sessions_listed", map[string]any{
+				"pub_key": pubKey,
+				"count":   len(sessions),
+				"remote":  r.RemoteAddr,
+			})
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"sessions":     sessions,
+				"currentToken": currentToken,
+			})
+		case http.MethodDelete:
+			token := strings.TrimSpace(r.URL.Query().Get("token"))
+			if token == "all" || token == "" {
+				revoked := hub.RevokeAllSessionTokensForUser(pubKey, currentToken)
+				logEvent("sessions_revoked_all", map[string]any{
+					"pub_key":  pubKey,
+					"revoked":  revoked,
+					"remote":   r.RemoteAddr,
+					"has_self": currentToken != "",
+				})
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"revoked": revoked})
+				return
+			}
+			if !hub.RevokeSessionTokenForUser(pubKey, token) {
+				http.Error(w, "Session not found", http.StatusNotFound)
+				return
+			}
+			logEvent("session_revoked", map[string]any{
+				"pub_key": pubKey,
+				"remote":  r.RemoteAddr,
+			})
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
 	mux.HandleFunc("/profile", rateLimit(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
@@ -206,7 +252,7 @@ func main() {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	}))
-	mux.HandleFunc("/resolve", rateLimit(func(w http.ResponseWriter, r *http.Request) {
+	resolveUsernameHandler := rateLimit(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -238,7 +284,9 @@ func main() {
 			"nickname": nickname,
 			"avatar":   avatar,
 		})
-	}))
+	})
+	mux.HandleFunc("/resolve", resolveUsernameHandler)
+	mux.HandleFunc("/profile/resolve", resolveUsernameHandler)
 	mux.HandleFunc("/groups", rateLimit(func(w http.ResponseWriter, r *http.Request) {
 		pubKey, ok := authorizeSession(hub, w, r)
 		if !ok {
@@ -366,6 +414,7 @@ func main() {
 					http.Error(w, "Failed to transfer ownership", http.StatusInternalServerError)
 					return
 				}
+				logModerationAuditAsync(db, "group", groupID, pubKey, "ownership_transferred", payload.NewOwnerPubKey, "")
 				w.WriteHeader(http.StatusNoContent)
 			case http.MethodDelete:
 				if role == "owner" {
@@ -386,6 +435,56 @@ func main() {
 			return
 		}
 
+		if tail == "settings" {
+			if r.Method != http.MethodPatch {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if role != "owner" && role != "admin" {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			var payload struct {
+				Title  string `json:"title"`
+				Avatar string `json:"avatar"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
+				http.Error(w, "Bad request", http.StatusBadRequest)
+				return
+			}
+			payload.Title = strings.TrimSpace(payload.Title)
+			if payload.Title == "" {
+				http.Error(w, "Missing title", http.StatusBadRequest)
+				return
+			}
+			if err := db.UpdateGroupMeta(ctx, groupID, payload.Title, payload.Avatar); err != nil {
+				http.Error(w, "Failed to update group settings", http.StatusInternalServerError)
+				return
+			}
+			logModerationAuditAsync(db, "group", groupID, pubKey, "group_settings_updated", "", payload.Title)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		if tail == "audit" {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if role != "owner" && role != "admin" {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			entries, err := db.ListModerationAudit(ctx, "group", groupID, 200)
+			if err != nil {
+				http.Error(w, "Failed to load audit log", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"entries": entries})
+			return
+		}
+
 		if tail != "members" {
 			http.NotFound(w, r)
 			return
@@ -393,6 +492,10 @@ func main() {
 
 		switch r.Method {
 		case http.MethodGet:
+			if role != "owner" && role != "admin" {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
 			members, err := db.ListGroupMembers(ctx, groupID)
 			if err != nil {
 				http.Error(w, "Failed to load members", http.StatusInternalServerError)
@@ -473,6 +576,7 @@ func main() {
 				http.Error(w, "Failed to update member role", http.StatusInternalServerError)
 				return
 			}
+			logModerationAuditAsync(db, "group", groupID, pubKey, "member_role_changed", payload.PubKey, payload.Role)
 			w.WriteHeader(http.StatusNoContent)
 		case http.MethodDelete:
 			targetPubKey := strings.TrimSpace(r.URL.Query().Get("pubKey"))
@@ -505,6 +609,7 @@ func main() {
 				http.Error(w, "Failed to remove member", http.StatusInternalServerError)
 				return
 			}
+			logModerationAuditAsync(db, "group", groupID, pubKey, "member_removed", targetPubKey, "")
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -628,6 +733,7 @@ func main() {
 					http.Error(w, "Failed to transfer ownership", http.StatusInternalServerError)
 					return
 				}
+				logModerationAuditAsync(db, "channel", channelID, pubKey, "ownership_transferred", payload.NewOwnerPubKey, "")
 				w.WriteHeader(http.StatusNoContent)
 			case http.MethodDelete:
 				if role == "owner" {
@@ -648,6 +754,56 @@ func main() {
 			return
 		}
 
+		if tail == "settings" {
+			if r.Method != http.MethodPatch {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if role != "owner" && role != "admin" {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			var payload struct {
+				Title  string `json:"title"`
+				Avatar string `json:"avatar"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
+				http.Error(w, "Bad request", http.StatusBadRequest)
+				return
+			}
+			payload.Title = strings.TrimSpace(payload.Title)
+			if payload.Title == "" {
+				http.Error(w, "Missing title", http.StatusBadRequest)
+				return
+			}
+			if err := db.UpdateChannelMeta(ctx, channelID, payload.Title, payload.Avatar); err != nil {
+				http.Error(w, "Failed to update channel settings", http.StatusInternalServerError)
+				return
+			}
+			logModerationAuditAsync(db, "channel", channelID, pubKey, "channel_settings_updated", "", payload.Title)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		if tail == "audit" {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if role != "owner" && role != "admin" {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			entries, err := db.ListModerationAudit(ctx, "channel", channelID, 200)
+			if err != nil {
+				http.Error(w, "Failed to load audit log", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"entries": entries})
+			return
+		}
+
 		if tail != "subscribers" {
 			http.NotFound(w, r)
 			return
@@ -655,6 +811,10 @@ func main() {
 
 		switch r.Method {
 		case http.MethodGet:
+			if role != "owner" && role != "admin" {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
 			subscribers, err := db.ListChannelSubscribers(ctx, channelID)
 			if err != nil {
 				http.Error(w, "Failed to load subscribers", http.StatusInternalServerError)
@@ -732,6 +892,7 @@ func main() {
 				http.Error(w, "Failed to update subscriber role", http.StatusInternalServerError)
 				return
 			}
+			logModerationAuditAsync(db, "channel", channelID, pubKey, "subscriber_role_changed", payload.PubKey, payload.Role)
 			w.WriteHeader(http.StatusNoContent)
 		case http.MethodDelete:
 			targetPubKey := strings.TrimSpace(r.URL.Query().Get("pubKey"))
@@ -764,6 +925,7 @@ func main() {
 				http.Error(w, "Failed to remove subscriber", http.StatusInternalServerError)
 				return
 			}
+			logModerationAuditAsync(db, "channel", channelID, pubKey, "subscriber_removed", targetPubKey, "")
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -774,96 +936,224 @@ func main() {
 		if !ok {
 			return
 		}
-		if r.Method != http.MethodPost {
+		switch r.Method {
+		case http.MethodPost:
+			var payload struct {
+				GroupID    string `json:"groupId"`
+				TTLMinutes int    `json:"ttlMinutes"`
+				MaxUses    int    `json:"maxUses"`
+				Password   string `json:"password"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
+				http.Error(w, "Bad request", http.StatusBadRequest)
+				return
+			}
+			payload.GroupID = strings.TrimSpace(payload.GroupID)
+			if payload.GroupID == "" {
+				http.Error(w, "Missing groupId", http.StatusBadRequest)
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			defer cancel()
+			role, err := db.GetGroupMemberRole(ctx, payload.GroupID, pubKey)
+			if err == sql.ErrNoRows {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			if err != nil {
+				http.Error(w, "Internal error", http.StatusInternalServerError)
+				return
+			}
+			if role != "owner" && role != "admin" {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			var expiresAt *time.Time
+			if payload.TTLMinutes > 0 {
+				t := time.Now().Add(time.Duration(payload.TTLMinutes) * time.Minute)
+				expiresAt = &t
+			}
+			var maxUses *int
+			if payload.MaxUses > 0 {
+				maxUses = &payload.MaxUses
+			}
+			token, err := db.CreateGroupInviteLink(ctx, payload.GroupID, pubKey, expiresAt, maxUses, payload.Password)
+			if err != nil {
+				http.Error(w, "Failed to create invite link", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"token": token})
+		case http.MethodGet:
+			groupID := strings.TrimSpace(r.URL.Query().Get("groupId"))
+			if groupID == "" {
+				http.Error(w, "Missing groupId", http.StatusBadRequest)
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			defer cancel()
+			role, err := db.GetGroupMemberRole(ctx, groupID, pubKey)
+			if err == sql.ErrNoRows || role == "" {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			if err != nil {
+				http.Error(w, "Internal error", http.StatusInternalServerError)
+				return
+			}
+			if role != "owner" && role != "admin" {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			links, err := db.ListGroupInviteLinks(ctx, groupID)
+			if err != nil {
+				http.Error(w, "Failed to list invite links", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"links": links})
+		case http.MethodDelete:
+			groupID := strings.TrimSpace(r.URL.Query().Get("groupId"))
+			token := strings.TrimSpace(r.URL.Query().Get("token"))
+			if groupID == "" || token == "" {
+				http.Error(w, "Missing groupId or token", http.StatusBadRequest)
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			defer cancel()
+			role, err := db.GetGroupMemberRole(ctx, groupID, pubKey)
+			if err == sql.ErrNoRows || role == "" {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			if err != nil {
+				http.Error(w, "Internal error", http.StatusInternalServerError)
+				return
+			}
+			if role != "owner" && role != "admin" {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			if err := db.RevokeGroupInviteLink(ctx, groupID, token); err != nil {
+				http.Error(w, "Failed to revoke invite link", http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
 		}
-
-		var payload struct {
-			GroupID string `json:"groupId"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
-			http.Error(w, "Bad request", http.StatusBadRequest)
-			return
-		}
-		payload.GroupID = strings.TrimSpace(payload.GroupID)
-		if payload.GroupID == "" {
-			http.Error(w, "Missing groupId", http.StatusBadRequest)
-			return
-		}
-
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		defer cancel()
-		role, err := db.GetGroupMemberRole(ctx, payload.GroupID, pubKey)
-		if err == sql.ErrNoRows {
-			http.Error(w, "Forbidden", http.StatusForbidden)
-			return
-		}
-		if err != nil {
-			http.Error(w, "Internal error", http.StatusInternalServerError)
-			return
-		}
-		if role != "owner" && role != "admin" {
-			http.Error(w, "Forbidden", http.StatusForbidden)
-			return
-		}
-
-		token, err := db.CreateGroupInviteLink(ctx, payload.GroupID, pubKey)
-		if err != nil {
-			http.Error(w, "Failed to create invite link", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"token": token})
 	}))
 	mux.HandleFunc("/channel-invite-links", rateLimit(func(w http.ResponseWriter, r *http.Request) {
 		pubKey, ok := authorizeSession(hub, w, r)
 		if !ok {
 			return
 		}
-		if r.Method != http.MethodPost {
+		switch r.Method {
+		case http.MethodPost:
+			var payload struct {
+				ChannelID  string `json:"channelId"`
+				TTLMinutes int    `json:"ttlMinutes"`
+				MaxUses    int    `json:"maxUses"`
+				Password   string `json:"password"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
+				http.Error(w, "Bad request", http.StatusBadRequest)
+				return
+			}
+			payload.ChannelID = strings.TrimSpace(payload.ChannelID)
+			if payload.ChannelID == "" {
+				http.Error(w, "Missing channelId", http.StatusBadRequest)
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			defer cancel()
+			role, err := db.GetChannelSubscriberRole(ctx, payload.ChannelID, pubKey)
+			if err == sql.ErrNoRows {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			if err != nil {
+				http.Error(w, "Internal error", http.StatusInternalServerError)
+				return
+			}
+			if role != "owner" && role != "admin" {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			var expiresAt *time.Time
+			if payload.TTLMinutes > 0 {
+				t := time.Now().Add(time.Duration(payload.TTLMinutes) * time.Minute)
+				expiresAt = &t
+			}
+			var maxUses *int
+			if payload.MaxUses > 0 {
+				maxUses = &payload.MaxUses
+			}
+			token, err := db.CreateChannelInviteLink(ctx, payload.ChannelID, pubKey, expiresAt, maxUses, payload.Password)
+			if err != nil {
+				http.Error(w, "Failed to create invite link", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"token": token})
+		case http.MethodGet:
+			channelID := strings.TrimSpace(r.URL.Query().Get("channelId"))
+			if channelID == "" {
+				http.Error(w, "Missing channelId", http.StatusBadRequest)
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			defer cancel()
+			role, err := db.GetChannelSubscriberRole(ctx, channelID, pubKey)
+			if err == sql.ErrNoRows || role == "" {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			if err != nil {
+				http.Error(w, "Internal error", http.StatusInternalServerError)
+				return
+			}
+			if role != "owner" && role != "admin" {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			links, err := db.ListChannelInviteLinks(ctx, channelID)
+			if err != nil {
+				http.Error(w, "Failed to list invite links", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"links": links})
+		case http.MethodDelete:
+			channelID := strings.TrimSpace(r.URL.Query().Get("channelId"))
+			token := strings.TrimSpace(r.URL.Query().Get("token"))
+			if channelID == "" || token == "" {
+				http.Error(w, "Missing channelId or token", http.StatusBadRequest)
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			defer cancel()
+			role, err := db.GetChannelSubscriberRole(ctx, channelID, pubKey)
+			if err == sql.ErrNoRows || role == "" {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			if err != nil {
+				http.Error(w, "Internal error", http.StatusInternalServerError)
+				return
+			}
+			if role != "owner" && role != "admin" {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			if err := db.RevokeChannelInviteLink(ctx, channelID, token); err != nil {
+				http.Error(w, "Failed to revoke invite link", http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
 		}
-
-		var payload struct {
-			ChannelID string `json:"channelId"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
-			http.Error(w, "Bad request", http.StatusBadRequest)
-			return
-		}
-		payload.ChannelID = strings.TrimSpace(payload.ChannelID)
-		if payload.ChannelID == "" {
-			http.Error(w, "Missing channelId", http.StatusBadRequest)
-			return
-		}
-
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		defer cancel()
-		role, err := db.GetChannelSubscriberRole(ctx, payload.ChannelID, pubKey)
-		if err == sql.ErrNoRows {
-			http.Error(w, "Forbidden", http.StatusForbidden)
-			return
-		}
-		if err != nil {
-			http.Error(w, "Internal error", http.StatusInternalServerError)
-			return
-		}
-		if role != "owner" && role != "admin" {
-			http.Error(w, "Forbidden", http.StatusForbidden)
-			return
-		}
-
-		token, err := db.CreateChannelInviteLink(ctx, payload.ChannelID, pubKey)
-		if err != nil {
-			http.Error(w, "Failed to create invite link", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"token": token})
 	}))
 	mux.HandleFunc("/invite-links/join", rateLimit(func(w http.ResponseWriter, r *http.Request) {
 		pubKey, ok := authorizeSession(hub, w, r)
@@ -876,7 +1166,8 @@ func main() {
 		}
 
 		var payload struct {
-			Token string `json:"token"`
+			Token    string `json:"token"`
+			Password string `json:"password"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
 			http.Error(w, "Bad request", http.StatusBadRequest)
@@ -895,7 +1186,7 @@ func main() {
 			return
 		}
 
-		if groupID, err := db.JoinGroupByInviteToken(ctx, payload.Token, pubKey); err == nil {
+		if groupID, err := db.JoinGroupByInviteToken(ctx, payload.Token, pubKey, payload.Password); err == nil {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]string{
 				"entityType": "group",
@@ -903,17 +1194,43 @@ func main() {
 			})
 			return
 		} else if err != sql.ErrNoRows {
-			http.Error(w, "Failed to join invite", http.StatusInternalServerError)
+			switch err {
+			case ErrInviteRevoked:
+				http.Error(w, "Invite link revoked", http.StatusGone)
+			case ErrInviteExpired:
+				http.Error(w, "Invite link expired", http.StatusGone)
+			case ErrInviteUsageLimit:
+				http.Error(w, "Invite link usage limit reached", http.StatusGone)
+			case ErrInvitePasswordRequired:
+				http.Error(w, "Invite password required", http.StatusUnauthorized)
+			case ErrInvitePasswordInvalid:
+				http.Error(w, "Invite password invalid", http.StatusForbidden)
+			default:
+				http.Error(w, "Failed to join invite", http.StatusInternalServerError)
+			}
 			return
 		}
 
-		channelID, err := db.JoinChannelByInviteToken(ctx, payload.Token, pubKey)
+		channelID, err := db.JoinChannelByInviteToken(ctx, payload.Token, pubKey, payload.Password)
 		if err == sql.ErrNoRows {
 			http.Error(w, "Invite link not found", http.StatusNotFound)
 			return
 		}
 		if err != nil {
-			http.Error(w, "Failed to join invite", http.StatusInternalServerError)
+			switch err {
+			case ErrInviteRevoked:
+				http.Error(w, "Invite link revoked", http.StatusGone)
+			case ErrInviteExpired:
+				http.Error(w, "Invite link expired", http.StatusGone)
+			case ErrInviteUsageLimit:
+				http.Error(w, "Invite link usage limit reached", http.StatusGone)
+			case ErrInvitePasswordRequired:
+				http.Error(w, "Invite password required", http.StatusUnauthorized)
+			case ErrInvitePasswordInvalid:
+				http.Error(w, "Invite password invalid", http.StatusForbidden)
+			default:
+				http.Error(w, "Failed to join invite", http.StatusInternalServerError)
+			}
 			return
 		}
 
@@ -1481,6 +1798,19 @@ func getDurationFromMinutesEnv(name string, fallback time.Duration) time.Duratio
 	return time.Duration(minutes) * time.Minute
 }
 
+func logModerationAuditAsync(db *DB, entityType, entityID, actorPubKey, action, target, details string) {
+	if db == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := db.InsertModerationAudit(ctx, entityType, entityID, actorPubKey, action, target, details); err != nil {
+			log.Printf("Failed to write moderation audit event %s/%s: %v", entityType, action, err)
+		}
+	}()
+}
+
 func getRateLimitPerMinute() int {
 	raw := strings.TrimSpace(os.Getenv("RATE_LIMIT_PER_MINUTE"))
 	if raw == "" {
@@ -1577,13 +1907,7 @@ func isForbiddenProxyAddr(addr netip.Addr) bool {
 }
 
 func authorizeSession(hub *Hub, w http.ResponseWriter, r *http.Request) (string, bool) {
-	token := strings.TrimSpace(r.Header.Get("X-Session-Token"))
-	if token == "" {
-		authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
-		if strings.HasPrefix(authHeader, "Bearer ") {
-			token = strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
-		}
-	}
+	token := extractSessionToken(r)
 
 	pubKey, ok := hub.ValidateSessionToken(token)
 	if !ok {
@@ -1616,6 +1940,11 @@ func authorizeDownload(hub *Hub, w http.ResponseWriter, r *http.Request, filenam
 }
 
 func authorizeSessionSilently(hub *Hub, r *http.Request) (string, bool) {
+	token := extractSessionToken(r)
+	return hub.ValidateSessionToken(token)
+}
+
+func extractSessionToken(r *http.Request) string {
 	token := strings.TrimSpace(r.Header.Get("X-Session-Token"))
 	if token == "" {
 		authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
@@ -1623,7 +1952,7 @@ func authorizeSessionSilently(hub *Hub, r *http.Request) (string, bool) {
 			token = strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
 		}
 	}
-	return hub.ValidateSessionToken(token)
+	return token
 }
 
 type ipRateLimiter struct {

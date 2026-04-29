@@ -321,7 +321,7 @@ func TestDropClientRemovesSessionToken(t *testing.T) {
 	client := newTestClient("sender")
 	client.Token = "session-token"
 	setTestClient(hub, client)
-	hub.StoreSessionToken(client.Token, client.PubKey)
+	hub.StoreSessionToken(client.Token, client.PubKey, "test-agent", "127.0.0.1")
 
 	hub.dropClient(client, "test")
 

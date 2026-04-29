@@ -31,6 +31,17 @@ type ServerChannelSubscriber = {
   role?: string;
 };
 
+export type ModerationAuditEntry = {
+  id: number;
+  entityType: 'group' | 'channel';
+  entityId: string;
+  actorPubKey: string;
+  action: string;
+  target: string;
+  details: string;
+  createdAt: string;
+};
+
 const GROUP_SYNC_TTL_MS = 30_000;
 const CHANNEL_SYNC_TTL_MS = 30_000;
 
@@ -257,6 +268,19 @@ export async function deleteGroup(groupId: string) {
   await db.groupThreads.delete(groupId);
 }
 
+export async function updateGroupSettings(groupId: string, input: { title: string; avatar?: string | null }) {
+  await fetchJson<void>(`${appConfig.backendOrigin}/groups/${encodeURIComponent(groupId)}/settings`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      title: input.title,
+      avatar: input.avatar ?? '',
+    }),
+  });
+
+  lastGroupsSyncAt = 0;
+  return refreshGroupAvailability(groupId);
+}
+
 export async function syncChannels(force = false): Promise<ChannelThread[]> {
   if (!force && Date.now() - lastChannelsSyncAt < CHANNEL_SYNC_TTL_MS) {
     useAppStore.getState().setChannelSyncStatus({
@@ -426,29 +450,116 @@ export async function deleteChannel(channelId: string) {
   await db.channelThreads.delete(channelId);
 }
 
-export async function createGroupInviteLink(groupId: string) {
+export async function updateChannelSettings(channelId: string, input: { title: string; avatar?: string | null }) {
+  await fetchJson<void>(`${appConfig.backendOrigin}/channels/${encodeURIComponent(channelId)}/settings`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      title: input.title,
+      avatar: input.avatar ?? '',
+    }),
+  });
+
+  lastChannelsSyncAt = 0;
+  return refreshChannelAvailability(channelId);
+}
+
+export type InviteLinkOptions = {
+  ttlMinutes?: number;
+  maxUses?: number;
+  password?: string;
+};
+export type InviteLinkRecord = {
+  token: string;
+  entityType: 'group' | 'channel';
+  entityId: string;
+  createdByPubKey: string;
+  createdAt: string;
+  expiresAt?: string;
+  maxUses?: number;
+  usesCount: number;
+  hasPassword: boolean;
+  revoked: boolean;
+};
+
+export async function createGroupInviteLink(groupId: string, options: InviteLinkOptions = {}) {
   const payload = await fetchJson<{ token: string }>(`${appConfig.backendOrigin}/group-invite-links`, {
     method: 'POST',
-    body: JSON.stringify({ groupId }),
+    body: JSON.stringify({
+      groupId,
+      ttlMinutes: options.ttlMinutes ?? 0,
+      maxUses: options.maxUses ?? 0,
+      password: options.password ?? '',
+    }),
   });
 
   const origin = typeof window !== 'undefined' ? window.location.origin : appConfig.backendOrigin;
   return `${origin}/?invite=${encodeURIComponent(payload.token)}`;
 }
 
-export async function createChannelInviteLink(channelId: string) {
+export async function createChannelInviteLink(channelId: string, options: InviteLinkOptions = {}) {
   const payload = await fetchJson<{ token: string }>(`${appConfig.backendOrigin}/channel-invite-links`, {
     method: 'POST',
-    body: JSON.stringify({ channelId }),
+    body: JSON.stringify({
+      channelId,
+      ttlMinutes: options.ttlMinutes ?? 0,
+      maxUses: options.maxUses ?? 0,
+      password: options.password ?? '',
+    }),
   });
 
   const origin = typeof window !== 'undefined' ? window.location.origin : appConfig.backendOrigin;
   return `${origin}/?invite=${encodeURIComponent(payload.token)}`;
 }
 
-export async function joinInviteLink(token: string) {
+export async function revokeGroupInviteLink(groupId: string, token: string) {
+  await fetchJson<void>(
+    `${appConfig.backendOrigin}/group-invite-links?groupId=${encodeURIComponent(groupId)}&token=${encodeURIComponent(token)}`,
+    { method: 'DELETE' }
+  );
+}
+
+export async function listGroupInviteLinks(groupId: string) {
+  const payload = await fetchJson<{ links: InviteLinkRecord[] }>(
+    `${appConfig.backendOrigin}/group-invite-links?groupId=${encodeURIComponent(groupId)}`,
+    { method: 'GET' }
+  );
+  return payload.links ?? [];
+}
+
+export async function revokeChannelInviteLink(channelId: string, token: string) {
+  await fetchJson<void>(
+    `${appConfig.backendOrigin}/channel-invite-links?channelId=${encodeURIComponent(channelId)}&token=${encodeURIComponent(token)}`,
+    { method: 'DELETE' }
+  );
+}
+
+export async function listChannelInviteLinks(channelId: string) {
+  const payload = await fetchJson<{ links: InviteLinkRecord[] }>(
+    `${appConfig.backendOrigin}/channel-invite-links?channelId=${encodeURIComponent(channelId)}`,
+    { method: 'GET' }
+  );
+  return payload.links ?? [];
+}
+
+export async function joinInviteLink(token: string, password = '') {
   return fetchJson<{ entityType: 'group' | 'channel'; entityId: string }>(`${appConfig.backendOrigin}/invite-links/join`, {
     method: 'POST',
-    body: JSON.stringify({ token }),
+    body: JSON.stringify({ token, password }),
   });
+}
+
+export async function listGroupModerationAudit(groupId: string) {
+  const payload = await fetchJson<{ entries: ModerationAuditEntry[] }>(
+    `${appConfig.backendOrigin}/groups/${encodeURIComponent(groupId)}/audit`,
+    { method: 'GET' }
+  );
+  return payload.entries ?? [];
+}
+
+export async function listChannelModerationAudit(channelId: string) {
+  const payload = await fetchJson<{ entries: ModerationAuditEntry[] }>(
+    `${appConfig.backendOrigin}/channels/${encodeURIComponent(channelId)}/audit`,
+    { method: 'GET' }
+  );
+  return payload.entries ?? [];
 }

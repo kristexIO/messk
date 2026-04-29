@@ -3,6 +3,7 @@ import { migrateLocalDataToEncryptedAtRest, persistIdentityKeyPair, setVaultKey,
 
 export type Theme = 'dark' | 'light' | 'cyberpunk' | 'forest';
 export type DesignStyle = 'glass' | 'neumorph' | 'telegram';
+export type UiMode = 'classic' | 'next';
 export type Language = 'en' | 'ru' | 'fr' | 'de';
 
 export type CollectionSyncStatus = {
@@ -32,6 +33,7 @@ interface AppState {
   pinHash: string | null;
   theme: Theme;
   designStyle: DesignStyle;
+  uiMode: UiMode;
   language: Language;
   isRestoringIdentity: boolean;
   isIdentityRemembered: boolean;
@@ -51,6 +53,7 @@ interface AppState {
   lockApp: () => void;
   setTheme: (theme: Theme) => void;
   setDesignStyle: (designStyle: DesignStyle) => void;
+  setUiMode: (uiMode: UiMode) => void;
   setLanguage: (language: Language) => void;
   restoreRememberedIdentity: () => Promise<void>;
   forgetRememberedIdentity: () => void;
@@ -80,6 +83,10 @@ const normalizeTheme = (value: unknown): Theme => {
 
 const normalizeDesignStyle = (value: unknown): DesignStyle => {
   return value === 'neumorph' || value === 'telegram' || value === 'glass' ? value : 'glass';
+};
+
+const normalizeUiMode = (value: unknown): UiMode => {
+  return value === 'next' || value === 'classic' ? value : 'classic';
 };
 
 const loadRememberedIdentity = (): { publicKey: string; secretKey: string } | null => {
@@ -139,6 +146,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   pinHash: savedSettings.pinHash || null,
   theme: normalizeTheme(savedSettings.theme),
   designStyle: normalizeDesignStyle(savedSettings.designStyle),
+  uiMode: normalizeUiMode(savedSettings.uiMode),
   language: normalizeLanguage(savedSettings.language),
   isRestoringIdentity: true,
   isIdentityRemembered: loadRememberedIdentity() !== null,
@@ -231,6 +239,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     }));
   },
 
+  setUiMode: (uiMode) => {
+    set({ uiMode });
+    document.documentElement.setAttribute('data-ui', uiMode);
+    localStorage.setItem('messenger_settings', JSON.stringify({
+      ...loadSettings(),
+      uiMode
+    }));
+  },
+
   setLanguage: (language) => {
     set({ language });
     localStorage.setItem('messenger_settings', JSON.stringify({
@@ -296,4 +313,5 @@ export const useAppStore = create<AppState>((set, get) => ({
 if (typeof document !== 'undefined') {
   document.documentElement.setAttribute('data-theme', normalizeTheme(savedSettings.theme));
   document.documentElement.setAttribute('data-style', normalizeDesignStyle(savedSettings.designStyle));
+  document.documentElement.setAttribute('data-ui', normalizeUiMode(savedSettings.uiMode));
 }

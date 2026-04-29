@@ -1,4 +1,5 @@
 import React from 'react';
+import { createPortal } from 'react-dom';
 import { QRCodeSVG } from 'qrcode.react';
 import { X, ShieldCheck, QrCode, Copy } from 'lucide-react';
 import { useI18n } from '../lib/i18n';
@@ -14,12 +15,12 @@ export const UserIdentityModal: React.FC<Props> = ({ pubKey, onClose }) => {
     if (typeof window === 'undefined') {
       return pubKey;
     }
-    return `${window.location.origin}${window.location.pathname}?chat=${encodeURIComponent(pubKey)}`;
+    return `${window.location.origin}/?chat=${encodeURIComponent(pubKey)}`;
   }, [pubKey]);
 
-  return (
-    <div className="fixed inset-0 z-[600] flex items-center justify-center bg-black/60 backdrop-blur-xl p-4">
-      <div className="premium-glass p-8 rounded-[32px] w-full max-w-sm flex flex-col items-center gap-6 animate-in zoom-in-95 duration-300 shadow-2xl border border-white/10">
+  const modal = (
+    <div className="fixed inset-0 z-[600] flex items-center justify-center bg-slate-950/90 backdrop-blur-2xl p-4">
+      <div className="premium-glass p-8 rounded-[32px] w-full max-w-md flex flex-col items-center gap-6 animate-in zoom-in-95 duration-300 shadow-2xl border border-white/10">
         <div className="w-full flex justify-between items-center">
           <h2 className="text-xl font-bold flex items-center gap-2">
             <QrCode className="text-accent w-5 h-5" />
@@ -57,4 +58,6 @@ export const UserIdentityModal: React.FC<Props> = ({ pubKey, onClose }) => {
       </div>
     </div>
   );
+
+  return createPortal(modal, document.body);
 };

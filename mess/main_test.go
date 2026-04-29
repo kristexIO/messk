@@ -16,7 +16,7 @@ import (
 
 func TestAuthorizeSessionSilentlyWithHeader(t *testing.T) {
 	hub := NewHub(nil, nil, nil)
-	hub.StoreSessionToken("token-123", "pub-key")
+	hub.StoreSessionToken("token-123", "pub-key", "test-agent", "127.0.0.1")
 
 	req := httptest.NewRequest(http.MethodGet, "/upload", nil)
 	req.Header.Set("X-Session-Token", "token-123")
@@ -110,7 +110,7 @@ func TestCleanupExpiredTokensRemovesSessionAndFileTokens(t *testing.T) {
 
 func TestAuthorizeDownloadWithSessionRequiresACL(t *testing.T) {
 	hub := NewHub(nil, nil, nil)
-	hub.StoreSessionToken("session-123", "alice")
+	hub.StoreSessionToken("session-123", "alice", "test-agent", "127.0.0.1")
 	hub.StoreFileAccess("secret.bin", "alice", "bob")
 
 	req := httptest.NewRequest(http.MethodGet, "/download/secret.bin", nil)
@@ -136,7 +136,7 @@ func TestStoreFileAccessSupportsGroupACLs(t *testing.T) {
 
 func TestAuthorizeDownloadRejectsSessionOutsideACL(t *testing.T) {
 	hub := NewHub(nil, nil, nil)
-	hub.StoreSessionToken("session-123", "mallory")
+	hub.StoreSessionToken("session-123", "mallory", "test-agent", "127.0.0.1")
 	hub.StoreFileAccess("secret.bin", "alice", "bob")
 
 	req := httptest.NewRequest(http.MethodGet, "/download/secret.bin", nil)

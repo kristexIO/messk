@@ -9,6 +9,7 @@ import { appConfig } from './config';
 import { toast } from 'react-hot-toast';
 import { fetchWithTimeout } from './http';
 import { getMessageNotificationPreview, isMentioningPubKey } from './message-format';
+import { refreshGroupAvailability, syncGroups } from './community';
 
 const WS_URL = appConfig.wsUrl;
 const DIRECT_RETRY_BASE_DELAY_MS = 3_000;
@@ -38,6 +39,8 @@ type IncomingEnvelope = {
   session_token?: string;
   signed_prekey?: string | null;
   signed_prekey_sig?: string | null;
+  message?: string;
+  retry_after_sec?: number;
 };
 
 type X3DHParams = {
@@ -332,6 +335,7 @@ export class SocketManager {
   private profileRefreshInFlight = new Map<string, Promise<void>>();
   private lastKnownProfilesRefreshAt = 0;
   private outboxFlushTimer: ReturnType<typeof setInterval> | null = null;
+  private lastRateLimitedToastAt = 0;
 
   private releaseAuthWaiters() {
     if (this.authWaiters.length === 0) {
@@ -486,6 +490,17 @@ export class SocketManager {
           }
           return;
         }
+        if (env.type === 'rate_limited') {
+          const now = Date.now();
+          if (now - this.lastRateLimitedToastAt > 2500) {
+            this.lastRateLimitedToastAt = now;
+            const retry = typeof env.retry_after_sec === 'number' && env.retry_after_sec > 0
+              ? ` Retry in ${Math.ceil(env.retry_after_sec)}s.`
+              : '';
+            toast.error(`${env.message || 'Too many actions. Please slow down.'}${retry}`);
+          }
+          return;
+        }
 
         // 2. Typing indicators
         if (env.type === 'typing') {
@@ -561,8 +576,7 @@ export class SocketManager {
           });
 
           try {
-            const community = await import('./community');
-            const group = await community.refreshGroupAvailability(payload.groupId);
+            const group = await refreshGroupAvailability(payload.groupId);
             if (group) {
               await db.groupInvites.where('groupId').equals(payload.groupId).delete();
               toast.success(`Group "${payload.title}" is now available.`);
@@ -1002,6 +1016,47 @@ export class SocketManager {
     return this.sessionToken ? { 'X-Session-Token': this.sessionToken } : {};
   }
 
+  async listSessions() {
+    const response = await fetchWithTimeout(`${appConfig.backendOrigin}/sessions`, {
+      headers: this.getSessionHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error('Failed to load sessions');
+    }
+    return response.json() as Promise<{
+      sessions: Array<{
+        token: string;
+        createdAt: string;
+        lastSeen: string;
+        expiresAt: string;
+        userAgent: string;
+        remoteIp: string;
+      }>;
+      currentToken: string;
+    }>;
+  }
+
+  async revokeSession(token: string) {
+    const response = await fetchWithTimeout(`${appConfig.backendOrigin}/sessions?token=${encodeURIComponent(token)}`, {
+      method: 'DELETE',
+      headers: this.getSessionHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error('Failed to revoke session');
+    }
+  }
+
+  async revokeOtherSessions() {
+    const response = await fetchWithTimeout(`${appConfig.backendOrigin}/sessions?token=all`, {
+      method: 'DELETE',
+      headers: this.getSessionHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error('Failed to revoke sessions');
+    }
+    return response.json() as Promise<{ revoked: number }>;
+  }
+
   async syncMyProfile() {
     const { nickname, avatar, username } = useAppStore.getState();
     if (!this.sessionToken) return;
@@ -1120,27 +1175,42 @@ export class SocketManager {
   }
 
   async resolveUsername(username: string): Promise<{ pubKey: string; nickname?: string; avatar?: string } | null> {
-    try {
-      const url = new URL(appConfig.profileUrl);
-      url.pathname = '/resolve';
-      url.searchParams.set('username', username);
-      
-      const response = await fetchWithTimeout(url.toString(), {
-        headers: this.getSessionHeaders(),
-      });
-      if (!response.ok) return null;
+    const normalized = username.trim().replace(/^@+/, '');
+    if (!normalized) return null;
 
-      const profile = await response.json() as {
-        pubKey: string;
-        nickname?: string;
-        avatar?: string;
-      };
-      
-      return profile;
-    } catch (error) {
-      console.warn('Failed to resolve username', error);
-      return null;
+    const candidates = ['/profile/resolve', '/resolve'];
+    for (const path of candidates) {
+      try {
+        const url = new URL(appConfig.backendOrigin);
+        url.pathname = path;
+        url.searchParams.set('username', normalized);
+
+        const response = await fetchWithTimeout(url.toString(), {
+          headers: this.getSessionHeaders(),
+        });
+        if (!response.ok) {
+          continue;
+        }
+
+        const contentType = response.headers.get('content-type') || '';
+        if (!contentType.toLowerCase().includes('application/json')) {
+          continue;
+        }
+
+        const profile = await response.json() as {
+          pubKey: string;
+          nickname?: string;
+          avatar?: string;
+        };
+        if (profile?.pubKey) {
+          return profile;
+        }
+      } catch (error) {
+        console.warn(`Failed to resolve username via ${path}`, error);
+      }
     }
+
+    return null;
   }
 
   async refreshKnownProfiles(force = false) {
@@ -1330,8 +1400,7 @@ export class SocketManager {
     }
 
     try {
-      const community = await import('./community');
-      await community.syncGroups(true);
+      await syncGroups(true);
     } catch (error) {
       console.warn('Failed to sync groups for incoming group event', error);
     }
@@ -1498,19 +1567,25 @@ export class SocketManager {
     if (queued) {
       await db.outgoingDirectMessages.delete(msgId);
     }
+    const queuedEvent = await db.outgoingGroupEvents.get(msgId);
+    if (queuedEvent) {
+      await db.outgoingGroupEvents.delete(msgId);
+    }
 
     const msg = await db.messages.where('msgId').equals(msgId).first();
     if (msg?.id && msg.status === 'pending') {
       await updateMessageAndSync(msg.id, { status: 'sent' });
-      this.sendSelfSyncDirectMessage({
-        kind: 'direct_message',
-        msgId,
-        peerPubKey: msg.peerPublicKey,
-        senderPubKey: msg.senderPublicKey,
-        text: msg.text,
-        timestamp: msg.timestamp,
-        status: 'sent',
-      });
+      if (queued) {
+        this.sendSelfSyncDirectMessage({
+          kind: 'direct_message',
+          msgId,
+          peerPubKey: msg.peerPublicKey,
+          senderPubKey: msg.senderPublicKey,
+          text: msg.text,
+          timestamp: msg.timestamp,
+          status: 'sent',
+        });
+      }
     }
   }
 
@@ -1555,7 +1630,7 @@ export class SocketManager {
     }
 
     const { myPublicKey, mySecretKey } = useAppStore.getState();
-    if (!myPublicKey || !mySecretKey) {
+    if (!myPublicKey) {
       return;
     }
 
@@ -1568,7 +1643,7 @@ export class SocketManager {
         }
 
         try {
-          if (event.type === 'group_message' && event.data) {
+          if (event.type === 'group_message' && event.data && mySecretKey) {
             const senderKey = await this.ensureGroupSenderKey(event.groupId, myPublicKey, mySecretKey);
             this.ws?.send(JSON.stringify({
               type: 'group_message',
@@ -1577,7 +1652,7 @@ export class SocketManager {
               sender_pub_key: myPublicKey,
               data: await this.encryptWithSenderKey(senderKey, event.data),
             }));
-          } else if (event.type === 'group_edit' && event.data && event.targetMsgId) {
+          } else if (event.type === 'group_edit' && event.data && event.targetMsgId && mySecretKey) {
             const senderKey = await this.ensureGroupSenderKey(event.groupId, myPublicKey, mySecretKey);
             this.ws?.send(JSON.stringify({
               type: 'group_edit',
@@ -1595,7 +1670,7 @@ export class SocketManager {
               group_id: event.groupId,
               sender_pub_key: myPublicKey,
             }));
-          } else if (event.type === 'group_reaction' && event.targetMsgId) {
+          } else if (event.type === 'group_reaction' && event.targetMsgId && mySecretKey) {
             const senderKey = await this.ensureGroupSenderKey(event.groupId, myPublicKey, mySecretKey);
             this.ws?.send(JSON.stringify({
               type: 'group_reaction',
@@ -1604,6 +1679,49 @@ export class SocketManager {
               group_id: event.groupId,
               sender_pub_key: myPublicKey,
               data: await this.encryptWithSenderKey(senderKey, JSON.stringify({ reaction: event.reaction ?? null } satisfies GroupReactionPayload)),
+            }));
+          } else if (event.type === 'channel_message' && event.data) {
+            this.ws?.send(JSON.stringify({
+              type: 'channel_message',
+              msg_id: event.id,
+              group_id: event.groupId,
+              sender_pub_key: myPublicKey,
+              data: event.data,
+            }));
+          } else if (event.type === 'channel_edit' && event.data && event.targetMsgId) {
+            this.ws?.send(JSON.stringify({
+              type: 'channel_edit',
+              msg_id: event.id,
+              target_msg_id: event.targetMsgId,
+              group_id: event.groupId,
+              sender_pub_key: myPublicKey,
+              data: event.data,
+            }));
+          } else if (event.type === 'channel_delete' && event.targetMsgId) {
+            this.ws?.send(JSON.stringify({
+              type: 'channel_delete',
+              msg_id: event.id,
+              target_msg_id: event.targetMsgId,
+              group_id: event.groupId,
+              sender_pub_key: myPublicKey,
+            }));
+          } else if (event.type === 'channel_reaction' && event.targetMsgId) {
+            this.ws?.send(JSON.stringify({
+              type: 'channel_reaction',
+              msg_id: event.id,
+              target_msg_id: event.targetMsgId,
+              group_id: event.groupId,
+              sender_pub_key: myPublicKey,
+              reaction: event.reaction ?? '',
+            }));
+          } else if (event.type === 'channel_pin') {
+            this.ws?.send(JSON.stringify({
+              type: 'channel_pin',
+              msg_id: event.id,
+              target_msg_id: event.targetMsgId ?? '',
+              group_id: event.groupId,
+              sender_pub_key: myPublicKey,
+              data: '',
             }));
           }
 
@@ -1958,7 +2076,7 @@ export class SocketManager {
       senderPublicKey: myPublicKey,
       text: plaintext,
       timestamp: Date.now(),
-      status: this.canSendImmediately() ? 'delivered' : 'pending',
+      status: 'pending',
       reactions: {}
     });
     await db.groupThreads.update(groupId, { lastActivityAt: Date.now() });
@@ -2088,48 +2206,63 @@ export class SocketManager {
   }
 
   async sendChannelMessage(channelId: string, plaintext: string, myPublicKey: string) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error('Socket disconnected');
-    }
-    if (!this.authenticated) {
-      throw new Error('Secure channel is not ready yet');
-    }
-
     const msgId = crypto.randomUUID();
-    this.ws.send(JSON.stringify({
-      type: 'channel_message',
-      msg_id: msgId,
-      group_id: channelId,
-      sender_pub_key: myPublicKey,
-      data: plaintext,
-    }));
-
     await addMessageAndSync({
       msgId,
       peerPublicKey: channelId,
       senderPublicKey: myPublicKey,
       text: plaintext,
       timestamp: Date.now(),
-      status: 'delivered',
+      status: 'pending',
       reactions: {}
     });
     await db.channelThreads.update(channelId, { lastActivityAt: Date.now() });
-  }
 
-  async sendChannelEdit(channelId: string, targetMsgId: string, plaintext: string, myPublicKey: string) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.authenticated) {
-      throw new Error('Secure channel is not ready yet');
+    if (!this.canSendImmediately()) {
+      await this.enqueueOutgoingGroupEvent({
+        id: msgId,
+        type: 'channel_message',
+        groupId: channelId,
+        senderPubKey: myPublicKey,
+        data: plaintext,
+        createdAt: Date.now(),
+      });
+      toast('Channel post queued for reconnect.', { icon: '⏳' });
+      return;
     }
 
-    const eventId = crypto.randomUUID();
-    this.ws.send(JSON.stringify({
-      type: 'channel_edit',
-      msg_id: eventId,
-      target_msg_id: targetMsgId,
+    this.ws?.send(JSON.stringify({
+      type: 'channel_message',
+      msg_id: msgId,
       group_id: channelId,
       sender_pub_key: myPublicKey,
       data: plaintext,
     }));
+  }
+
+  async sendChannelEdit(channelId: string, targetMsgId: string, plaintext: string, myPublicKey: string) {
+    const eventId = crypto.randomUUID();
+    if (!this.canSendImmediately()) {
+      await this.enqueueOutgoingGroupEvent({
+        id: eventId,
+        type: 'channel_edit',
+        groupId: channelId,
+        senderPubKey: myPublicKey,
+        targetMsgId,
+        data: plaintext,
+        createdAt: Date.now(),
+      });
+      toast('Channel edit queued for reconnect.', { icon: '⏳' });
+    } else {
+      this.ws?.send(JSON.stringify({
+        type: 'channel_edit',
+        msg_id: eventId,
+        target_msg_id: targetMsgId,
+        group_id: channelId,
+        sender_pub_key: myPublicKey,
+        data: plaintext,
+      }));
+    }
 
     const msg = await db.messages.where('msgId').equals(targetMsgId).first();
     if (msg?.id) {
@@ -2138,18 +2271,26 @@ export class SocketManager {
   }
 
   async sendChannelDelete(channelId: string, targetMsgId: string, myPublicKey: string) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.authenticated) {
-      throw new Error('Secure channel is not ready yet');
-    }
-
     const eventId = crypto.randomUUID();
-    this.ws.send(JSON.stringify({
-      type: 'channel_delete',
-      msg_id: eventId,
-      target_msg_id: targetMsgId,
-      group_id: channelId,
-      sender_pub_key: myPublicKey,
-    }));
+    if (!this.canSendImmediately()) {
+      await this.enqueueOutgoingGroupEvent({
+        id: eventId,
+        type: 'channel_delete',
+        groupId: channelId,
+        senderPubKey: myPublicKey,
+        targetMsgId,
+        createdAt: Date.now(),
+      });
+      toast('Channel delete queued for reconnect.', { icon: '⏳' });
+    } else {
+      this.ws?.send(JSON.stringify({
+        type: 'channel_delete',
+        msg_id: eventId,
+        target_msg_id: targetMsgId,
+        group_id: channelId,
+        sender_pub_key: myPublicKey,
+      }));
+    }
 
     const msg = await db.messages.where('msgId').equals(targetMsgId).first();
     if (msg?.id) {
@@ -2163,19 +2304,28 @@ export class SocketManager {
   }
 
   async sendChannelReaction(channelId: string, targetMsgId: string, reaction: string | null, myPublicKey: string) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.authenticated) {
-      throw new Error('Secure channel is not ready yet');
-    }
-
     const eventId = crypto.randomUUID();
-    this.ws.send(JSON.stringify({
-      type: 'channel_reaction',
-      msg_id: eventId,
-      target_msg_id: targetMsgId,
-      group_id: channelId,
-      sender_pub_key: myPublicKey,
-      reaction: reaction ?? '',
-    }));
+    if (!this.canSendImmediately()) {
+      await this.enqueueOutgoingGroupEvent({
+        id: eventId,
+        type: 'channel_reaction',
+        groupId: channelId,
+        senderPubKey: myPublicKey,
+        targetMsgId,
+        reaction,
+        createdAt: Date.now(),
+      });
+      toast('Channel reaction queued for reconnect.', { icon: '⏳' });
+    } else {
+      this.ws?.send(JSON.stringify({
+        type: 'channel_reaction',
+        msg_id: eventId,
+        target_msg_id: targetMsgId,
+        group_id: channelId,
+        sender_pub_key: myPublicKey,
+        reaction: reaction ?? '',
+      }));
+    }
 
     const msg = await db.messages.where('msgId').equals(targetMsgId).first();
     if (msg?.id) {
@@ -2190,19 +2340,27 @@ export class SocketManager {
   }
 
   async sendChannelPin(channelId: string, targetMsgId: string | null, myPublicKey: string) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.authenticated) {
-      throw new Error('Secure channel is not ready yet');
-    }
-
     const eventId = crypto.randomUUID();
-    this.ws.send(JSON.stringify({
-      type: 'channel_pin',
-      msg_id: eventId,
-      target_msg_id: targetMsgId ?? '',
-      group_id: channelId,
-      sender_pub_key: myPublicKey,
-      data: '',
-    }));
+    if (!this.canSendImmediately()) {
+      await this.enqueueOutgoingGroupEvent({
+        id: eventId,
+        type: 'channel_pin',
+        groupId: channelId,
+        senderPubKey: myPublicKey,
+        targetMsgId: targetMsgId ?? undefined,
+        createdAt: Date.now(),
+      });
+      toast('Channel pin change queued for reconnect.', { icon: '⏳' });
+    } else {
+      this.ws?.send(JSON.stringify({
+        type: 'channel_pin',
+        msg_id: eventId,
+        target_msg_id: targetMsgId ?? '',
+        group_id: channelId,
+        sender_pub_key: myPublicKey,
+        data: '',
+      }));
+    }
 
     await db.channelThreads.update(channelId, { pinnedMsgId: targetMsgId });
   }

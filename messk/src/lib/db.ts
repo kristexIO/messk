@@ -103,7 +103,16 @@ export interface GroupInvite {
 
 export interface OutgoingGroupEvent {
   id: string;
-  type: 'group_message' | 'group_edit' | 'group_delete' | 'group_reaction';
+  type:
+    | 'group_message'
+    | 'group_edit'
+    | 'group_delete'
+    | 'group_reaction'
+    | 'channel_message'
+    | 'channel_edit'
+    | 'channel_delete'
+    | 'channel_reaction'
+    | 'channel_pin';
   groupId: string;
   senderPubKey: string;
   data?: string;
@@ -603,6 +612,23 @@ export class MessengerDatabase extends Dexie {
       keypairs: '++id, &publicKey',
       messages: '++id, &msgId, peerPublicKey, timestamp, [peerPublicKey+timestamp]',
       contacts: '&pubKey, lastMessageAt',
+      threadStats: '&threadId, unreadCount, lastMessageAt',
+      groupThreads: '&id, lastActivityAt, createdAt, title',
+      channelThreads: '&id, lastActivityAt, createdAt, title',
+      channelActivity: '&id, channelId, createdAt, [channelId+createdAt], type',
+      groupInvites: '&id, groupId, createdAt',
+      outgoingGroupEvents: '&id, groupId, createdAt, type',
+      outgoingDirectMessages: '&id, recipientPubKey, createdAt, lastAttemptAt',
+      callHistory: '&id, peerPubKey, createdAt, outcome',
+      groupSenderKeys: '&id, groupId, senderPubKey, createdAt',
+      sessions: '&peerPublicKey',
+      prekeys: '++id, &publicKey'
+    });
+
+    this.version(15).stores({
+      keypairs: '++id, &publicKey',
+      messages: '++id, &msgId, peerPublicKey, timestamp, [peerPublicKey+timestamp]',
+      contacts: '&pubKey, username, lastMessageAt',
       threadStats: '&threadId, unreadCount, lastMessageAt',
       groupThreads: '&id, lastActivityAt, createdAt, title',
       channelThreads: '&id, lastActivityAt, createdAt, title',

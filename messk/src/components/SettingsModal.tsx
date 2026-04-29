@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useAppStore } from '../store';
-import type { DesignStyle, Language, Theme } from '../store';
+import type { DesignStyle, Language, Theme, UiMode } from '../store';
 import { X, User, Palette, Shield, LogOut, Camera, Lock, Download, Upload, Database, PhoneCall, PhoneIncoming, PhoneOutgoing, PhoneMissed, Layers } from 'lucide-react';
 import { socketManager } from '../lib/socket';
 import { db, getDatabaseNameForIdentity } from '../lib/db';
@@ -24,8 +24,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     myPublicKey,
     theme,
     designStyle,
+    uiMode,
     setTheme,
     setDesignStyle,
+    setUiMode,
     language,
     setLanguage,
     setProfile,
@@ -48,6 +50,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
   const [pinMessage, setPinMessage] = useState('');
   const [backupMessage, setBackupMessage] = useState('');
   const [securityMessage, setSecurityMessage] = useState('');
+  const [sessions, setSessions] = useState<Array<{
+    token: string;
+    createdAt: string;
+    lastSeen: string;
+    expiresAt: string;
+    userAgent: string;
+    remoteIp: string;
+  }>>([]);
+  const [currentSessionToken, setCurrentSessionToken] = useState('');
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionActionToken, setSessionActionToken] = useState<string | null>(null);
   const { t } = useI18n();
   const callHistory = useLiveQuery(() => db.callHistory.orderBy('createdAt').reverse().limit(12).toArray(), []);
   const contacts = useLiveQuery(() => db.contacts.toArray(), []);
@@ -85,6 +98,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     () => channels?.filter((channel) => channel.role === 'owner').length ?? 0,
     [channels]
   );
+
+  const loadSessions = React.useCallback(async () => {
+    try {
+      setSessionsLoading(true);
+      const payload = await socketManager.listSessions();
+      setSessions(payload.sessions ?? []);
+      setCurrentSessionToken(payload.currentToken ?? '');
+    } catch (error) {
+      setSecurityMessage(error instanceof Error ? error.message : 'Failed to load sessions.');
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadSessions();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadSessions]);
 
   const handleSaveProfile = async () => {
     setProfileError('');
@@ -128,6 +161,32 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
   const handleForgetDevice = () => {
     forgetRememberedIdentity();
     setSecurityMessage('Saved identity removed from this browser. After refresh, restore with your seed phrase.');
+  };
+
+  const handleRevokeSession = async (token: string) => {
+    try {
+      setSessionActionToken(token);
+      await socketManager.revokeSession(token);
+      setSecurityMessage('Session revoked.');
+      await loadSessions();
+    } catch (error) {
+      setSecurityMessage(error instanceof Error ? error.message : 'Failed to revoke session.');
+    } finally {
+      setSessionActionToken(null);
+    }
+  };
+
+  const handleRevokeOthers = async () => {
+    try {
+      setSessionActionToken('all');
+      const result = await socketManager.revokeOtherSessions();
+      setSecurityMessage(`Closed ${result.revoked} other session(s).`);
+      await loadSessions();
+    } catch (error) {
+      setSecurityMessage(error instanceof Error ? error.message : 'Failed to revoke sessions.');
+    } finally {
+      setSessionActionToken(null);
+    }
   };
 
   const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -254,6 +313,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
       description: 'Deep blue navigation and compact chat bubbles',
       previewClass: 'settings-preview-telegram',
     },
+  ];
+  const uiModes: { id: UiMode; name: string; description: string }[] = [
+    { id: 'classic', name: 'Classic UI', description: 'Current interface, unchanged layout logic' },
+    { id: 'next', name: 'Next UI', description: 'Fully redesigned visual system with stronger hierarchy' },
   ];
 
   const getCallOutcomeTone = (outcome: string) => {
@@ -406,6 +469,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
               ))}
             </div>
             <div className="space-y-2">
+              <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Interface mode</div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {uiModes.map((mode) => (
+                  <button
+                    key={mode.id}
+                    onClick={() => setUiMode(mode.id)}
+                    className={`settings-choice rounded-2xl p-4 text-left transition-all ${
+                      uiMode === mode.id ? 'is-active' : ''
+                    }`}
+                  >
+                    <div className="text-sm font-semibold">{mode.name}</div>
+                    <div className="mt-1 text-xs text-text-muted">{mode.description}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="space-y-2">
               <div className="text-xs uppercase tracking-[0.22em] text-text-muted flex items-center gap-2">
                 <Layers className="w-3.5 h-3.5" />
                 {t('surfaceStyle')}
@@ -512,6 +592,54 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                 </span>
               </div>
               <div className="text-xs text-text-muted min-h-4">{securityMessage}</div>
+            </div>
+            <div className="settings-card rounded-2xl p-4 space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-sm font-medium">Active Sessions</div>
+                <button
+                  type="button"
+                  onClick={() => void handleRevokeOthers()}
+                  disabled={sessionsLoading || sessionActionToken === 'all'}
+                  className="settings-secondary-button px-4 py-2 rounded-xl text-xs disabled:opacity-60"
+                >
+                  Logout other devices
+                </button>
+              </div>
+              {sessionsLoading ? (
+                <div className="text-xs text-text-muted">Loading sessions...</div>
+              ) : sessions.length === 0 ? (
+                <div className="text-xs text-text-muted">No active sessions found.</div>
+              ) : (
+                <div className="space-y-2">
+                  {sessions.map((session) => {
+                    const isCurrent = session.token === currentSessionToken;
+                    return (
+                      <div key={session.token} className="rounded-xl bg-black/20 px-3 py-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="truncate text-sm text-white">{session.userAgent || 'Unknown device'}</div>
+                            <div className="mt-1 text-[11px] text-text-muted">
+                              {session.remoteIp || 'Unknown IP'} • Last seen {new Date(session.lastSeen).toLocaleString()}
+                            </div>
+                          </div>
+                          {isCurrent ? (
+                            <span className="rounded-full bg-emerald-400/10 px-2 py-1 text-[11px] text-emerald-200">Current</span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => void handleRevokeSession(session.token)}
+                              disabled={sessionActionToken === session.token}
+                              className="rounded-lg border border-red-400/30 bg-red-400/10 px-2 py-1 text-xs text-red-100 disabled:opacity-60"
+                            >
+                              Logout
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
             <div className="settings-card rounded-2xl p-4 space-y-4">
               <div className="flex items-center gap-2 text-sm font-medium">

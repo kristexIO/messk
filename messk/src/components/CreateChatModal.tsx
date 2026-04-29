@@ -24,9 +24,10 @@ export const CreateChatModal: React.FC<CreateChatModalProps> = ({ onClose, onCre
     try {
       let targetPubKey = inputStr;
       
-      // If it looks like a username (starts with @ or no spaces and short), try to resolve it
+      // If it looks like a username (starts with @ or no spaces and short), try to resolve it.
       if (inputStr.startsWith('@') || (inputStr.length <= 32 && !inputStr.includes(' ') && !inputStr.endsWith('='))) {
-        const resolved = await socketManager.resolveUsername(inputStr);
+        const normalizedHandle = inputStr.startsWith('@') ? inputStr.slice(1).trim().toLowerCase() : inputStr.trim().toLowerCase();
+        const resolved = await socketManager.resolveUsername(normalizedHandle);
         if (resolved && resolved.pubKey) {
           targetPubKey = resolved.pubKey;
         } else if (inputStr.startsWith('@')) {
@@ -40,6 +41,8 @@ export const CreateChatModal: React.FC<CreateChatModalProps> = ({ onClose, onCre
       if (didOpen) {
         onClose();
       }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to open chat');
     } finally {
       setIsSubmitting(false);
     }

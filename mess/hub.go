@@ -52,6 +52,10 @@ type redisRouteEnvelope struct {
 type sessionTokenEntry struct {
 	PubKey    string
 	ExpiresAt time.Time
+	CreatedAt time.Time
+	LastSeen  time.Time
+	UserAgent string
+	RemoteIP  string
 }
 
 type fileTokenEntry struct {
@@ -408,13 +412,18 @@ func (h *Hub) dropClient(client *Client, reason string) {
 	client.cancel()
 }
 
-func (h *Hub) StoreSessionToken(token, pubKey string) {
+func (h *Hub) StoreSessionToken(token, pubKey, userAgent, remoteIP string) {
 	if token == "" || pubKey == "" {
 		return
 	}
+	now := time.Now()
 	h.sessionTokens.Store(token, sessionTokenEntry{
 		PubKey:    pubKey,
-		ExpiresAt: time.Now().Add(getSessionTokenTTL()),
+		ExpiresAt: now.Add(getSessionTokenTTL()),
+		CreatedAt: now,
+		LastSeen:  now,
+		UserAgent: userAgent,
+		RemoteIP:  remoteIP,
 	})
 }
 
@@ -443,7 +452,78 @@ func (h *Hub) ValidateSessionToken(token string) (string, bool) {
 		logEvent("session_token_expired", map[string]any{"pub_key": entry.PubKey})
 		return "", false
 	}
+	entry.LastSeen = time.Now()
+	h.sessionTokens.Store(token, entry)
 	return entry.PubKey, true
+}
+
+func (h *Hub) ListSessions(pubKey string) []map[string]any {
+	out := make([]map[string]any, 0)
+	if pubKey == "" {
+		return out
+	}
+	now := time.Now()
+	h.sessionTokens.Range(func(key, value any) bool {
+		token, ok := key.(string)
+		if !ok || token == "" {
+			return true
+		}
+		entry, ok := value.(sessionTokenEntry)
+		if !ok || entry.PubKey != pubKey {
+			return true
+		}
+		if now.After(entry.ExpiresAt) {
+			h.sessionTokens.Delete(key)
+			return true
+		}
+		out = append(out, map[string]any{
+			"token":     token,
+			"createdAt": entry.CreatedAt.UTC().Format(time.RFC3339),
+			"lastSeen":  entry.LastSeen.UTC().Format(time.RFC3339),
+			"expiresAt": entry.ExpiresAt.UTC().Format(time.RFC3339),
+			"userAgent": entry.UserAgent,
+			"remoteIp":  entry.RemoteIP,
+		})
+		return true
+	})
+	return out
+}
+
+func (h *Hub) RevokeSessionTokenForUser(pubKey, token string) bool {
+	if pubKey == "" || token == "" {
+		return false
+	}
+	stored, ok := h.sessionTokens.Load(token)
+	if !ok {
+		return false
+	}
+	entry, ok := stored.(sessionTokenEntry)
+	if !ok || entry.PubKey != pubKey {
+		return false
+	}
+	h.sessionTokens.Delete(token)
+	return true
+}
+
+func (h *Hub) RevokeAllSessionTokensForUser(pubKey, exceptToken string) int {
+	if pubKey == "" {
+		return 0
+	}
+	revoked := 0
+	h.sessionTokens.Range(func(key, value any) bool {
+		token, ok := key.(string)
+		if !ok || token == "" || token == exceptToken {
+			return true
+		}
+		entry, ok := value.(sessionTokenEntry)
+		if !ok || entry.PubKey != pubKey {
+			return true
+		}
+		h.sessionTokens.Delete(token)
+		revoked++
+		return true
+	})
+	return revoked
 }
 
 func (h *Hub) StoreFileToken(token, filename string) {

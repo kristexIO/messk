@@ -69,13 +69,23 @@ var upgrader = websocket.Upgrader{
 }
 
 type Client struct {
-	hub    *Hub
-	conn   *websocket.Conn
-	PubKey string
-	Token  string
-	send   chan []byte
-	ctx    context.Context
-	cancel context.CancelFunc
+	hub                   *Hub
+	conn                  *websocket.Conn
+	PubKey                string
+	Token                 string
+	send                  chan []byte
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	antiFloodMu           sync.Mutex
+	antiFloodWindows      map[string]floodWindow
+	antiFloodBlockedUntil time.Time
+	antiFloodViolations   int
+	typingLastSentAt      time.Time
+}
+
+type floodWindow struct {
+	start time.Time
+	count int
 }
 
 func checkWebSocketOrigin(r *http.Request) bool {
@@ -145,6 +155,10 @@ func (c *Client) readPump() {
 			}
 
 			if isGroupRoutedType(env.Type) && env.GroupID != "" {
+				if allowed, retryAfter := c.allowInboundEvent(env.Type); !allowed {
+					c.sendRateLimitNotice(env.Type, retryAfter)
+					continue
+				}
 				if !isValidMessageID(env.MsgID) || len(env.Data) > maxMessageSize {
 					logEvent("ws_invalid_group_envelope", map[string]any{
 						"pub_key":  c.PubKey,
@@ -175,6 +189,10 @@ func (c *Client) readPump() {
 					Payload:      normalizedMessage,
 				}
 			} else if isChannelRoutedType(env.Type) && env.GroupID != "" {
+				if allowed, retryAfter := c.allowInboundEvent(env.Type); !allowed {
+					c.sendRateLimitNotice(env.Type, retryAfter)
+					continue
+				}
 				if !isValidMessageID(env.MsgID) || len(env.Data) > maxMessageSize {
 					logEvent("ws_invalid_channel_envelope", map[string]any{
 						"pub_key":    c.PubKey,
@@ -215,6 +233,10 @@ func (c *Client) readPump() {
 					Payload:      normalizedMessage,
 				}
 			} else if routedEnvelopeTypes[env.Type] && env.RecipientPubKey != "" {
+				if allowed, retryAfter := c.allowInboundEvent(env.Type); !allowed {
+					c.sendRateLimitNotice(env.Type, retryAfter)
+					continue
+				}
 				normalizedMessage, ok := normalizeRoutedEnvelope(env, c.PubKey)
 				if !ok {
 					logEvent("ws_invalid_envelope", map[string]any{
@@ -289,6 +311,92 @@ func (c *Client) readPump() {
 				}()
 			}
 		}
+	}
+}
+
+func (c *Client) allowInboundEvent(eventType string) (bool, int) {
+	now := time.Now()
+	c.antiFloodMu.Lock()
+	defer c.antiFloodMu.Unlock()
+	if !c.antiFloodBlockedUntil.IsZero() && now.Before(c.antiFloodBlockedUntil) {
+		retry := int(c.antiFloodBlockedUntil.Sub(now).Seconds())
+		if retry < 1 {
+			retry = 1
+		}
+		return false, retry
+	}
+
+	if eventType == "typing" {
+		if !c.typingLastSentAt.IsZero() && now.Sub(c.typingLastSentAt) < 900*time.Millisecond {
+			return false, 1
+		}
+		c.typingLastSentAt = now
+		return true, 0
+	}
+
+	category, limit, window := floodPolicyForEvent(eventType)
+	if c.antiFloodWindows == nil {
+		c.antiFloodWindows = make(map[string]floodWindow)
+	}
+	bucket := c.antiFloodWindows[category]
+	if bucket.start.IsZero() || now.Sub(bucket.start) > window {
+		bucket = floodWindow{start: now, count: 0}
+	}
+	bucket.count++
+	c.antiFloodWindows[category] = bucket
+	if bucket.count <= limit {
+		return true, 0
+	}
+	c.antiFloodViolations++
+	retry := int(window.Seconds())
+	if retry < 1 {
+		retry = 1
+	}
+	if c.antiFloodViolations >= 3 {
+		c.antiFloodBlockedUntil = now.Add(30 * time.Second)
+		c.antiFloodViolations = 0
+		return false, 30
+	}
+	return false, retry
+}
+
+func floodPolicyForEvent(eventType string) (category string, limit int, window time.Duration) {
+	switch eventType {
+	case "call_offer", "call_answer", "call_reject", "call_end", "ice_candidate":
+		return "call", 36, 10 * time.Second
+	case "message", "group_message", "channel_message":
+		return "message", 80, 10 * time.Second
+	case "edit", "delete", "reaction", "group_edit", "group_delete", "group_reaction", "channel_edit", "channel_delete", "channel_reaction", "channel_pin":
+		return "interaction", 60, 10 * time.Second
+	default:
+		return "default", 50, 10 * time.Second
+	}
+}
+
+func (c *Client) sendRateLimitNotice(eventType string, retryAfterSec int) {
+	if c == nil {
+		return
+	}
+	message := "Too many actions. Slow down."
+	if retryAfterSec > 1 {
+		message = "Too many actions. Try again shortly."
+	}
+	if retryAfterSec < 1 {
+		retryAfterSec = 1
+	}
+	payload, err := json.Marshal(map[string]any{
+		"type":            "rate_limited",
+		"event":           eventType,
+		"message":         message,
+		"retry_after_sec": retryAfterSec,
+	})
+	if err != nil {
+		return
+	}
+	select {
+	case <-c.ctx.Done():
+	case c.send <- payload:
+	default:
 	}
 }
 
@@ -577,7 +685,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request, globalCtx context
 		return
 	}
 	sessionToken := base64.StdEncoding.EncodeToString(sessionTokenBytes)
-	hub.StoreSessionToken(sessionToken, pubKey)
+	hub.StoreSessionToken(sessionToken, pubKey, r.UserAgent(), r.RemoteAddr)
 
 	if err := conn.WriteJSON(map[string]string{
 		"type":          "auth_success",
