@@ -71,7 +71,6 @@ const loadSettings = () => {
 };
 
 const savedSettings = loadSettings();
-const REMEMBERED_IDENTITY_KEY = 'messenger_remembered_identity';
 
 const normalizeLanguage = (value: unknown): Language => {
   return value === 'ru' || value === 'fr' || value === 'de' || value === 'en' ? value : 'en';
@@ -87,30 +86,6 @@ const normalizeDesignStyle = (value: unknown): DesignStyle => {
 
 const normalizeUiMode = (value: unknown): UiMode => {
   return value === 'next' || value === 'classic' ? value : 'classic';
-};
-
-const loadRememberedIdentity = (): { publicKey: string; secretKey: string } | null => {
-  try {
-    const saved = localStorage.getItem(REMEMBERED_IDENTITY_KEY);
-    if (!saved) {
-      return null;
-    }
-    const parsed = JSON.parse(saved) as Partial<{ publicKey: string; secretKey: string }>;
-    if (typeof parsed.publicKey !== 'string' || typeof parsed.secretKey !== 'string') {
-      return null;
-    }
-    return { publicKey: parsed.publicKey, secretKey: parsed.secretKey };
-  } catch {
-    return null;
-  }
-};
-
-const rememberIdentity = (publicKey: string, secretKey: string) => {
-  localStorage.setItem(REMEMBERED_IDENTITY_KEY, JSON.stringify({ publicKey, secretKey }));
-};
-
-const removeRememberedIdentity = () => {
-  localStorage.removeItem(REMEMBERED_IDENTITY_KEY);
 };
 
 const loadProfileForKey = (publicKey: string): { nickname?: string | null; avatar?: string | null; username?: string | null } | null => {
@@ -149,12 +124,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   uiMode: normalizeUiMode(savedSettings.uiMode),
   language: normalizeLanguage(savedSettings.language),
   isRestoringIdentity: true,
-  isIdentityRemembered: loadRememberedIdentity() !== null,
+  isIdentityRemembered: false,
 
   setKeys: (publicKey, secretKey) => {
     switchActiveDatabase(publicKey);
     setVaultKey(secretKey);
-    rememberIdentity(publicKey, secretKey);
     const savedProfile = loadProfileForKey(publicKey);
     set({
       myPublicKey: publicKey,
@@ -163,7 +137,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       avatar: savedProfile?.avatar ?? null,
       username: savedProfile?.username ?? null,
       isRestoringIdentity: false,
-      isIdentityRemembered: true,
+      isIdentityRemembered: false,
     });
     void persistIdentityKeyPair(publicKey, secretKey).catch((error) => {
       console.error('Failed to persist current identity key pair', error);
@@ -257,37 +231,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   restoreRememberedIdentity: async () => {
-    const identity = loadRememberedIdentity();
-    if (!identity) {
-      set({ isRestoringIdentity: false, isIdentityRemembered: false });
-      return;
-    }
-
-    switchActiveDatabase(identity.publicKey);
-    setVaultKey(identity.secretKey);
-    const savedProfile = loadProfileForKey(identity.publicKey);
-    set({
-      myPublicKey: identity.publicKey,
-      mySecretKey: identity.secretKey,
-      nickname: savedProfile?.nickname ?? savedSettings.nickname ?? null,
-      avatar: savedProfile?.avatar ?? savedSettings.avatar ?? null,
-      username: savedProfile?.username ?? savedSettings.username ?? null,
-      isRestoringIdentity: false,
-      isIdentityRemembered: true,
-    });
-
-    void migrateLocalDataToEncryptedAtRest().catch((error) => {
-      console.error('Failed to migrate local encrypted data', error);
-    });
+    set({ isRestoringIdentity: false, isIdentityRemembered: false });
   },
 
   forgetRememberedIdentity: () => {
-    removeRememberedIdentity();
     set({ isIdentityRemembered: false });
   },
   
   logout: () => {
-    removeRememberedIdentity();
     switchActiveDatabase(null);
     setVaultKey(null);
     set({
@@ -311,6 +262,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
 // Initialize theme on load
 if (typeof document !== 'undefined') {
+  localStorage.removeItem('messenger_remembered_identity');
   document.documentElement.setAttribute('data-theme', normalizeTheme(savedSettings.theme));
   document.documentElement.setAttribute('data-style', normalizeDesignStyle(savedSettings.designStyle));
   document.documentElement.setAttribute('data-ui', normalizeUiMode(savedSettings.uiMode));

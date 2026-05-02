@@ -4,16 +4,15 @@ import { socketManager } from '../lib/socket';
 import { clearThreadStats, db, syncThreadStats, type StoredMessage } from '../lib/db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import Dexie from 'dexie';
-import { Send, ArrowLeft, ShieldCheck, Check, CheckCheck, Trash2, Paperclip, FileIcon, Download, Loader2, Mic, Square, Play, Phone, Video, Pencil, Search, X, Archive, Bell, BellOff, ArrowDownCircle, Users, Crown, WifiOff, Clock3, UserPlus, UserMinus, Shield, Megaphone, Pin, AtSign, Link2 } from 'lucide-react';
+import { ArrowLeft, ShieldCheck, Trash2, Phone, Video, Pencil, Search, X, Archive, Bell, BellOff, ArrowDownCircle, Users, Crown, WifiOff, Clock3, UserPlus, UserMinus, Shield, Megaphone, Pin, AtSign, Link2 } from 'lucide-react';
 import { UserIdentityModal } from '../components/UserIdentityModal';
 import { Sidebar } from '../components/Sidebar';
 import { encryptFile, decryptFile } from '../lib/attachments';
 import { CallOverlay } from '../components/CallOverlay';
-import { VoiceWaveform } from '../components/VoiceWaveform';
 import { toast } from 'react-hot-toast';
 import { appConfig } from '../lib/config';
 import { fetchWithTimeout, toNetworkErrorMessage, UPLOAD_REQUEST_TIMEOUT_MS } from '../lib/http';
-import { encodeRichTextMessage, isMentioningPubKey, parseRichTextMessage, type MessageMention } from '../lib/message-format';
+import { encodeRichTextMessage, isMentioningPubKey, parseRichTextMessage } from '../lib/message-format';
 import { deriveMentionHandle, getPublicKeyFingerprint } from '../lib/identity';
 import { useI18n } from '../lib/i18n';
 import {
@@ -45,25 +44,10 @@ import {
 } from '../lib/community';
 import { decodeBase64 } from 'tweetnacl-util';
 import { useLocation, useNavigate } from 'react-router-dom';
-
-type DownloadFileFn = (url: string, key: string, name: string) => Promise<void>;
-
-type FilePayload = {
-  url: string;
-  key: string;
-  name: string;
-  size: number;
-};
-
-type VoicePayload = {
-  url: string;
-  key: string;
-};
-
-type ParsedMessageContent =
-  | { kind: 'text'; text: string; mentions: MessageMention[] }
-  | { kind: 'file'; payload: FilePayload }
-  | { kind: 'voice'; payload: VoicePayload };
+import { MessageBubble } from '../components/chat/MessageBubble';
+import { fallbackParticipantName, normalizeReactionValue } from '../components/chat/messageUtils';
+import { ChatComposer } from '../components/chat/ChatComposer';
+import type { MentionSuggestion } from '../components/chat/MentionSuggestions';
 
 const MAX_ATTACHMENT_SIZE_BYTES = 75 * 1024 * 1024;
 
@@ -72,75 +56,6 @@ function safeGroupMembers(value: unknown): string[] {
     return [];
   }
   return value.filter((member): member is string => typeof member === 'string' && member.length > 0);
-}
-
-function parseMessageContent(text: string): ParsedMessageContent {
-  if (text.startsWith('{"type":"file"')) {
-    try {
-      return {
-        kind: 'file',
-        payload: JSON.parse(text) as FilePayload,
-      };
-    } catch {
-      return { kind: 'text', text, mentions: [] };
-    }
-  }
-
-  if (text.startsWith('{"type":"voice"')) {
-    try {
-      return {
-        kind: 'voice',
-        payload: JSON.parse(text) as VoicePayload,
-      };
-    } catch {
-      return { kind: 'text', text, mentions: [] };
-    }
-  }
-
-  const parsedRichText = parseRichTextMessage(text);
-  return { kind: 'text', text: parsedRichText.text, mentions: parsedRichText.mentions };
-}
-
-function renderTextWithMentions(text: string, mentions: MessageMention[], onMentionClick?: (pubKey: string) => void) {
-  if (!mentions.length) {
-    return text;
-  }
-
-  const mentionByStart = new Map<number, MessageMention>();
-  mentions.forEach((mention) => mentionByStart.set(mention.start, mention));
-  const parts: React.ReactNode[] = [];
-  let cursor = 0;
-
-  while (cursor < text.length) {
-    const mention = mentionByStart.get(cursor);
-    if (!mention) {
-      let nextCursor = cursor + 1;
-      while (nextCursor < text.length && !mentionByStart.has(nextCursor)) {
-        nextCursor++;
-      }
-      parts.push(text.slice(cursor, nextCursor));
-      cursor = nextCursor;
-      continue;
-    }
-
-    const token = text.slice(mention.start, mention.end);
-    parts.push(
-      <span
-        key={`${mention.start}:${mention.handle}`}
-        className="font-semibold text-cyan-200 cursor-pointer hover:underline"
-        onClick={() => onMentionClick?.(mention.pubKey)}
-      >
-        {token}
-      </span>
-    );
-    cursor = mention.end;
-  }
-
-  return parts;
-}
-
-function fallbackParticipantName(pubKey: string) {
-  return `${pubKey.substring(0, 12)}...`;
 }
 
 async function loadThreadMessages(threadId: string, limit?: number) {
@@ -166,287 +81,8 @@ async function putChannelActivity(
   });
 }
 
-const QUICK_REACTIONS = ['\u{1F44D}', '\u2764\uFE0F', '\u{1F525}'];
-
-const LEGACY_REACTION_MAP: Record<string, string> = {
-  'рџ‘Ќ': '\u{1F44D}',
-  'вќ¤пёЏ': '\u2764\uFE0F',
-  'рџ”Ґ': '\u{1F525}',
-};
-
-function normalizeReactionValue(value: string | null | undefined): string | null {
-  if (!value) return null;
-  return LEGACY_REACTION_MAP[value] ?? value;
-}
 const INITIAL_MESSAGE_RENDER_LIMIT = 120;
 const MESSAGE_RENDER_STEP = 120;
-
-const VoiceMessage = React.memo(({ voiceData, downloadFile }: { voiceData: VoicePayload; downloadFile: DownloadFileFn }) => {
-  const [isPlaying, setIsPlaying] = React.useState(false);
-  const audioRef = React.useRef<HTMLAudioElement | null>(null);
-
-  const togglePlay = async () => {
-    if (isPlaying) {
-      audioRef.current?.pause();
-      setIsPlaying(false);
-      return;
-    }
-
-    if (!audioRef.current) {
-      try {
-        const blob = await decryptFile(voiceData.url, voiceData.key);
-        const url = URL.createObjectURL(blob);
-        audioRef.current = new Audio(url);
-        audioRef.current.onended = () => setIsPlaying(false);
-      } catch {
-        toast.error("Failed to decrypt voice message");
-        return;
-      }
-    }
-
-    await audioRef.current.play();
-    setIsPlaying(true);
-  };
-
-  return (
-    <div className="flex items-center gap-3 p-2 bg-black/10 rounded-2xl min-w-[220px]">
-      <button
-        onClick={togglePlay}
-        className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center text-white hover:bg-white/30 transition-colors"
-      >
-        {isPlaying ? <Square className="w-4 h-4 fill-current" /> : <Play className="w-5 h-5 fill-current ml-1" />}
-      </button>
-      <div className="flex-1">
-        <VoiceWaveform />
-      </div>
-      <button
-        onClick={() => downloadFile(voiceData.url, voiceData.key, 'voice.webm')}
-        className="p-2 text-white/50 hover:text-white transition-colors"
-      >
-        <Download className="w-4 h-4" />
-      </button>
-    </div>
-  );
-});
-
-const MessageBubble = React.memo(({
-  msg,
-  isMine,
-  isGroupMessage,
-  downloadFile,
-  onEdit,
-  onDelete,
-  onReact,
-  canModerate = false,
-  canPin = false,
-  isPinned = false,
-  onPin,
-  onMentionClick,
-  isEditing = false,
-  editDraft = '',
-  onEditDraftChange,
-  onEditSave,
-  onEditCancel
-}: {
-  msg: StoredMessage;
-  isMine: boolean;
-  isGroupMessage?: boolean;
-  downloadFile: DownloadFileFn;
-  onEdit: (msg: StoredMessage) => void;
-  onDelete: (msg: StoredMessage) => void;
-  onReact: (msg: StoredMessage, reaction: string) => void;
-  canModerate?: boolean;
-  canPin?: boolean;
-  isPinned?: boolean;
-  onPin?: (msg: StoredMessage) => void;
-  onMentionClick?: (pubKey: string) => void;
-  isEditing?: boolean;
-  editDraft?: string;
-  onEditDraftChange?: (value: string) => void;
-  onEditSave?: () => void;
-  onEditCancel?: () => void;
-}) => {
-  const isDeleted = Boolean(msg.deletedAt);
-  const reactionEntries = React.useMemo(
-    () =>
-      Object.entries(msg.reactions ?? {})
-        .map(([senderKey, reaction]) => [senderKey, normalizeReactionValue(reaction) ?? reaction] as const),
-    [msg.reactions]
-  );
-  const hasReactions = reactionEntries.length > 0;
-  const parsedContent = React.useMemo(
-    () => parseMessageContent(msg.text),
-    [msg.text]
-  );
-  const formattedTimestamp = React.useMemo(
-    () => new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    [msg.timestamp]
-  );
-
-  const editInputRef = React.useRef<HTMLTextAreaElement | null>(null);
-  React.useEffect(() => {
-    if (!isEditing) return;
-    editInputRef.current?.focus();
-    editInputRef.current?.setSelectionRange(editInputRef.current.value.length, editInputRef.current.value.length);
-  }, [isEditing]);
-
-  return (
-    <div className={`group flex w-full animate-in slide-in-from-bottom-2 duration-300 ${isMine ? 'justify-end' : 'justify-start'}`}>
-      <div className={`
-        max-w-[75%] relative ${
-          isMine
-            ? 'chat-bubble-send'
-            : 'chat-bubble-recv'
-        }
-      `}>
-        {!isDeleted ? (
-          <div className={`absolute -top-9 ${isMine ? 'right-0' : 'left-0'} flex items-center gap-1 rounded-2xl border border-white/10 bg-slate-950/90 px-2 py-1 opacity-0 shadow-xl transition-opacity group-hover:opacity-100`}>
-            {QUICK_REACTIONS.map((reaction) => (
-              <button
-                key={reaction}
-                onClick={() => onReact(msg, reaction)}
-                className="rounded-lg px-1.5 py-1 text-sm transition-colors hover:bg-white/10"
-                type="button"
-              >
-                {reaction}
-              </button>
-            ))}
-            {isMine || canModerate ? (
-              <>
-                <button
-                  type="button"
-                  onClick={() => onEdit(msg)}
-                  className="rounded-lg p-1.5 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
-                >
-                  <Pencil className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onDelete(msg)}
-                  className="rounded-lg p-1.5 text-white/70 transition-colors hover:bg-red-500/20 hover:text-red-300"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </>
-            ) : null}
-            {canPin && onPin ? (
-              <button
-                type="button"
-                onClick={() => onPin(msg)}
-                className={`rounded-lg p-1.5 transition-colors ${isPinned ? 'text-amber-200 hover:bg-amber-400/20' : 'text-white/70 hover:bg-white/10 hover:text-white'}`}
-              >
-                <Pin className="w-3.5 h-3.5" />
-              </button>
-            ) : null}
-          </div>
-        ) : null}
-        <div className="text-[15px] leading-relaxed break-words whitespace-pre-wrap">
-          {isDeleted ? (
-            <span className="italic text-white/50">Message deleted</span>
-          ) : parsedContent.kind === 'file' ? (
-            <div className="flex flex-col gap-2">
-              <div
-                className="flex items-center gap-3 p-3 bg-black/10 rounded-xl border border-white/5 group cursor-pointer"
-                onClick={() => downloadFile(parsedContent.payload.url, parsedContent.payload.key, parsedContent.payload.name)}
-              >
-                <div className="w-10 h-10 rounded-lg bg-white/10 flex items-center justify-center text-white/80">
-                  <FileIcon className="w-5 h-5" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium truncate">{parsedContent.payload.name}</p>
-                  <p className="text-[10px] opacity-60">{(parsedContent.payload.size / 1024).toFixed(1)} KB</p>
-                </div>
-                <Download className="w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity" />
-              </div>
-            </div>
-          ) : parsedContent.kind === 'voice' ? (
-            <VoiceMessage voiceData={parsedContent.payload} downloadFile={downloadFile} />
-          ) : isEditing ? (
-            <div className="space-y-2">
-              <textarea
-                ref={editInputRef}
-                value={editDraft ?? ''}
-                onChange={(e) => onEditDraftChange?.(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Escape') {
-                    e.preventDefault();
-                    onEditCancel?.();
-                  }
-                  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-                    e.preventDefault();
-                    onEditSave?.();
-                  }
-                }}
-                className="w-full min-h-[80px] rounded-xl border border-white/15 bg-black/20 px-3 py-2 text-[14px] outline-none"
-              />
-              <div className="flex justify-end gap-2">
-                <button type="button" onClick={onEditCancel} className="rounded-lg border border-white/20 px-3 py-1.5 text-xs">Cancel</button>
-                <button type="button" onClick={onEditSave} className="rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-xs text-white">Save</button>
-              </div>
-            </div>
-          ) : (
-            renderTextWithMentions(parsedContent.text, parsedContent.mentions, onMentionClick)
-          )}
-        </div>
-        {hasReactions ? (
-          <div className="mt-2 flex flex-wrap gap-1">
-            {reactionEntries.map(([senderKey, reaction]) => (
-              <button
-                key={`${msg.msgId}-${senderKey}`}
-                type="button"
-                onClick={() => onReact(msg, normalizeReactionValue(reaction) ?? reaction)}
-                className="rounded-full border border-white/10 bg-black/15 px-2 py-0.5 text-xs text-white/80 transition-colors hover:bg-black/25"
-              >
-                {normalizeReactionValue(reaction) ?? reaction}
-              </button>
-            ))}
-          </div>
-        ) : null}
-        <div className="flex items-center justify-end gap-1 mt-2 opacity-60">
-          {msg.editedAt && !msg.deletedAt ? (
-            <span className="text-[10px] font-medium">
-              {msg.editedBy && msg.editedBy !== msg.senderPublicKey ? 'edited by moderator' : 'edited'}
-            </span>
-          ) : null}
-          {msg.editedAt && !msg.deletedAt ? (
-            <span className="text-[10px] font-medium">
-              {new Date(msg.editedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-            </span>
-          ) : null}
-          {msg.deletedAt && msg.deletedBy && msg.deletedBy !== msg.senderPublicKey ? (
-            <span className="text-[10px] font-medium">removed by moderator</span>
-          ) : null}
-          <span className="text-[10px] font-medium">
-            {formattedTimestamp}
-          </span>
-          {isMine && (
-            <span className="flex items-center gap-1.5 flex-shrink-0">
-              <span className="text-[10px] font-medium uppercase tracking-wide">
-                {msg.status === 'pending'
-                  ? 'pending'
-                  : msg.status === 'read' && !isGroupMessage
-                    ? 'read'
-                    : msg.status === 'delivered'
-                      ? (isGroupMessage ? 'distributed' : 'delivered')
-                      : 'sent'}
-              </span>
-              {msg.status === 'pending' ? (
-                <Clock3 className="w-3.5 h-3.5 text-amber-200" />
-              ) : msg.status === 'read' && !isGroupMessage ? (
-                <CheckCheck className="w-3.5 h-3.5 text-emerald-300" />
-              ) : msg.status === 'delivered' ? (
-                <CheckCheck className="w-3.5 h-3.5 text-blue-200" />
-              ) : (
-                <Check className="w-3 h-3" />
-              )}
-            </span>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-});
-
 export const Chat: React.FC = () => {
   const {
     myPublicKey,
@@ -664,7 +300,7 @@ export const Chat: React.FC = () => {
     }, {});
   }, [relevantParticipantKeys.join('|')]);
   const mentionCandidates = React.useMemo(() => {
-    const candidates: Array<{ pubKey: string; displayName: string; handle: string }> = [];
+    const candidates: MentionSuggestion[] = [];
     const seenPubKeys = new Set<string>();
     const takenHandles = new Set<string>();
 
@@ -956,8 +592,7 @@ export const Chat: React.FC = () => {
     }
   }, [applyMentionSuggestion, closeMentionMenu, isMentionMenuOpen, mentionSelectionIndex, mentionSuggestions]);
 
-  const handleSendMessage = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const submitCurrentMessage = React.useCallback(async () => {
     if (!messageInput.trim() || !myPublicKey) return;
 
     const plaintext = encodeRichTextMessage(messageInput.trim(), mentionHandleDirectory);
@@ -983,7 +618,22 @@ export const Chat: React.FC = () => {
       console.error("Failed to send", err);
       toast.error(err instanceof Error ? err.message : "Failed to send message");
     }
-  };
+  }, [activeChannelId, activeGroupId, activePeerKey, activeThreadId, closeMentionMenu, mentionHandleDirectory, messageInput, myPublicKey, mySecretKey]);
+
+  const handleSendMessage = React.useCallback((e: React.FormEvent) => {
+    e.preventDefault();
+    void submitCurrentMessage();
+  }, [submitCurrentMessage]);
+
+  const handleDirectTyping = React.useCallback((nextValue: string) => {
+    if (activePeerKey && myPublicKey && nextValue.trim()) {
+      const now = Date.now();
+      if (now - lastTypingSentRef.current > 1500) {
+        socketManager.sendTyping(activePeerKey, myPublicKey);
+        lastTypingSentRef.current = now;
+      }
+    }
+  }, [activePeerKey, myPublicKey]);
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -2216,90 +1866,28 @@ export const Chat: React.FC = () => {
             ) : null}
 
             <div className="chat-composer premium-glass border-t border-white/5 bg-transparent p-3 sm:p-6">
-              <form onSubmit={handleSendMessage} className="mx-auto flex max-w-5xl items-end gap-2 sm:gap-3">
-                <input type="file" className="hidden" ref={fileInputRef} onChange={handleFileChange} />
-
-                <div className="composer-input relative flex flex-1 items-end gap-2 rounded-2xl border border-white/10 bg-white/5 p-2 transition-all focus-within:border-accent/40 focus-within:bg-white/10">
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={isUploading}
-                    className="p-2 text-text-muted hover:text-white transition-colors"
-                    aria-label="Attach file"
-                  >
-                    {isUploading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Paperclip className="w-5 h-5" />}
-                  </button>
-
-                  <textarea
-                    ref={messageInputRef}
-                    value={messageInput}
-                    onChange={(e) => {
-                      const nextValue = e.target.value;
-                      handleComposerChange(nextValue, e.target.selectionStart ?? nextValue.length);
-                      if (activePeerKey && myPublicKey && nextValue.trim()) {
-                        const now = Date.now();
-                        if (now - lastTypingSentRef.current > 1500) {
-                          socketManager.sendTyping(activePeerKey, myPublicKey);
-                          lastTypingSentRef.current = now;
-                        }
-                      }
-                    }}
-                    placeholder={isRecording ? "Listening..." : "Message..."}
-                    className="min-h-[44px] max-h-32 flex-1 resize-none border-none bg-transparent px-2 py-2.5 text-[15px] outline-none focus:ring-0"
-                    aria-label="Message input"
-                    onKeyDown={(e) => {
-                      handleComposerKeyDown(e);
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        if (!isMentionMenuOpen) {
-                          handleSendMessage(e);
-                        }
-                      }
-                    }}
-                  />
-                  {isMentionMenuOpen ? (
-                    <div className="absolute bottom-16 left-16 z-30 w-64 rounded-2xl border border-white/15 bg-slate-950/95 p-2 shadow-2xl backdrop-blur">
-                      {mentionSuggestions.map((candidate, index) => (
-                        <button
-                          key={candidate.pubKey}
-                          type="button"
-                          onClick={() => applyMentionSuggestion(candidate)}
-                          className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm transition-all ${
-                            mentionSelectionIndex === index
-                              ? 'bg-accent/20 text-white'
-                              : 'text-text-muted hover:bg-white/10 hover:text-white'
-                          }`}
-                        >
-                          <span className="truncate">{candidate.displayName}</span>
-                          <span className="ml-2 font-mono text-[11px] text-accent">@{candidate.handle}</span>
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-
-                  {!messageInput.trim() && !isUploading && (
-                    <button
-                      type="button"
-                      onClick={isRecording ? stopRecording : startRecording}
-                      className={`p-2.5 rounded-xl transition-all ${isRecording ? 'bg-red-500 text-white animate-pulse' : 'text-text-muted hover:text-accent'}`}
-                      aria-label={isRecording ? 'Stop voice recording' : 'Start voice recording'}
-                    >
-                      {isRecording ? <Square className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-                    </button>
-                  )}
-                </div>
-
-                {messageInput.trim() || isUploading ? (
-                  <button
-                    type="submit"
-                    disabled={isUploading}
-                    className="btn-premium h-11 w-11 rounded-2xl flex-shrink-0 sm:h-12 sm:w-12"
-                    aria-label="Send message"
-                  >
-                    <Send className="w-5 h-5" />
-                  </button>
-                ) : null}
-              </form>
+              <ChatComposer
+                onSubmit={handleSendMessage}
+                onSubmitShortcut={submitCurrentMessage}
+                fileInputRef={fileInputRef}
+                onFileChange={handleFileChange}
+                isUploading={isUploading}
+                messageInputRef={messageInputRef}
+                messageInput={messageInput}
+                onMessageChange={handleComposerChange}
+                onTypingChange={handleDirectTyping}
+                placeholder="Message..."
+                inputAriaLabel="Message input"
+                onTextareaKeyDown={handleComposerKeyDown}
+                mentionSuggestions={mentionSuggestions}
+                mentionSelectionIndex={mentionSelectionIndex}
+                isMentionMenuOpen={isMentionMenuOpen}
+                onMentionSelect={applyMentionSuggestion}
+                isRecording={isRecording}
+                onToggleRecording={() => void (isRecording ? stopRecording() : startRecording())}
+                attachAriaLabel="Attach file"
+                sendAriaLabel="Send message"
+              />
             </div>
           </>
         ) : activeGroup ? (
@@ -2443,80 +2031,27 @@ export const Chat: React.FC = () => {
                 </div>
 
                 <div className="chat-composer premium-glass border-t border-white/5 bg-transparent p-3 sm:p-6">
-                  <form onSubmit={handleSendMessage} className="mx-auto flex max-w-5xl items-end gap-2 sm:gap-3">
-                    <input type="file" className="hidden" ref={fileInputRef} onChange={handleFileChange} />
-                    <div className="composer-input relative flex flex-1 items-end gap-2 rounded-2xl border border-white/10 bg-white/5 p-2 transition-all focus-within:border-accent/40 focus-within:bg-white/10">
-                      <button
-                        type="button"
-                        onClick={() => fileInputRef.current?.click()}
-                        disabled={isUploading}
-                        className="p-2 text-text-muted hover:text-white transition-colors"
-                        aria-label="Attach file to group"
-                      >
-                        {isUploading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Paperclip className="w-5 h-5" />}
-                      </button>
-                      <textarea
-                        ref={messageInputRef}
-                        value={messageInput}
-                        onChange={(e) => {
-                          const nextValue = e.target.value;
-                          handleComposerChange(nextValue, e.target.selectionStart ?? nextValue.length);
-                        }}
-                        placeholder="Message the group..."
-                        className="min-h-[44px] max-h-32 flex-1 resize-none border-none bg-transparent px-2 py-2.5 text-[15px] outline-none focus:ring-0"
-                        aria-label="Group message input"
-                        onKeyDown={(e) => {
-                          handleComposerKeyDown(e);
-                          if (e.key === 'Enter' && !e.shiftKey) {
-                            e.preventDefault();
-                            if (!isMentionMenuOpen) {
-                              void handleSendMessage(e);
-                            }
-                          }
-                        }}
-                      />
-                      {isMentionMenuOpen ? (
-                        <div className="absolute bottom-16 left-16 z-30 w-64 rounded-2xl border border-white/15 bg-slate-950/95 p-2 shadow-2xl backdrop-blur">
-                          {mentionSuggestions.map((candidate, index) => (
-                            <button
-                              key={candidate.pubKey}
-                              type="button"
-                              onClick={() => applyMentionSuggestion(candidate)}
-                              className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm transition-all ${
-                                mentionSelectionIndex === index
-                                  ? 'bg-accent/20 text-white'
-                                  : 'text-text-muted hover:bg-white/10 hover:text-white'
-                              }`}
-                            >
-                              <span className="truncate">{candidate.displayName}</span>
-                              <span className="ml-2 font-mono text-[11px] text-accent">@{candidate.handle}</span>
-                            </button>
-                          ))}
-                        </div>
-                      ) : null}
-                      {!messageInput.trim() && !isUploading && (
-                        <button
-                          type="button"
-                          onClick={isRecording ? stopRecording : startRecording}
-                          className={`p-2.5 rounded-xl transition-all ${isRecording ? 'bg-red-500 text-white animate-pulse' : 'text-text-muted hover:text-accent'}`}
-                          aria-label={isRecording ? 'Stop voice recording' : 'Start voice recording'}
-                        >
-                          {isRecording ? <Square className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-                        </button>
-                      )}
-                    </div>
-
-                    {messageInput.trim() || isUploading ? (
-                      <button
-                        type="submit"
-                        disabled={isUploading}
-                        className="btn-premium h-11 w-11 rounded-2xl flex-shrink-0 sm:h-12 sm:w-12"
-                        aria-label="Send group message"
-                      >
-                        <Send className="w-5 h-5" />
-                      </button>
-                    ) : null}
-                  </form>
+                  <ChatComposer
+                    onSubmit={handleSendMessage}
+                    onSubmitShortcut={submitCurrentMessage}
+                    fileInputRef={fileInputRef}
+                    onFileChange={handleFileChange}
+                    isUploading={isUploading}
+                    messageInputRef={messageInputRef}
+                    messageInput={messageInput}
+                    onMessageChange={handleComposerChange}
+                    placeholder="Message the group..."
+                    inputAriaLabel="Group message input"
+                    onTextareaKeyDown={handleComposerKeyDown}
+                    mentionSuggestions={mentionSuggestions}
+                    mentionSelectionIndex={mentionSelectionIndex}
+                    isMentionMenuOpen={isMentionMenuOpen}
+                    onMentionSelect={applyMentionSuggestion}
+                    isRecording={isRecording}
+                    onToggleRecording={() => void (isRecording ? stopRecording() : startRecording())}
+                    attachAriaLabel="Attach file to group"
+                    sendAriaLabel="Send group message"
+                  />
                 </div>
               </div>
 
@@ -2756,80 +2291,28 @@ export const Chat: React.FC = () => {
 
                 <div className="chat-composer premium-glass border-t border-white/5 bg-transparent p-3 sm:p-6">
                   {canPostInChannel ? (
-                    <form onSubmit={handleSendMessage} className="mx-auto flex max-w-5xl items-end gap-2 sm:gap-3">
-                      <input type="file" className="hidden" ref={fileInputRef} onChange={handleFileChange} />
-                      <div className="composer-input relative flex flex-1 items-end gap-2 rounded-2xl border border-white/10 bg-white/5 p-2 transition-all focus-within:border-violet-300/40 focus-within:bg-white/10">
-                        <button
-                          type="button"
-                          onClick={() => fileInputRef.current?.click()}
-                          disabled={isUploading}
-                          className="p-2 text-text-muted hover:text-white transition-colors"
-                          aria-label="Attach file to channel"
-                        >
-                          {isUploading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Paperclip className="w-5 h-5" />}
-                        </button>
-                        <textarea
-                          ref={messageInputRef}
-                          value={messageInput}
-                          onChange={(e) => {
-                            const nextValue = e.target.value;
-                            handleComposerChange(nextValue, e.target.selectionStart ?? nextValue.length);
-                          }}
-                          placeholder="Publish an update..."
-                          className="min-h-[44px] max-h-32 flex-1 resize-none border-none bg-transparent px-2 py-2.5 text-[15px] outline-none focus:ring-0"
-                          aria-label="Channel post input"
-                          onKeyDown={(e) => {
-                            handleComposerKeyDown(e);
-                            if (e.key === 'Enter' && !e.shiftKey) {
-                              e.preventDefault();
-                              if (!isMentionMenuOpen) {
-                                void handleSendMessage(e);
-                              }
-                            }
-                          }}
-                        />
-                        {isMentionMenuOpen ? (
-                          <div className="absolute bottom-16 left-16 z-30 w-64 rounded-2xl border border-white/15 bg-slate-950/95 p-2 shadow-2xl backdrop-blur">
-                            {mentionSuggestions.map((candidate, index) => (
-                              <button
-                                key={candidate.pubKey}
-                                type="button"
-                                onClick={() => applyMentionSuggestion(candidate)}
-                                className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm transition-all ${
-                                  mentionSelectionIndex === index
-                                    ? 'bg-accent/20 text-white'
-                                    : 'text-text-muted hover:bg-white/10 hover:text-white'
-                                }`}
-                              >
-                                <span className="truncate">{candidate.displayName}</span>
-                                <span className="ml-2 font-mono text-[11px] text-accent">@{candidate.handle}</span>
-                              </button>
-                            ))}
-                          </div>
-                        ) : null}
-                        {!messageInput.trim() && !isUploading && (
-                          <button
-                            type="button"
-                            onClick={isRecording ? stopRecording : startRecording}
-                            className={`p-2.5 rounded-xl transition-all ${isRecording ? 'bg-red-500 text-white animate-pulse' : 'text-text-muted hover:text-violet-200'}`}
-                            aria-label={isRecording ? 'Stop voice recording' : 'Start voice recording'}
-                          >
-                            {isRecording ? <Square className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-                          </button>
-                        )}
-                      </div>
-
-                      {messageInput.trim() || isUploading ? (
-                        <button
-                          type="submit"
-                          disabled={isUploading}
-                          className="btn-premium h-11 w-11 rounded-2xl flex-shrink-0 sm:h-12 sm:w-12"
-                          aria-label="Publish channel post"
-                        >
-                          <Send className="w-5 h-5" />
-                        </button>
-                      ) : null}
-                    </form>
+                    <ChatComposer
+                      onSubmit={handleSendMessage}
+                      onSubmitShortcut={submitCurrentMessage}
+                      fileInputRef={fileInputRef}
+                      onFileChange={handleFileChange}
+                      isUploading={isUploading}
+                      messageInputRef={messageInputRef}
+                      messageInput={messageInput}
+                      onMessageChange={handleComposerChange}
+                      placeholder="Publish an update..."
+                      inputAriaLabel="Channel post input"
+                      onTextareaKeyDown={handleComposerKeyDown}
+                      mentionSuggestions={mentionSuggestions}
+                      mentionSelectionIndex={mentionSelectionIndex}
+                      isMentionMenuOpen={isMentionMenuOpen}
+                      onMentionSelect={applyMentionSuggestion}
+                      isRecording={isRecording}
+                      onToggleRecording={() => void (isRecording ? stopRecording() : startRecording())}
+                      attachAriaLabel="Attach file to channel"
+                      sendAriaLabel="Publish channel post"
+                      accentTone="violet"
+                    />
                   ) : (
                     <div className="mx-auto max-w-4xl rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-text-muted">
                       This channel is read-only for your current role. Ask an owner to promote you to `poster` or `admin` if you need to publish updates.

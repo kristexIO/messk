@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"log"
@@ -90,6 +91,9 @@ func (h *Hub) addClientSession(client *Client) bool {
 		return false
 	}
 
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	sessions := h.clients[client.PubKey]
 	if sessions == nil {
 		sessions = make(map[*Client]struct{})
@@ -105,6 +109,9 @@ func (h *Hub) removeClientSession(client *Client) bool {
 		return false
 	}
 
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	sessions, ok := h.clients[client.PubKey]
 	if !ok {
 		return false
@@ -118,13 +125,20 @@ func (h *Hub) removeClientSession(client *Client) bool {
 }
 
 func (h *Hub) deliverToPubKey(pubKey string, payload []byte, slowReason string) bool {
+	h.mu.RLock()
 	sessions, ok := h.clients[pubKey]
 	if !ok || len(sessions) == 0 {
+		h.mu.RUnlock()
 		return false
 	}
+	targets := make([]*Client, 0, len(sessions))
+	for client := range sessions {
+		targets = append(targets, client)
+	}
+	h.mu.RUnlock()
 
 	delivered := false
-	for client := range sessions {
+	for _, client := range targets {
 		select {
 		case client.send <- payload:
 			delivered = true
@@ -412,19 +426,86 @@ func (h *Hub) dropClient(client *Client, reason string) {
 	client.cancel()
 }
 
+func (h *Hub) disconnectSessionClients(pubKey, token string) {
+	if token == "" {
+		return
+	}
+
+	h.mu.RLock()
+	sessions := h.clients[pubKey]
+	if len(sessions) == 0 {
+		h.mu.RUnlock()
+		return
+	}
+	targets := make([]*Client, 0, len(sessions))
+	for client := range sessions {
+		if client != nil && client.Token == token {
+			targets = append(targets, client)
+		}
+	}
+	h.mu.RUnlock()
+
+	for _, client := range targets {
+		client.requestDrop("session revoked")
+	}
+}
+
+func (h *Hub) disconnectAllOtherSessionClients(pubKey, exceptToken string) int {
+	if pubKey == "" {
+		return 0
+	}
+
+	h.mu.RLock()
+	sessions := h.clients[pubKey]
+	if len(sessions) == 0 {
+		h.mu.RUnlock()
+		return 0
+	}
+	targets := make([]*Client, 0, len(sessions))
+	for client := range sessions {
+		if client != nil && client.Token != "" && client.Token != exceptToken {
+			targets = append(targets, client)
+		}
+	}
+	h.mu.RUnlock()
+
+	for _, client := range targets {
+		client.requestDrop("all other sessions revoked")
+	}
+	return len(targets)
+}
+
 func (h *Hub) StoreSessionToken(token, pubKey, userAgent, remoteIP string) {
 	if token == "" || pubKey == "" {
 		return
 	}
 	now := time.Now()
-	h.sessionTokens.Store(token, sessionTokenEntry{
+	entry := sessionTokenEntry{
 		PubKey:    pubKey,
 		ExpiresAt: now.Add(getSessionTokenTTL()),
 		CreatedAt: now,
 		LastSeen:  now,
 		UserAgent: userAgent,
 		RemoteIP:  remoteIP,
-	})
+	}
+	h.sessionTokens.Store(token, entry)
+	if h.db != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := h.db.SaveSessionToken(ctx, SessionTokenRecord{
+				Token:     token,
+				PubKey:    entry.PubKey,
+				CreatedAt: entry.CreatedAt,
+				LastSeen:  entry.LastSeen,
+				ExpiresAt: entry.ExpiresAt,
+				UserAgent: entry.UserAgent,
+				RemoteIP:  entry.RemoteIP,
+			}); err != nil {
+				log.Printf("Failed to persist session token for %s: %v", pubKey, err)
+			}
+		}()
+	}
 }
 
 func (h *Hub) DeleteSessionToken(token string) {
@@ -432,17 +513,46 @@ func (h *Hub) DeleteSessionToken(token string) {
 		return
 	}
 	h.sessionTokens.Delete(token)
+	if h.db != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := h.db.DeleteSessionToken(ctx, token); err != nil {
+				log.Printf("Failed to delete session token %s: %v", token, err)
+			}
+		}()
+	}
 }
 
 func (h *Hub) ValidateSessionToken(token string) (string, bool) {
 	if token == "" {
 		return "", false
 	}
-	pubKey, ok := h.sessionTokens.Load(token)
+	stored, ok := h.sessionTokens.Load(token)
+	if !ok && h.db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		record, err := h.db.GetSessionToken(ctx, token)
+		if err == nil {
+			stored = sessionTokenEntry{
+				PubKey:    record.PubKey,
+				ExpiresAt: record.ExpiresAt,
+				CreatedAt: record.CreatedAt,
+				LastSeen:  record.LastSeen,
+				UserAgent: record.UserAgent,
+				RemoteIP:  record.RemoteIP,
+			}
+			h.sessionTokens.Store(token, stored)
+			ok = true
+		} else if err != sql.ErrNoRows {
+			log.Printf("Failed to load session token %s: %v", token, err)
+			return "", false
+		}
+	}
 	if !ok {
 		return "", false
 	}
-	entry, ok := pubKey.(sessionTokenEntry)
+	entry, ok := stored.(sessionTokenEntry)
 	if !ok || entry.PubKey == "" {
 		h.sessionTokens.Delete(token)
 		return "", false
@@ -454,6 +564,15 @@ func (h *Hub) ValidateSessionToken(token string) (string, bool) {
 	}
 	entry.LastSeen = time.Now()
 	h.sessionTokens.Store(token, entry)
+	if h.db != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := h.db.TouchSessionToken(ctx, token, entry.LastSeen); err != nil {
+				log.Printf("Failed to update session activity for %s: %v", token, err)
+			}
+		}()
+	}
 	return entry.PubKey, true
 }
 
@@ -462,6 +581,38 @@ func (h *Hub) ListSessions(pubKey string) []map[string]any {
 	if pubKey == "" {
 		return out
 	}
+	if h.db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		records, err := h.db.ListSessionTokens(ctx, pubKey)
+		if err == nil {
+			now := time.Now()
+			for _, record := range records {
+				if now.After(record.ExpiresAt) {
+					continue
+				}
+				h.sessionTokens.Store(record.Token, sessionTokenEntry{
+					PubKey:    record.PubKey,
+					CreatedAt: record.CreatedAt,
+					LastSeen:  record.LastSeen,
+					ExpiresAt: record.ExpiresAt,
+					UserAgent: record.UserAgent,
+					RemoteIP:  record.RemoteIP,
+				})
+				out = append(out, map[string]any{
+					"token":     record.Token,
+					"createdAt": record.CreatedAt.UTC().Format(time.RFC3339),
+					"lastSeen":  record.LastSeen.UTC().Format(time.RFC3339),
+					"expiresAt": record.ExpiresAt.UTC().Format(time.RFC3339),
+					"userAgent": record.UserAgent,
+					"remoteIp":  record.RemoteIP,
+				})
+			}
+			return out
+		}
+		log.Printf("Failed to list persisted sessions for %s: %v", pubKey, err)
+	}
+
 	now := time.Now()
 	h.sessionTokens.Range(func(key, value any) bool {
 		token, ok := key.(string)
@@ -494,6 +645,23 @@ func (h *Hub) RevokeSessionTokenForUser(pubKey, token string) bool {
 		return false
 	}
 	stored, ok := h.sessionTokens.Load(token)
+	if !ok && h.db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		record, err := h.db.GetSessionToken(ctx, token)
+		if err == nil {
+			stored = sessionTokenEntry{
+				PubKey:    record.PubKey,
+				ExpiresAt: record.ExpiresAt,
+				CreatedAt: record.CreatedAt,
+				LastSeen:  record.LastSeen,
+				UserAgent: record.UserAgent,
+				RemoteIP:  record.RemoteIP,
+			}
+			h.sessionTokens.Store(token, stored)
+			ok = true
+		}
+	}
 	if !ok {
 		return false
 	}
@@ -502,6 +670,15 @@ func (h *Hub) RevokeSessionTokenForUser(pubKey, token string) bool {
 		return false
 	}
 	h.sessionTokens.Delete(token)
+	if h.db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := h.db.DeleteSessionToken(ctx, token); err != nil {
+			log.Printf("Failed to revoke session token %s: %v", token, err)
+			return false
+		}
+	}
+	h.disconnectSessionClients(pubKey, token)
 	return true
 }
 
@@ -523,6 +700,19 @@ func (h *Hub) RevokeAllSessionTokensForUser(pubKey, exceptToken string) int {
 		revoked++
 		return true
 	})
+	if h.db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if deleted, err := h.db.DeleteAllSessionTokensForUser(ctx, pubKey, exceptToken); err != nil {
+			log.Printf("Failed to revoke persisted sessions for %s: %v", pubKey, err)
+		} else if int(deleted) > revoked {
+			revoked = int(deleted)
+		}
+	}
+	disconnected := h.disconnectAllOtherSessionClients(pubKey, exceptToken)
+	if disconnected > revoked {
+		revoked = disconnected
+	}
 	return revoked
 }
 
@@ -530,10 +720,20 @@ func (h *Hub) StoreFileToken(token, filename string) {
 	if token == "" || filename == "" {
 		return
 	}
-	h.fileTokens.Store(token, fileTokenEntry{
+	entry := fileTokenEntry{
 		Filename:  filename,
 		ExpiresAt: time.Now().Add(getFileTokenTTL()),
-	})
+	}
+	h.fileTokens.Store(token, entry)
+	if h.db != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := h.db.SaveFileToken(ctx, token, filename, entry.ExpiresAt); err != nil {
+				log.Printf("Failed to persist file token for %s: %v", filename, err)
+			}
+		}()
+	}
 }
 
 func (h *Hub) StoreFileAccess(filename string, allowedPubKeys ...string) {
@@ -553,6 +753,16 @@ func (h *Hub) StoreFileAccess(filename string, allowedPubKeys ...string) {
 		Filename:       filename,
 		AllowedPubKeys: allowed,
 	})
+	if h.db != nil {
+		allowedPubKeysCopy := append([]string(nil), allowedPubKeys...)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := h.db.ReplaceFileAccess(ctx, filename, allowedPubKeysCopy); err != nil {
+				log.Printf("Failed to persist file access for %s: %v", filename, err)
+			}
+		}()
+	}
 }
 
 func (h *Hub) ValidateFileAccess(filename, pubKey string) bool {
@@ -561,16 +771,38 @@ func (h *Hub) ValidateFileAccess(filename, pubKey string) bool {
 	}
 
 	storedEntry, ok := h.fileAccess.Load(filename)
-	if !ok {
+	if ok {
+		entry, ok := storedEntry.(fileAccessEntry)
+		if ok {
+			if _, allowed := entry.AllowedPubKeys[pubKey]; allowed {
+				return true
+			}
+		}
+	}
+	if h.db == nil {
 		return false
 	}
-
-	entry, ok := storedEntry.(fileAccessEntry)
-	if !ok {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	allowed, err := h.db.HasFileAccess(ctx, filename, pubKey)
+	if err != nil {
+		log.Printf("Failed to validate persisted file access for %s/%s: %v", filename, pubKey, err)
 		return false
 	}
-
-	_, allowed := entry.AllowedPubKeys[pubKey]
+	if allowed {
+		allowedPubKeys := map[string]struct{}{pubKey: {}}
+		if ok {
+			if entry, entryOK := storedEntry.(fileAccessEntry); entryOK {
+				for allowedPubKey := range entry.AllowedPubKeys {
+					allowedPubKeys[allowedPubKey] = struct{}{}
+				}
+			}
+		}
+		h.fileAccess.Store(filename, fileAccessEntry{
+			Filename:       filename,
+			AllowedPubKeys: allowedPubKeys,
+		})
+	}
 	return allowed
 }
 
@@ -579,6 +811,21 @@ func (h *Hub) ValidateFileToken(token, filename string) bool {
 		return false
 	}
 	storedFilename, ok := h.fileTokens.Load(token)
+	if !ok && h.db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		record, err := h.db.GetFileToken(ctx, token)
+		if err == nil {
+			storedFilename = fileTokenEntry{
+				Filename:  record.Filename,
+				ExpiresAt: record.ExpiresAt,
+			}
+			h.fileTokens.Store(token, storedFilename)
+			ok = true
+		} else if err != sql.ErrNoRows {
+			log.Printf("Failed to load file token %s: %v", token, err)
+		}
+	}
 	if !ok {
 		return false
 	}
@@ -590,6 +837,13 @@ func (h *Hub) ValidateFileToken(token, filename string) bool {
 	if time.Now().After(entry.ExpiresAt) {
 		h.fileTokens.Delete(token)
 		logEvent("file_token_expired", map[string]any{"filename": entry.Filename})
+		if h.db != nil {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = h.db.DeleteFileToken(ctx, token)
+			}()
+		}
 		return false
 	}
 	return entry.Filename == filename
@@ -611,4 +865,16 @@ func (h *Hub) cleanupExpiredTokens(now time.Time) {
 		}
 		return true
 	})
+	if h.db != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := h.db.CleanupExpiredSessionTokens(ctx, now); err != nil {
+				log.Printf("Failed to cleanup persisted session tokens: %v", err)
+			}
+			if err := h.db.CleanupExpiredFileTokens(ctx, now); err != nil {
+				log.Printf("Failed to cleanup persisted file tokens: %v", err)
+			}
+		}()
+	}
 }

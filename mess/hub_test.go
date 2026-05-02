@@ -332,3 +332,22 @@ func TestDropClientRemovesSessionToken(t *testing.T) {
 		t.Fatal("expected client map entry to be removed after final session drop")
 	}
 }
+
+func TestRevokeSessionTokenDisconnectsMatchingClient(t *testing.T) {
+	hub := NewHub(nil, InitCache(), nil)
+	client := newTestClient("sender")
+	client.Token = "session-token"
+	client.hub = hub
+	setTestClient(hub, client)
+	hub.StoreSessionToken(client.Token, client.PubKey, "test-agent", "127.0.0.1")
+
+	if !hub.RevokeSessionTokenForUser(client.PubKey, client.Token) {
+		t.Fatal("expected session revoke to succeed")
+	}
+
+	select {
+	case <-client.ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("expected revoked client to be disconnected")
+	}
+}

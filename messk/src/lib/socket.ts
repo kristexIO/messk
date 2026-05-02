@@ -1,15 +1,55 @@
 import { useAppStore } from '../store';
 import { decryptMessage, encryptMessage, x3dhInitiate, x3dhRespond } from './crypto';
 import { RatchetManager, type RatchetMessage } from './ratchet';
-import { db, syncThreadStats, type ChannelActivityEntry, type OutgoingDirectMessage, type OutgoingGroupEvent, type Session, type StoredMessage } from './db';
+import { db, type OutgoingDirectMessage, type OutgoingGroupEvent, type Session, type StoredMessage } from './db';
 import { box, randomBytes, secretbox } from 'tweetnacl';
 import { decodeBase64, encodeBase64 } from 'tweetnacl-util';
 import { sendDesktopNotification } from './notifications';
 import { appConfig } from './config';
 import { toast } from 'react-hot-toast';
-import { fetchWithTimeout } from './http';
 import { getMessageNotificationPreview, isMentioningPubKey } from './message-format';
-import { refreshGroupAvailability, syncGroups } from './community';
+import { refreshGroupAvailability } from './community';
+import { SocketApiClient, type ResolvedUserProfile, type SessionListResponse } from './socketApi';
+import {
+  addMessageAndSync,
+  applyMessageReaction,
+  markMessageDeleted,
+  markMessageEdited,
+  updateMessageAndSync,
+  updateMessageByMsgID,
+} from './socketMessageStore';
+import {
+  applyOptimisticChannelDelete,
+  applyOptimisticChannelEdit,
+  applyOptimisticChannelReaction,
+  applyOptimisticGroupDelete,
+  applyOptimisticGroupEdit,
+  applyOptimisticGroupReaction,
+  handleIncomingChannelDelete as handleIncomingChannelDeleteEvent,
+  handleIncomingChannelEdit as handleIncomingChannelEditEvent,
+  handleIncomingChannelMessage as handleIncomingChannelMessageEvent,
+  handleIncomingChannelPin as handleIncomingChannelPinEvent,
+  handleIncomingChannelReaction as handleIncomingChannelReactionEvent,
+} from './socketCommunity';
+import { type IncomingEnvelope, type X3DHParams } from './socketTypes';
+import {
+  enqueueOutgoingDirectMessage,
+  enqueueOutgoingGroupEvent,
+  markDirectAttempt,
+  sendDirectEnvelope,
+  sendJsonEnvelope,
+  sendSelfSyncEnvelope,
+  sendSelfSyncPayload,
+} from './socketOutbox';
+import {
+  ensureGroupSenderKey,
+  ensureGroupThreadAvailable,
+  enqueuePendingGroupEvent,
+  getGroupSenderKeyId,
+  takePendingGroupEvents,
+  type GroupSenderKeyPayload,
+  waitForGroupSenderKey,
+} from './socketGroups';
 
 const WS_URL = appConfig.wsUrl;
 const DIRECT_RETRY_BASE_DELAY_MS = 3_000;
@@ -23,40 +63,8 @@ const messageStatusRank: Record<StoredMessage['status'], number> = {
   read: 3,
 };
 
-type IncomingEnvelope = {
-  type: string;
-  recipient_pub_key?: string;
-  group_id?: string;
-  target_msg_id?: string;
-  sender_pub_key?: string;
-  data?: string;
-  msg_id?: string;
-  ack_type?: string;
-  prekey?: string | null;
-  reaction?: string;
-  challenge?: string;
-  ephemeral?: string;
-  session_token?: string;
-  signed_prekey?: string | null;
-  signed_prekey_sig?: string | null;
-  message?: string;
-  retry_after_sec?: number;
-};
-
-type X3DHParams = {
-  ephemeralPub: string;
-  preKeyPubUsed?: string | null;
-  pqcCiphertext?: string;
-};
-
 type RatchetPayload = RatchetMessage & {
   x3dh?: X3DHParams;
-};
-
-type GroupSenderKeyPayload = {
-  groupId: string;
-  senderKey: string;
-  memberFingerprint: string;
 };
 
 type GroupInvitePayload = {
@@ -120,14 +128,6 @@ type SelfSyncPayload =
   | SelfSyncDirectDeletePayload
   | SelfSyncDirectReactionPayload;
 
-function getGroupSenderKeyId(groupId: string, senderPubKey: string) {
-  return `${groupId}:${senderPubKey}`;
-}
-
-function getGroupMemberFingerprint(members: string[]) {
-  return [...members].sort().join('|');
-}
-
 const groupIssueCooldowns = new Map<string, number>();
 
 function reportGroupIssue(code: string, message: string) {
@@ -142,13 +142,6 @@ function reportGroupIssue(code: string, message: string) {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
-}
-
-function normalizeGroupMembers(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.filter(isNonEmptyString);
 }
 
 function parseGroupSenderKeyPayload(value: string): GroupSenderKeyPayload | null {
@@ -280,19 +273,6 @@ function parseSelfSyncPayload(value: string): SelfSyncPayload | null {
   }
 }
 
-async function addMessageAndSync(message: StoredMessage) {
-  await db.messages.add(message);
-  await syncThreadStats(message.peerPublicKey);
-}
-
-async function updateMessageAndSync(messageId: number, changes: Partial<StoredMessage>) {
-  const existing = await db.messages.get(messageId);
-  await db.messages.update(messageId, changes);
-  if (existing?.peerPublicKey) {
-    await syncThreadStats(existing.peerPublicKey);
-  }
-}
-
 function parseGroupCipherEnvelope(value: string): GroupCipherEnvelope | null {
   try {
     const parsed = JSON.parse(value) as Partial<GroupCipherEnvelope>;
@@ -309,14 +289,6 @@ function parseGroupCipherEnvelope(value: string): GroupCipherEnvelope | null {
   }
 }
 
-async function recordChannelActivity(entry: Omit<ChannelActivityEntry, 'id' | 'createdAt'> & { id?: string; createdAt?: number }) {
-  await db.channelActivity.put({
-    id: entry.id ?? crypto.randomUUID(),
-    createdAt: entry.createdAt ?? Date.now(),
-    ...entry,
-  });
-}
-
 export class SocketManager {
   private ws: WebSocket | null = null;
   private static instance: SocketManager;
@@ -331,11 +303,9 @@ export class SocketManager {
   private pendingGroupEvents = new Map<string, IncomingEnvelope[]>();
   private flushingGroupOutbox = false;
   private flushingDirectOutbox = false;
-  private profileRefreshAt = new Map<string, number>();
-  private profileRefreshInFlight = new Map<string, Promise<void>>();
-  private lastKnownProfilesRefreshAt = 0;
   private outboxFlushTimer: ReturnType<typeof setInterval> | null = null;
   private lastRateLimitedToastAt = 0;
+  private api = new SocketApiClient(() => this.sessionToken);
 
   private releaseAuthWaiters() {
     if (this.authWaiters.length === 0) {
@@ -517,42 +487,20 @@ export class SocketManager {
            if (!env.sender_pub_key || !env.data || !env.msg_id) return;
            const plaintext = await this.decryptInSession(env.sender_pub_key, env.data);
            if (plaintext) {
-               const msg = await db.messages.where('msgId').equals(env.msg_id).first();
-               if (msg && msg.id) {
-                  await updateMessageAndSync(msg.id, { text: plaintext, editedAt: Date.now(), deletedAt: undefined });
-               }
+               await markMessageEdited(env.msg_id, plaintext);
            }
            return;
         }
 
         if (env.type === 'delete') {
             if (!env.msg_id) return;
-            const msg = await db.messages.where('msgId').equals(env.msg_id).first();
-            if (msg && msg.id) {
-                await updateMessageAndSync(msg.id, {
-                  text: '[Message deleted]',
-                  deletedAt: Date.now(),
-                  editedAt: undefined,
-                  reactions: {}
-                });
-            }
+            await markMessageDeleted(env.msg_id);
             return;
         }
 
         if (env.type === 'reaction') {
             if (!env.msg_id || !env.sender_pub_key) return;
-            const msg = await db.messages.where('msgId').equals(env.msg_id).first();
-            if (msg && msg.id) {
-                const reactions = { ...(msg.reactions ?? {}) };
-                if (env.reaction) {
-                  reactions[env.sender_pub_key] = env.reaction;
-                } else {
-                  delete reactions[env.sender_pub_key];
-                }
-                await updateMessageAndSync(msg.id, {
-                  reactions
-                });
-            }
+            await applyMessageReaction(env.msg_id, env.sender_pub_key, env.reaction ?? null);
             return;
         }
         if (env.type === 'group_invite') {
@@ -874,19 +822,13 @@ export class SocketManager {
         // 3. Delivery receipts
         if (env.type === 'delivery_receipt' && env.recipient_pub_key === pubKey) {
           if (!env.msg_id) return;
-          const msg = await db.messages.where('msgId').equals(env.msg_id).first();
-          if (msg && msg.id) {
-             await updateMessageAndSync(msg.id, { status: 'delivered' });
-          }
+          await updateMessageByMsgID(env.msg_id, { status: 'delivered' });
           return;
         }
 
         if (env.type === 'read_receipt' && env.recipient_pub_key === pubKey) {
           if (!env.msg_id) return;
-          const msg = await db.messages.where('msgId').equals(env.msg_id).first();
-          if (msg && msg.id) {
-             await updateMessageAndSync(msg.id, { status: 'read' });
-          }
+          await updateMessageByMsgID(env.msg_id, { status: 'read' });
           return;
         }
 
@@ -1013,221 +955,39 @@ export class SocketManager {
   }
 
   getSessionHeaders(): HeadersInit {
-    return this.sessionToken ? { 'X-Session-Token': this.sessionToken } : {};
+    return this.api.getSessionHeaders();
   }
 
   async listSessions() {
-    const response = await fetchWithTimeout(`${appConfig.backendOrigin}/sessions`, {
-      headers: this.getSessionHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error('Failed to load sessions');
-    }
-    return response.json() as Promise<{
-      sessions: Array<{
-        token: string;
-        createdAt: string;
-        lastSeen: string;
-        expiresAt: string;
-        userAgent: string;
-        remoteIp: string;
-      }>;
-      currentToken: string;
-    }>;
+    return this.api.listSessions() as Promise<SessionListResponse>;
   }
 
   async revokeSession(token: string) {
-    const response = await fetchWithTimeout(`${appConfig.backendOrigin}/sessions?token=${encodeURIComponent(token)}`, {
-      method: 'DELETE',
-      headers: this.getSessionHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error('Failed to revoke session');
-    }
+    await this.api.revokeSession(token);
   }
 
   async revokeOtherSessions() {
-    const response = await fetchWithTimeout(`${appConfig.backendOrigin}/sessions?token=all`, {
-      method: 'DELETE',
-      headers: this.getSessionHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error('Failed to revoke sessions');
-    }
-    return response.json() as Promise<{ revoked: number }>;
+    return this.api.revokeOtherSessions();
   }
 
   async syncMyProfile() {
-    const { nickname, avatar, username } = useAppStore.getState();
-    if (!this.sessionToken) return;
-
-    try {
-      const response = await fetchWithTimeout(appConfig.profileUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...this.getSessionHeaders(),
-        },
-        body: JSON.stringify({
-          nickname: nickname ?? '',
-          avatar: avatar ?? '',
-          username: username,
-        }),
-      });
-      if (response.status === 409) {
-        throw new Error('Username is already taken');
-      }
-      if (!response.ok) {
-        throw new Error('Failed to save profile');
-      }
-    } catch (error) {
-      console.warn('Failed to sync profile', error);
-      throw error;
-    }
+    await this.api.syncMyProfile();
   }
 
   async refreshOwnProfile(pubKey?: string, force = false) {
-    const targetPubKey = pubKey ?? useAppStore.getState().myPublicKey;
-    if (!targetPubKey) {
-      return;
-    }
-
-    try {
-      const response = await fetchWithTimeout(`${appConfig.profileUrl}?pub=${encodeURIComponent(targetPubKey)}`, {
-        headers: this.getSessionHeaders(),
-      });
-      if (!response.ok) return;
-
-      const profile = await response.json() as {
-        nickname?: string;
-        avatar?: string;
-        username?: string;
-      };
-      const current = useAppStore.getState();
-      const nextNickname = profile.nickname?.trim() || current.nickname?.trim();
-      const nextAvatar = profile.avatar?.trim() || current.avatar || null;
-      const nextUsername = profile.username?.trim() || current.username?.trim() || null;
-
-      if (!force && !nextNickname && !nextAvatar && !nextUsername) {
-        return;
-      }
-      if (!nextNickname && !nextAvatar && !nextUsername) {
-        return;
-      }
-
-      current.setProfile(
-        nextNickname || current.nickname || `User ${targetPubKey.substring(0, 6)}`,
-        nextAvatar,
-        nextUsername
-      );
-    } catch (error) {
-      console.warn('Failed to refresh own profile', error);
-    }
+    await this.api.refreshOwnProfile(pubKey, force);
   }
 
   async refreshContactProfile(pubKey: string, force = false) {
-    const now = Date.now();
-    const lastRefreshedAt = this.profileRefreshAt.get(pubKey) ?? 0;
-    if (!force && now - lastRefreshedAt < 5 * 60_000) {
-      return;
-    }
-
-    const existingRequest = this.profileRefreshInFlight.get(pubKey);
-    if (existingRequest) {
-      return existingRequest;
-    }
-
-    const request = (async () => {
-    try {
-      const response = await fetchWithTimeout(`${appConfig.profileUrl}?pub=${encodeURIComponent(pubKey)}`, {
-        headers: this.getSessionHeaders(),
-      });
-      if (!response.ok) return;
-
-      const profile = await response.json() as {
-        nickname?: string;
-        avatar?: string;
-        username?: string;
-      };
-      const fallbackName = pubKey.substring(0, 8) + '...';
-      const existingContact = await db.contacts.get(pubKey);
-      await db.contacts.put({
-        pubKey,
-        name: profile.nickname?.trim() || existingContact?.name || fallbackName,
-        avatar: profile.avatar || existingContact?.avatar || undefined,
-        username: profile.username || existingContact?.username || undefined,
-        lastMessageAt: existingContact?.lastMessageAt ?? Date.now(),
-        pinned: existingContact?.pinned,
-        draft: existingContact?.draft,
-        archived: existingContact?.archived,
-        mutedUntil: existingContact?.mutedUntil,
-      });
-      this.profileRefreshAt.set(pubKey, Date.now());
-    } catch (error) {
-      console.warn('Failed to refresh contact profile', error);
-    } finally {
-      this.profileRefreshInFlight.delete(pubKey);
-    }
-    })();
-
-    this.profileRefreshInFlight.set(pubKey, request);
-    return request;
+    return this.api.refreshContactProfile(pubKey, force);
   }
 
-  async resolveUsername(username: string): Promise<{ pubKey: string; nickname?: string; avatar?: string } | null> {
-    const normalized = username.trim().replace(/^@+/, '');
-    if (!normalized) return null;
-
-    const candidates = ['/profile/resolve', '/resolve'];
-    for (const path of candidates) {
-      try {
-        const url = new URL(appConfig.backendOrigin);
-        url.pathname = path;
-        url.searchParams.set('username', normalized);
-
-        const response = await fetchWithTimeout(url.toString(), {
-          headers: this.getSessionHeaders(),
-        });
-        if (!response.ok) {
-          continue;
-        }
-
-        const contentType = response.headers.get('content-type') || '';
-        if (!contentType.toLowerCase().includes('application/json')) {
-          continue;
-        }
-
-        const profile = await response.json() as {
-          pubKey: string;
-          nickname?: string;
-          avatar?: string;
-        };
-        if (profile?.pubKey) {
-          return profile;
-        }
-      } catch (error) {
-        console.warn(`Failed to resolve username via ${path}`, error);
-      }
-    }
-
-    return null;
+  async resolveUsername(username: string): Promise<ResolvedUserProfile | null> {
+    return this.api.resolveUsername(username);
   }
 
   async refreshKnownProfiles(force = false) {
-    const now = Date.now();
-    if (!force && now - this.lastKnownProfilesRefreshAt < 60_000) {
-      return;
-    }
-    this.lastKnownProfilesRefreshAt = now;
-
-    try {
-      const contacts = await db.contacts.orderBy('lastMessageAt').reverse().limit(40).toArray();
-      await Promise.allSettled(
-        contacts.map((contact) => this.refreshContactProfile(contact.pubKey, force))
-      );
-    } catch (error) {
-      console.warn('Failed to refresh known contact profiles', error);
-    }
+    await this.api.refreshKnownProfiles(force);
   }
 
   private async encryptWithSenderKey(senderKeyBase64: string, plaintext: string): Promise<string> {
@@ -1321,120 +1081,38 @@ export class SocketManager {
     myPublicKey: string,
     mySecretKey: string
   ): Promise<string> {
-    const group = await db.groupThreads.get(groupId);
-    if (!group) {
-      reportGroupIssue('group-metadata-missing', 'Group details are not loaded yet. Try again in a moment.');
-      throw new Error('Group metadata is not available yet');
-    }
-
-    const members = normalizeGroupMembers(group.members);
-    const senderKeyId = getGroupSenderKeyId(groupId, myPublicKey);
-    const memberFingerprint = getGroupMemberFingerprint(members);
-    const existingKey = await db.groupSenderKeys.get(senderKeyId);
-
-    if (existingKey && existingKey.memberFingerprint === memberFingerprint) {
-      return existingKey.key;
-    }
-
-    const senderKey = encodeBase64(randomBytes(secretbox.keyLength));
-    await db.groupSenderKeys.put({
-      id: senderKeyId,
+    return ensureGroupSenderKey({
       groupId,
-      senderPubKey: myPublicKey,
-      key: senderKey,
-      memberFingerprint,
-      createdAt: Date.now(),
-      distributedAt: existingKey?.distributedAt,
+      myPublicKey,
+      mySecretKey,
+      reportGroupIssue,
+      sendEnvelope: (payload) => this.sendEnvelope(payload),
     });
-
-    await Promise.all(
-      members
-        .filter((memberPubKey) => memberPubKey !== myPublicKey)
-        .map(async (memberPubKey) => {
-          const encryptedPayload = encryptMessage(
-            JSON.stringify({
-              groupId,
-              senderKey,
-              memberFingerprint,
-            } satisfies GroupSenderKeyPayload),
-            mySecretKey,
-            memberPubKey
-          );
-
-          this.ws?.send(JSON.stringify({
-            type: 'group_sender_key',
-            msg_id: crypto.randomUUID(),
-            recipient_pub_key: memberPubKey,
-            sender_pub_key: myPublicKey,
-            data: encryptedPayload,
-          }));
-        })
-    );
-
-    await db.groupSenderKeys.update(senderKeyId, { distributedAt: Date.now() });
-    return senderKey;
   }
 
   private async waitForGroupSenderKey(groupId: string, senderPubKey: string, reportTimeout = true) {
-    const senderKeyId = getGroupSenderKeyId(groupId, senderPubKey);
-    for (let attempt = 0; attempt < 20; attempt++) {
-      const senderKey = await db.groupSenderKeys.get(senderKeyId);
-      if (senderKey) {
-        return senderKey;
-      }
-      if (attempt === 0 || attempt === 6) {
-        await this.ensureGroupThreadAvailable(groupId);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 150));
-    }
-    if (reportTimeout) {
-      reportGroupIssue(`group-sender-key-timeout:${groupId}:${senderPubKey}`, 'Group encryption key did not arrive in time. Retry in a moment.');
-    }
-    return undefined;
+    return waitForGroupSenderKey({
+      groupId,
+      senderPubKey,
+      reportTimeout,
+      reportGroupIssue,
+      ensureGroupThreadAvailable: (targetGroupID) => this.ensureGroupThreadAvailable(targetGroupID),
+    });
   }
 
   private async ensureGroupThreadAvailable(groupId: string) {
-    const existing = await db.groupThreads.get(groupId);
-    if (existing) {
-      return existing;
-    }
-
-    try {
-      await syncGroups(true);
-    } catch (error) {
-      console.warn('Failed to sync groups for incoming group event', error);
-    }
-
-    return db.groupThreads.get(groupId);
-  }
-
-  private getPendingGroupEventKey(groupId: string, senderPubKey: string) {
-    return `${groupId}:${senderPubKey}`;
+    return ensureGroupThreadAvailable(groupId);
   }
 
   private enqueuePendingGroupEvent(env: IncomingEnvelope) {
-    if (!env.group_id || !env.sender_pub_key) {
-      return;
-    }
-
-    const key = this.getPendingGroupEventKey(env.group_id, env.sender_pub_key);
-    const current = this.pendingGroupEvents.get(key) ?? [];
-    const dedupeKey = env.type === 'group_message' ? env.msg_id : `${env.type}:${env.target_msg_id ?? env.msg_id ?? ''}`;
-    if (dedupeKey && current.some((item) => (item.type === 'group_message' ? item.msg_id : `${item.type}:${item.target_msg_id ?? item.msg_id ?? ''}`) === dedupeKey)) {
-      return;
-    }
-    current.push({ ...env });
-    this.pendingGroupEvents.set(key, current.slice(-50));
+    enqueuePendingGroupEvent(this.pendingGroupEvents, env);
   }
 
   private async flushPendingGroupEvents(groupId: string, senderPubKey: string) {
-    const key = this.getPendingGroupEventKey(groupId, senderPubKey);
-    const pending = this.pendingGroupEvents.get(key);
-    if (!pending?.length) {
+    const pending = takePendingGroupEvents(this.pendingGroupEvents, groupId, senderPubKey);
+    if (!pending.length) {
       return;
     }
-
-    this.pendingGroupEvents.delete(key);
     for (const env of pending) {
       if (env.type === 'group_message') {
         await this.handleIncomingGroupMessage(env);
@@ -1495,11 +1173,19 @@ export class SocketManager {
   }
 
   private async enqueueOutgoingGroupEvent(event: OutgoingGroupEvent) {
-    await db.outgoingGroupEvents.put(event);
+    await enqueueOutgoingGroupEvent(event);
   }
 
   private canSendImmediately() {
     return Boolean(this.ws && this.ws.readyState === WebSocket.OPEN && this.authenticated);
+  }
+
+  private sendEnvelope(payload: Record<string, unknown>) {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !this.authenticated) {
+      throw new Error('Secure channel is not ready yet');
+    }
+    sendJsonEnvelope((message) => ws.send(JSON.stringify(message)), payload);
   }
 
   private sendSelfSyncDirectMessage(payload: SelfSyncPayload) {
@@ -1510,56 +1196,34 @@ export class SocketManager {
 
     try {
       const encryptedPayload = encryptMessage(JSON.stringify(payload), mySecretKey, myPublicKey);
-      this.ws?.send(JSON.stringify({
-        type: 'self_sync',
-        msg_id: `${payload.msgId}:self`,
-        recipient_pub_key: myPublicKey,
-        sender_pub_key: myPublicKey,
+      sendSelfSyncPayload((message) => this.sendEnvelope(message), {
+        msgId: payload.msgId,
         data: encryptedPayload,
-      }));
+        myPublicKey,
+      });
     } catch (error) {
       console.warn('Failed to send self-sync payload', error);
     }
   }
 
   private async enqueueOutgoingDirectMessage(message: OutgoingDirectMessage) {
-    await db.outgoingDirectMessages.put(message);
+    await enqueueOutgoingDirectMessage(message);
   }
 
   private sendDirectEnvelope(message: OutgoingDirectMessage) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.authenticated) {
-      throw new Error('Secure channel is not ready yet');
-    }
-
-    this.ws.send(JSON.stringify({
-      type: 'message',
-      msg_id: message.id,
-      recipient_pub_key: message.recipientPubKey,
-      sender_pub_key: message.senderPubKey,
-      data: message.data,
-    }));
+    sendDirectEnvelope((payload) => this.sendEnvelope(payload), message);
   }
 
   private sendSelfSyncEnvelope(message: OutgoingDirectMessage) {
     const { myPublicKey } = useAppStore.getState();
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.authenticated || !myPublicKey || !message.syncData) {
+    if (!this.canSendImmediately() || !myPublicKey || !message.syncData) {
       return;
     }
-
-    this.ws.send(JSON.stringify({
-      type: 'self_sync',
-      msg_id: `${message.id}:self`,
-      recipient_pub_key: myPublicKey,
-      sender_pub_key: myPublicKey,
-      data: message.syncData,
-    }));
+    sendSelfSyncEnvelope((payload) => this.sendEnvelope(payload), message, myPublicKey);
   }
 
   private async markDirectAttempt(message: OutgoingDirectMessage) {
-    await db.outgoingDirectMessages.update(message.id, {
-      attempts: message.attempts + 1,
-      lastAttemptAt: Date.now(),
-    });
+    await markDirectAttempt(message);
   }
 
   private async handleServerAck(msgId: string) {
@@ -1803,105 +1467,23 @@ export class SocketManager {
   }
 
   private async handleIncomingChannelMessage(env: IncomingEnvelope) {
-    if (!env.group_id || !env.sender_pub_key || !env.data || !env.msg_id) return;
-
-    const existingMsg = await db.messages.where('msgId').equals(env.msg_id).first();
-    if (existingMsg) {
-      if (existingMsg.id && env.sender_pub_key === useAppStore.getState().myPublicKey && existingMsg.status !== 'delivered') {
-        await updateMessageAndSync(existingMsg.id, { status: 'delivered' });
-      }
-      return;
-    }
-
-    await addMessageAndSync({
-      msgId: env.msg_id,
-      peerPublicKey: env.group_id,
-      senderPublicKey: env.sender_pub_key,
-      text: env.data,
-      timestamp: Date.now(),
-      status: 'delivered',
-      reactions: {}
-    });
-
-    await db.channelThreads.update(env.group_id, { lastActivityAt: Date.now() });
-
-    const { myPublicKey } = useAppStore.getState();
-    if (myPublicKey && env.sender_pub_key !== myPublicKey && isMentioningPubKey(env.data, myPublicKey)) {
-      const channel = await db.channelThreads.get(env.group_id);
-      const preview = getMessageNotificationPreview(env.data);
-      sendDesktopNotification(`Mention in ${channel?.title ?? 'channel'}`, preview);
-    }
+    await handleIncomingChannelMessageEvent(env);
   }
 
   private async handleIncomingChannelEdit(env: IncomingEnvelope) {
-    if (!env.group_id || !env.target_msg_id || !env.data || !env.sender_pub_key) return;
-
-    const msg = await db.messages.where('msgId').equals(env.target_msg_id).first();
-    if (msg?.id && msg.peerPublicKey === env.group_id) {
-      await updateMessageAndSync(msg.id, {
-        text: env.data,
-        editedAt: Date.now(),
-        editedBy: env.sender_pub_key,
-        deletedAt: undefined,
-      });
-      await recordChannelActivity({
-        id: `channel-edit:${env.group_id}:${env.msg_id ?? env.target_msg_id}`,
-        channelId: env.group_id,
-        type: 'post_edited',
-        actorPubKey: env.sender_pub_key,
-        msgId: env.target_msg_id,
-      });
-    }
+    await handleIncomingChannelEditEvent(env);
   }
 
   private async handleIncomingChannelDelete(env: IncomingEnvelope) {
-    if (!env.group_id || !env.target_msg_id || !env.sender_pub_key) return;
-
-    const msg = await db.messages.where('msgId').equals(env.target_msg_id).first();
-    if (msg?.id && msg.peerPublicKey === env.group_id) {
-      await updateMessageAndSync(msg.id, {
-        text: '[Message deleted]',
-        deletedAt: Date.now(),
-        deletedBy: env.sender_pub_key,
-        editedAt: undefined,
-        reactions: {},
-      });
-      await recordChannelActivity({
-        id: `channel-delete:${env.group_id}:${env.msg_id ?? env.target_msg_id}`,
-        channelId: env.group_id,
-        type: 'post_deleted',
-        actorPubKey: env.sender_pub_key,
-        msgId: env.target_msg_id,
-      });
-    }
+    await handleIncomingChannelDeleteEvent(env);
   }
 
   private async handleIncomingChannelReaction(env: IncomingEnvelope) {
-    if (!env.group_id || !env.target_msg_id || !env.sender_pub_key) return;
-
-    const msg = await db.messages.where('msgId').equals(env.target_msg_id).first();
-    if (msg?.id && msg.peerPublicKey === env.group_id) {
-      const reactions = { ...(msg.reactions ?? {}) };
-      if (env.reaction) {
-        reactions[env.sender_pub_key] = env.reaction;
-      } else {
-        delete reactions[env.sender_pub_key];
-      }
-      await updateMessageAndSync(msg.id, { reactions });
-    }
+    await handleIncomingChannelReactionEvent(env);
   }
 
   private async handleIncomingChannelPin(env: IncomingEnvelope) {
-    if (!env.group_id || !env.sender_pub_key) return;
-    const nextPinnedMsgId = env.target_msg_id?.trim() || null;
-    await db.channelThreads.update(env.group_id, { pinnedMsgId: nextPinnedMsgId });
-    await recordChannelActivity({
-      id: `channel-pin:${env.group_id}:${env.msg_id ?? nextPinnedMsgId ?? 'clear'}`,
-      channelId: env.group_id,
-      type: nextPinnedMsgId ? 'post_pinned' : 'post_unpinned',
-      actorPubKey: env.sender_pub_key,
-      msgId: nextPinnedMsgId ?? undefined,
-    });
+    await handleIncomingChannelPinEvent(env);
   }
 
 
@@ -2129,10 +1711,7 @@ export class SocketManager {
       }));
     }
 
-    const msg = await db.messages.where('msgId').equals(targetMsgId).first();
-    if (msg?.id) {
-      await updateMessageAndSync(msg.id, { text: plaintext, editedAt: Date.now(), deletedAt: undefined });
-    }
+    await applyOptimisticGroupEdit(targetMsgId, plaintext);
   }
 
   async sendGroupDelete(groupId: string, targetMsgId: string, myPublicKey: string) {
@@ -2157,15 +1736,7 @@ export class SocketManager {
       }));
     }
 
-    const msg = await db.messages.where('msgId').equals(targetMsgId).first();
-    if (msg?.id) {
-      await updateMessageAndSync(msg.id, {
-        text: '[Message deleted]',
-        deletedAt: Date.now(),
-        editedAt: undefined,
-        reactions: {}
-      });
-    }
+    await applyOptimisticGroupDelete(targetMsgId);
   }
 
   async sendGroupReaction(groupId: string, targetMsgId: string, reaction: string | null, myPublicKey: string, mySecretKey: string) {
@@ -2193,16 +1764,7 @@ export class SocketManager {
       }));
     }
 
-    const msg = await db.messages.where('msgId').equals(targetMsgId).first();
-    if (msg?.id) {
-      const reactions = { ...(msg.reactions ?? {}) };
-      if (reaction) {
-        reactions[myPublicKey] = reaction;
-      } else {
-        delete reactions[myPublicKey];
-      }
-      await updateMessageAndSync(msg.id, { reactions });
-    }
+    await applyOptimisticGroupReaction(targetMsgId, myPublicKey, reaction);
   }
 
   async sendChannelMessage(channelId: string, plaintext: string, myPublicKey: string) {
@@ -2264,10 +1826,7 @@ export class SocketManager {
       }));
     }
 
-    const msg = await db.messages.where('msgId').equals(targetMsgId).first();
-    if (msg?.id) {
-      await updateMessageAndSync(msg.id, { text: plaintext, editedAt: Date.now(), deletedAt: undefined });
-    }
+    await applyOptimisticChannelEdit(targetMsgId, plaintext);
   }
 
   async sendChannelDelete(channelId: string, targetMsgId: string, myPublicKey: string) {
@@ -2292,15 +1851,7 @@ export class SocketManager {
       }));
     }
 
-    const msg = await db.messages.where('msgId').equals(targetMsgId).first();
-    if (msg?.id) {
-      await updateMessageAndSync(msg.id, {
-        text: '[Message deleted]',
-        deletedAt: Date.now(),
-        editedAt: undefined,
-        reactions: {}
-      });
-    }
+    await applyOptimisticChannelDelete(targetMsgId);
   }
 
   async sendChannelReaction(channelId: string, targetMsgId: string, reaction: string | null, myPublicKey: string) {
@@ -2327,16 +1878,7 @@ export class SocketManager {
       }));
     }
 
-    const msg = await db.messages.where('msgId').equals(targetMsgId).first();
-    if (msg?.id) {
-      const reactions = { ...(msg.reactions ?? {}) };
-      if (reaction) {
-        reactions[myPublicKey] = reaction;
-      } else {
-        delete reactions[myPublicKey];
-      }
-      await updateMessageAndSync(msg.id, { reactions });
-    }
+    await applyOptimisticChannelReaction(targetMsgId, myPublicKey, reaction);
   }
 
   async sendChannelPin(channelId: string, targetMsgId: string | null, myPublicKey: string) {
@@ -2383,10 +1925,7 @@ export class SocketManager {
       msg_id: msgId
     }));
 
-    const msg = await db.messages.where('msgId').equals(msgId).first();
-    if (msg?.id) {
-      await updateMessageAndSync(msg.id, { status: 'read' });
-    }
+    await updateMessageByMsgID(msgId, { status: 'read' });
   }
 
   async sendEdit(recipientPubKey: string, msgId: string, plaintext: string) {
@@ -2409,10 +1948,9 @@ export class SocketManager {
       data: JSON.stringify(ratchetMsg)
     }));
 
-    const msg = await db.messages.where('msgId').equals(msgId).first();
     const editedAt = Date.now();
+    const msg = await markMessageEdited(msgId, plaintext);
     if (msg?.id) {
-      await updateMessageAndSync(msg.id, { text: plaintext, editedAt, deletedAt: undefined });
       this.sendSelfSyncDirectMessage({
         kind: 'direct_edit',
         msgId,
@@ -2434,15 +1972,9 @@ export class SocketManager {
       sender_pub_key: myPublicKey
     }));
 
-    const msg = await db.messages.where('msgId').equals(msgId).first();
     const deletedAt = Date.now();
+    const msg = await markMessageDeleted(msgId);
     if (msg?.id) {
-      await updateMessageAndSync(msg.id, {
-        text: '[Message deleted]',
-        deletedAt,
-        editedAt: undefined,
-        reactions: {}
-      });
       this.sendSelfSyncDirectMessage({
         kind: 'direct_delete',
         msgId,
@@ -2464,15 +1996,8 @@ export class SocketManager {
       reaction: reaction ?? ''
     }));
 
-    const msg = await db.messages.where('msgId').equals(msgId).first();
+    const msg = await applyMessageReaction(msgId, myPublicKey, reaction);
     if (msg?.id) {
-      const reactions = { ...(msg.reactions ?? {}) };
-      if (reaction) {
-        reactions[myPublicKey] = reaction;
-      } else {
-        delete reactions[myPublicKey];
-      }
-      await updateMessageAndSync(msg.id, { reactions });
       this.sendSelfSyncDirectMessage({
         kind: 'direct_reaction',
         msgId,

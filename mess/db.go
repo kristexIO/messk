@@ -77,6 +77,22 @@ type InviteLinkRecord struct {
 	Revoked         bool       `json:"revoked"`
 }
 
+type SessionTokenRecord struct {
+	Token     string    `json:"token"`
+	PubKey    string    `json:"pubKey"`
+	CreatedAt time.Time `json:"createdAt"`
+	LastSeen  time.Time `json:"lastSeen"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	UserAgent string    `json:"userAgent"`
+	RemoteIP  string    `json:"remoteIp"`
+}
+
+type FileTokenRecord struct {
+	Token     string
+	Filename  string
+	ExpiresAt time.Time
+}
+
 var (
 	ErrInviteNotFound         = sql.ErrNoRows
 	ErrInviteRevoked          = errors.New("invite revoked")
@@ -205,6 +221,31 @@ func InitDB(ctx context.Context, dataSourceName string) *DB {
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
 
+		CREATE TABLE IF NOT EXISTS session_tokens (
+			token TEXT PRIMARY KEY,
+			pub_key TEXT NOT NULL,
+			created_at DATETIME NOT NULL,
+			last_seen DATETIME NOT NULL,
+			expires_at DATETIME NOT NULL,
+			user_agent TEXT NOT NULL DEFAULT '',
+			remote_ip TEXT NOT NULL DEFAULT '',
+			FOREIGN KEY (pub_key) REFERENCES users(pub_key) ON DELETE CASCADE
+		);
+
+		CREATE TABLE IF NOT EXISTS file_tokens (
+			token TEXT PRIMARY KEY,
+			filename TEXT NOT NULL,
+			expires_at DATETIME NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS file_access (
+			filename TEXT NOT NULL,
+			pub_key TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (filename, pub_key),
+			FOREIGN KEY (pub_key) REFERENCES users(pub_key) ON DELETE CASCADE
+		);
+
 		-- Performance Indexes
 		CREATE INDEX IF NOT EXISTS idx_offline_recipient ON offline_messages(recipient_pub_key);
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_offline_recipient_msg_id ON offline_messages(recipient_pub_key, msg_id) WHERE msg_id IS NOT NULL;
@@ -215,6 +256,10 @@ func InitDB(ctx context.Context, dataSourceName string) *DB {
 		CREATE INDEX IF NOT EXISTS idx_group_invite_links_group ON group_invite_links(group_id);
 		CREATE INDEX IF NOT EXISTS idx_channel_invite_links_channel ON channel_invite_links(channel_id);
 		CREATE INDEX IF NOT EXISTS idx_moderation_audit_entity ON moderation_audit(entity_type, entity_id, created_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_session_tokens_pub_key ON session_tokens(pub_key, created_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_session_tokens_expires_at ON session_tokens(expires_at);
+		CREATE INDEX IF NOT EXISTS idx_file_tokens_expires_at ON file_tokens(expires_at);
+		CREATE INDEX IF NOT EXISTS idx_file_access_filename ON file_access(filename);
 	`)
 	if err != nil {
 		log.Fatalf("Failed to initialize database schema: %v", err)
@@ -1260,4 +1305,175 @@ func (db *DB) ListModerationAudit(ctx context.Context, entityType, entityID stri
 		out = append(out, rec)
 	}
 	return out, rows.Err()
+}
+
+func (db *DB) SaveSessionToken(ctx context.Context, record SessionTokenRecord) error {
+	if strings.TrimSpace(record.Token) == "" || strings.TrimSpace(record.PubKey) == "" {
+		return fmt.Errorf("missing session token fields")
+	}
+	if err := db.SaveUserIfNotExists(ctx, record.PubKey); err != nil {
+		return err
+	}
+	_, err := db.db.ExecContext(ctx, `
+		INSERT INTO session_tokens (token, pub_key, created_at, last_seen, expires_at, user_agent, remote_ip)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (token) DO UPDATE SET
+			pub_key = excluded.pub_key,
+			created_at = excluded.created_at,
+			last_seen = excluded.last_seen,
+			expires_at = excluded.expires_at,
+			user_agent = excluded.user_agent,
+			remote_ip = excluded.remote_ip
+	`, record.Token, record.PubKey, record.CreatedAt.UTC(), record.LastSeen.UTC(), record.ExpiresAt.UTC(), strings.TrimSpace(record.UserAgent), strings.TrimSpace(record.RemoteIP))
+	return err
+}
+
+func (db *DB) GetSessionToken(ctx context.Context, token string) (SessionTokenRecord, error) {
+	var record SessionTokenRecord
+	err := db.db.QueryRowContext(ctx, `
+		SELECT token, pub_key, created_at, last_seen, expires_at, user_agent, remote_ip
+		FROM session_tokens
+		WHERE token = ?
+	`, strings.TrimSpace(token)).Scan(&record.Token, &record.PubKey, &record.CreatedAt, &record.LastSeen, &record.ExpiresAt, &record.UserAgent, &record.RemoteIP)
+	return record, err
+}
+
+func (db *DB) TouchSessionToken(ctx context.Context, token string, lastSeen time.Time) error {
+	_, err := db.db.ExecContext(ctx, `
+		UPDATE session_tokens
+		SET last_seen = ?
+		WHERE token = ?
+	`, lastSeen.UTC(), strings.TrimSpace(token))
+	return err
+}
+
+func (db *DB) DeleteSessionToken(ctx context.Context, token string) error {
+	_, err := db.db.ExecContext(ctx, `DELETE FROM session_tokens WHERE token = ?`, strings.TrimSpace(token))
+	return err
+}
+
+func (db *DB) DeleteAllSessionTokensForUser(ctx context.Context, pubKey, exceptToken string) (int64, error) {
+	result, err := db.db.ExecContext(ctx, `
+		DELETE FROM session_tokens
+		WHERE pub_key = ? AND token <> ?
+	`, strings.TrimSpace(pubKey), strings.TrimSpace(exceptToken))
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+func (db *DB) ListSessionTokens(ctx context.Context, pubKey string) ([]SessionTokenRecord, error) {
+	rows, err := db.db.QueryContext(ctx, `
+		SELECT token, pub_key, created_at, last_seen, expires_at, user_agent, remote_ip
+		FROM session_tokens
+		WHERE pub_key = ?
+		ORDER BY created_at DESC
+	`, strings.TrimSpace(pubKey))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]SessionTokenRecord, 0)
+	for rows.Next() {
+		var record SessionTokenRecord
+		if err := rows.Scan(&record.Token, &record.PubKey, &record.CreatedAt, &record.LastSeen, &record.ExpiresAt, &record.UserAgent, &record.RemoteIP); err != nil {
+			return nil, err
+		}
+		out = append(out, record)
+	}
+	return out, rows.Err()
+}
+
+func (db *DB) CleanupExpiredSessionTokens(ctx context.Context, now time.Time) error {
+	_, err := db.db.ExecContext(ctx, `DELETE FROM session_tokens WHERE expires_at <= ?`, now.UTC())
+	return err
+}
+
+func (db *DB) SaveFileToken(ctx context.Context, token, filename string, expiresAt time.Time) error {
+	_, err := db.db.ExecContext(ctx, `
+		INSERT INTO file_tokens (token, filename, expires_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT (token) DO UPDATE SET
+			filename = excluded.filename,
+			expires_at = excluded.expires_at
+	`, strings.TrimSpace(token), strings.TrimSpace(filename), expiresAt.UTC())
+	return err
+}
+
+func (db *DB) GetFileToken(ctx context.Context, token string) (FileTokenRecord, error) {
+	var record FileTokenRecord
+	err := db.db.QueryRowContext(ctx, `
+		SELECT token, filename, expires_at
+		FROM file_tokens
+		WHERE token = ?
+	`, strings.TrimSpace(token)).Scan(&record.Token, &record.Filename, &record.ExpiresAt)
+	return record, err
+}
+
+func (db *DB) DeleteFileToken(ctx context.Context, token string) error {
+	_, err := db.db.ExecContext(ctx, `DELETE FROM file_tokens WHERE token = ?`, strings.TrimSpace(token))
+	return err
+}
+
+func (db *DB) CleanupExpiredFileTokens(ctx context.Context, now time.Time) error {
+	_, err := db.db.ExecContext(ctx, `DELETE FROM file_tokens WHERE expires_at <= ?`, now.UTC())
+	return err
+}
+
+func (db *DB) ReplaceFileAccess(ctx context.Context, filename string, allowedPubKeys []string) error {
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	filename = strings.TrimSpace(filename)
+	if filename == "" {
+		return fmt.Errorf("missing filename")
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM file_access WHERE filename = ?`, filename); err != nil {
+		return err
+	}
+	seen := make(map[string]struct{}, len(allowedPubKeys))
+	for _, pubKey := range allowedPubKeys {
+		pubKey = strings.TrimSpace(pubKey)
+		if pubKey == "" {
+			continue
+		}
+		if _, ok := seen[pubKey]; ok {
+			continue
+		}
+		seen[pubKey] = struct{}{}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO users (pub_key)
+			VALUES (?)
+			ON CONFLICT (pub_key) DO NOTHING
+		`, pubKey); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO file_access (filename, pub_key)
+			VALUES (?, ?)
+			ON CONFLICT (filename, pub_key) DO NOTHING
+		`, filename, pubKey); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (db *DB) HasFileAccess(ctx context.Context, filename, pubKey string) (bool, error) {
+	var exists int
+	err := db.db.QueryRowContext(ctx, `
+		SELECT 1
+		FROM file_access
+		WHERE filename = ? AND pub_key = ?
+		LIMIT 1
+	`, strings.TrimSpace(filename), strings.TrimSpace(pubKey)).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, err
 }

@@ -164,6 +164,66 @@ func TestAuthorizeDownloadRejectsInvalidToken(t *testing.T) {
 	}
 }
 
+func TestPersistedSessionTokenSurvivesFreshHub(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "messenger-test.db")
+	db := InitDB(ctx, dbPath)
+	defer db.Close()
+
+	expiresAt := time.Now().Add(time.Hour)
+	if err := db.SaveSessionToken(ctx, SessionTokenRecord{
+		Token:     "persisted-token",
+		PubKey:    "alice",
+		CreatedAt: time.Now().Add(-time.Minute),
+		LastSeen:  time.Now().Add(-time.Second),
+		ExpiresAt: expiresAt,
+		UserAgent: "test-agent",
+		RemoteIP:  "127.0.0.1",
+	}); err != nil {
+		t.Fatalf("save persisted session token: %v", err)
+	}
+
+	hub := NewHub(db, nil, nil)
+	pubKey, ok := hub.ValidateSessionToken("persisted-token")
+	if !ok {
+		t.Fatal("expected persisted session token to validate")
+	}
+	if pubKey != "alice" {
+		t.Fatalf("unexpected pub key %q", pubKey)
+	}
+}
+
+func TestPersistedFileAccessSurvivesFreshHub(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "messenger-test.db")
+	db := InitDB(ctx, dbPath)
+	defer db.Close()
+
+	if err := db.SaveSessionToken(ctx, SessionTokenRecord{
+		Token:     "session-123",
+		PubKey:    "alice",
+		CreatedAt: time.Now().Add(-time.Minute),
+		LastSeen:  time.Now().Add(-time.Second),
+		ExpiresAt: time.Now().Add(time.Hour),
+		UserAgent: "test-agent",
+		RemoteIP:  "127.0.0.1",
+	}); err != nil {
+		t.Fatalf("save session token: %v", err)
+	}
+	if err := db.ReplaceFileAccess(ctx, "secret.bin", []string{"alice", "bob"}); err != nil {
+		t.Fatalf("save file access: %v", err)
+	}
+
+	hub := NewHub(db, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/download/secret.bin", nil)
+	req.Header.Set("X-Session-Token", "session-123")
+	rec := httptest.NewRecorder()
+
+	if !authorizeDownload(hub, rec, req, "secret.bin") {
+		t.Fatal("expected persisted file ACL to authorize download")
+	}
+}
+
 func TestAllowedUploadContentTypes(t *testing.T) {
 	t.Setenv("ALLOWED_UPLOAD_MIME_TYPES", "application/octet-stream,image/png")
 
