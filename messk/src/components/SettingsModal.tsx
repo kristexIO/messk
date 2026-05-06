@@ -68,6 +68,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
   const channels = useLiveQuery(() => db.channelThreads.toArray(), []);
   const threadStats = useLiveQuery(() => db.threadStats.toArray(), []);
   const pendingGroupEventsCount = useLiveQuery(() => db.outgoingGroupEvents.count(), []);
+  const pendingDirectMessagesCount = useLiveQuery(() => db.outgoingDirectMessages.count(), []);
   const pendingGroupInvitesCount = useLiveQuery(() => db.groupInvites.count(), []);
   const recentCallIssues = React.useMemo(
     () => (callHistory ?? []).filter((entry) => entry.outcome === 'missed' || entry.outcome === 'failed'),
@@ -745,6 +746,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                 <div className={`mt-2 text-sm font-medium ${connectionTone}`}>{connectionStatus}</div>
               </div>
               <div className="settings-card rounded-2xl p-4">
+                <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Queued direct sends</div>
+                <div className="mt-2 text-sm font-medium text-white">{pendingDirectMessagesCount ?? 0}</div>
+              </div>
+              <div className="settings-card rounded-2xl p-4">
                 <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Queued group sends</div>
                 <div className="mt-2 text-sm font-medium text-white">{pendingGroupEventsCount ?? 0}</div>
               </div>
@@ -776,7 +781,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
               </div>
             </div>
             <div className="settings-card rounded-2xl px-4 py-3 text-xs text-text-muted">
-              Use this section before a release candidate run: pending group sends should be zero, transport should be connected, and repeated missed or failed calls should be investigated before shipping.
+              Use this section before a release candidate run: queued direct and group sends should be zero, transport should be connected, and repeated missed or failed calls should be investigated before shipping.
             </div>
             {(groupSyncStatus.error || channelSyncStatus.error) ? (
               <div className="rounded-2xl border border-red-400/20 bg-red-500/10 px-4 py-3 text-xs text-red-100">

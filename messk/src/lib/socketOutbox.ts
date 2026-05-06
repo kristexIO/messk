@@ -6,6 +6,32 @@ export type SelfSyncEnvelopePayload = {
   myPublicKey: string;
 };
 
+const SERVER_ACK_TYPES = new Set([
+  'message',
+  'group_message',
+  'group_edit',
+  'group_delete',
+  'group_reaction',
+  'group_sender_key',
+  'channel_message',
+  'channel_edit',
+  'channel_delete',
+  'channel_reaction',
+  'channel_pin',
+  'delivery_receipt',
+  'read_receipt',
+  'edit',
+  'delete',
+  'reaction',
+]);
+
+export function shouldHandleServerAck(ackType?: string | null) {
+  if (!ackType) {
+    return true;
+  }
+  return SERVER_ACK_TYPES.has(ackType);
+}
+
 export function sendJsonEnvelope(send: (payload: Record<string, unknown>) => void, payload: Record<string, unknown>) {
   send(payload);
 }

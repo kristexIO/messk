@@ -9,7 +9,10 @@ param(
   [string]$User = "root",
   [string]$Domain = "",
   [string]$LocalRoot = "",
-  [int]$KeepReleases = 3
+  [int]$KeepReleases = 3,
+  [string]$TurnHost = "",
+  [string]$TurnUsername = "",
+  [string]$TurnPassword = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -84,10 +87,21 @@ SHARED_DIR=\$APP_ROOT/shared
 UPLOAD_DIR=/var/lib/messan/uploads
 DB_PATH=/var/lib/messan/messenger.db
 DOMAIN='__DOMAIN__'
+TURN_HOST='__TURN_HOST__'
+TURN_USERNAME='__TURN_USERNAME__'
+TURN_PASSWORD='__TURN_PASSWORD__'
 KEEP_RELEASES=__KEEP_RELEASES__
 
 mkdir -p \$RELEASES_DIR \$SHARED_DIR \$UPLOAD_DIR \$APP_ROOT/bin
 touch \$DB_PATH
+
+if [ -z "\$TURN_HOST" ]; then
+  if [ -n "\$DOMAIN" ]; then
+    TURN_HOST="\$DOMAIN"
+  else
+    TURN_HOST="__HOST__"
+  fi
+fi
 
 cat > /etc/sysctl.d/99-messan.conf <<'EOF'
 fs.file-max = 100000
@@ -156,6 +170,30 @@ path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
 fi
 
+if [ ! -f \$SHARED_DIR/turn.env ]; then
+  if [ -z "\$TURN_USERNAME" ]; then
+    TURN_USERNAME="messkturn"
+  fi
+  if [ -z "\$TURN_PASSWORD" ]; then
+    TURN_PASSWORD=\$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(24))
+PY
+)
+  fi
+  cat > \$SHARED_DIR/turn.env <<EOF
+TURN_PUBLIC_HOST=\$TURN_HOST
+TURN_PORT=3478
+TURNS_PORT=5349
+TURN_USERNAME=\$TURN_USERNAME
+TURN_PASSWORD=\$TURN_PASSWORD
+TURN_MIN_PORT=49160
+TURN_MAX_PORT=49200
+EOF
+fi
+
+source \$SHARED_DIR/turn.env
+
 rm -rf \$RELEASE_DIR
 mkdir -p \$RELEASE_DIR
 tar -xzf __REMOTE_ARCHIVE__ -C \$RELEASE_DIR
@@ -163,8 +201,16 @@ mv \$RELEASE_DIR/messan \$RELEASE_DIR/source
 
 ln -sf \$SHARED_DIR/backend.env \$RELEASE_DIR/source/mess/.env
 
+cat > \$RELEASE_DIR/source/messk/.env.production <<EOF
+VITE_BACKEND_URL=$(if [ -n "\$DOMAIN" ]; then printf 'https://%s' "\$DOMAIN"; else printf 'http://%s' "__HOST__"; fi)
+VITE_STUN_URLS=stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302,stun:stun2.l.google.com:19302,stun:global.stun.twilio.com:3478
+VITE_TURN_URLS=turn:\${TURN_PUBLIC_HOST}:\${TURN_PORT}?transport=udp,turn:\${TURN_PUBLIC_HOST}:\${TURN_PORT}?transport=tcp,turns:\${TURN_PUBLIC_HOST}:\${TURNS_PORT}?transport=tcp
+VITE_TURN_USERNAME=\${TURN_USERNAME}
+VITE_TURN_CREDENTIAL=\${TURN_PASSWORD}
+EOF
+
 apt-get update
-apt-get install -y curl ca-certificates build-essential rsync nginx redis-server certbot python3-certbot-nginx
+apt-get install -y curl ca-certificates build-essential rsync nginx redis-server certbot python3-certbot-nginx coturn
 
 if ! command -v node >/dev/null 2>&1 || [ "\$(node -p "Number(process.versions.node.split('.')[0])")" -lt 20 ]; then
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
@@ -179,6 +225,37 @@ if ! command -v go >/dev/null 2>&1 || [ "\$(go env GOVERSION 2>/dev/null || true
   ln -sf /usr/local/go/bin/go /usr/local/bin/go
   ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
 fi
+
+cat > /etc/default/coturn <<'EOF'
+TURNSERVER_ENABLED=1
+EOF
+
+render_turn_config() {
+  cat > /etc/turnserver.conf <<EOF
+listening-port=\${TURN_PORT}
+tls-listening-port=\${TURNS_PORT}
+listening-ip=0.0.0.0
+external-ip=__HOST__
+realm=\${TURN_PUBLIC_HOST}
+server-name=\${TURN_PUBLIC_HOST}
+fingerprint
+lt-cred-mech
+user=\${TURN_USERNAME}:\${TURN_PASSWORD}
+total-quota=200
+bps-capacity=0
+stale-nonce=600
+no-cli
+no-loopback-peers
+no-multicast-peers
+min-port=\${TURN_MIN_PORT}
+max-port=\${TURN_MAX_PORT}
+log-file=/var/log/turnserver.log
+simple-log
+$(if [ -n "\$DOMAIN" ] && [ -f "/etc/letsencrypt/live/\$DOMAIN/fullchain.pem" ]; then printf 'cert=/etc/letsencrypt/live/%s/fullchain.pem\npkey=/etc/letsencrypt/live/%s/privkey.pem\n' "\$DOMAIN" "\$DOMAIN"; fi)
+EOF
+}
+
+render_turn_config
 
 cd \$RELEASE_DIR/source/mess
 TEST_TMP_DIR=\$(mktemp -d)
@@ -408,6 +485,8 @@ nginx -t
 systemctl daemon-reload
 systemctl enable redis-server
 systemctl restart redis-server
+systemctl enable coturn
+systemctl restart coturn
 systemctl enable messan
 systemctl restart messan
 systemctl restart nginx
@@ -416,16 +495,36 @@ if [ -n "\$DOMAIN" ] && [ ! -f "/etc/letsencrypt/live/\$DOMAIN/fullchain.pem" ];
   certbot --nginx -d "\$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email --redirect || true
 fi
 
+if [ -n "\$DOMAIN" ] && [ -f "/etc/letsencrypt/live/\$DOMAIN/fullchain.pem" ]; then
+  render_turn_config
+  systemctl restart coturn
+fi
+
+if command -v ufw >/dev/null 2>&1; then
+  status=\$(ufw status | head -n 1 || true)
+  if echo "\$status" | grep -qi "active"; then
+    ufw allow 3478/tcp || true
+    ufw allow 3478/udp || true
+    ufw allow 5349/tcp || true
+    ufw allow 49160:49200/tcp || true
+    ufw allow 49160:49200/udp || true
+  fi
+fi
+
 cd \$RELEASES_DIR
 ls -1dt */ | tail -n +\$((KEEP_RELEASES + 1)) | xargs -r rm -rf
 
 curl -fsS http://127.0.0.1:8080/health
 curl -fsS http://127.0.0.1:8080/version
+systemctl is-active coturn
 '@
 
 $remoteDeployScript = (
   $remoteDeployTemplate.Replace("__DOMAIN__", $Domain)
 ).Replace("__HOST__", $ServerHost).
+  Replace("__TURN_HOST__", $TurnHost).
+  Replace("__TURN_USERNAME__", $TurnUsername).
+  Replace("__TURN_PASSWORD__", $TurnPassword).
   Replace("__COMMIT_SHA__", $commitSHA).
   Replace("__KEEP_RELEASES__", [string]$KeepReleases).
   Replace("__REMOTE_ARCHIVE__", $remoteArchivePath).

@@ -1,6 +1,7 @@
 import React, { useEffect, useEffectEvent, useState, useRef } from 'react';
 import { useAppStore } from '../store';
 import { WebRTCManager } from '../lib/webrtc';
+import { appConfig } from '../lib/config';
 import { Phone, PhoneOff, Video, Mic, MicOff, VideoOff, ShieldCheck, RotateCcw, Activity } from 'lucide-react';
 import { socketManager } from '../lib/socket';
 import { db } from '../lib/db';
@@ -286,6 +287,11 @@ export const CallOverlay: React.FC = () => {
       presentStatus('Reconnecting secure signaling...', 'warning', false);
     }
     try {
+      const signalingReady = await socketManager.recoverTransport(6000);
+      if (!signalingReady) {
+        throw new Error('Secure signaling is unavailable. Check your connection and try again.');
+      }
+
       const generation = callGenerationRef.current + 1;
       callGenerationRef.current = generation;
       markCallContext(targetPubKey, 'outgoing', video);
@@ -343,6 +349,11 @@ export const CallOverlay: React.FC = () => {
       presentStatus('Reconnecting secure signaling...', 'warning', false);
     }
     try {
+      const signalingReady = await socketManager.recoverTransport(6000);
+      if (!signalingReady) {
+        throw new Error('Secure signaling is unavailable. Check your connection and try again.');
+      }
+
       const generation = callGenerationRef.current + 1;
       callGenerationRef.current = generation;
       clearCallTimeout();
@@ -634,6 +645,10 @@ export const CallOverlay: React.FC = () => {
                 <span className="text-white">{iceConnectionState}</span>
               </div>
               <div className="flex items-center justify-between">
+                <span className="text-slate-400">Relay</span>
+                <span className="text-white">{appConfig.rtcRelayConfigured ? 'configured' : 'missing'}</span>
+              </div>
+              <div className="flex items-center justify-between">
                 <span className="text-slate-400">Mic</span>
                 <span className="text-white">{isMicOn ? 'enabled' : 'muted'}</span>
               </div>
@@ -641,6 +656,11 @@ export const CallOverlay: React.FC = () => {
                 <span className="text-slate-400">Camera</span>
                 <span className="text-white">{isVideoOn ? 'enabled' : 'disabled'}</span>
               </div>
+              {!appConfig.rtcRelayConfigured ? (
+                <div className="rounded-xl border border-amber-400/20 bg-amber-500/10 px-3 py-2 text-[11px] leading-5 text-amber-100">
+                  TURN relay is not configured. Calls may fail on strict NATs, mobile networks, or corporate Wi-Fi even when messaging works.
+                </div>
+              ) : null}
             </div>
           </div>
         ) : null}

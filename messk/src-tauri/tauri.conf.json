@@ -26,7 +26,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ws://localhost:8081 http://localhost:8081 ws://127.0.0.1:8081 http://127.0.0.1:8081; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: http://localhost:8081 http://127.0.0.1:8081; media-src 'self' blob: http://localhost:8081 http://127.0.0.1:8081"
+      "csp": "default-src 'self'; connect-src 'self' wss://messk.online https://messk.online; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https://messk.online; media-src 'self' blob: https://messk.online"
     }
   },
   "bundle": {

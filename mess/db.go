@@ -113,8 +113,11 @@ func InitDB(ctx context.Context, dataSourceName string) *DB {
 		log.Fatalf("Unable to connect to database: %v", err)
 	}
 
-	db.SetMaxOpenConns(8)
-	db.SetMaxIdleConns(4)
+	// SQLite is used for live session state and offline delivery. Serializing
+	// access here is slower than a wide pool, but it avoids SQLITE_BUSY spikes
+	// that were breaking session updates and message persistence on production.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(30 * time.Minute)
 
 	if _, err := db.ExecContext(ctx, `

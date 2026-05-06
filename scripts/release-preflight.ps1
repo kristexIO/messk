@@ -101,6 +101,22 @@ if ([string]::IsNullOrWhiteSpace($frontendEnv["VITE_BACKEND_URL"])) {
   Fail "messk\.env.example must define VITE_BACKEND_URL"
 }
 
+if ([string]::IsNullOrWhiteSpace($frontendEnv["VITE_STUN_URLS"])) {
+  Fail "messk\.env.example must define VITE_STUN_URLS"
+}
+
+if ([string]::IsNullOrWhiteSpace($frontendEnv["VITE_TURN_URLS"])) {
+  Fail "messk\.env.example must define VITE_TURN_URLS"
+}
+
+if ([string]::IsNullOrWhiteSpace($frontendEnv["VITE_TURN_USERNAME"])) {
+  Fail "messk\.env.example must define VITE_TURN_USERNAME"
+}
+
+if ([string]::IsNullOrWhiteSpace($frontendEnv["VITE_TURN_CREDENTIAL"])) {
+  Fail "messk\.env.example must define VITE_TURN_CREDENTIAL"
+}
+
 $tauriConfig = Get-Content -Raw $tauriConfigPath | ConvertFrom-Json
 $frontendPackage = Get-Content -Raw $frontendPackagePath | ConvertFrom-Json
 $csp = [string]$tauriConfig.app.security.csp

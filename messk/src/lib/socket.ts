@@ -40,6 +40,7 @@ import {
   sendJsonEnvelope,
   sendSelfSyncEnvelope,
   sendSelfSyncPayload,
+  shouldHandleServerAck,
 } from './socketOutbox';
 import {
   ensureGroupSenderKey,
@@ -455,7 +456,7 @@ export class SocketManager {
 
         if (env.type === 'server_ack') {
           if (!env.msg_id) return;
-          if (!env.ack_type || env.ack_type === 'message') {
+          if (shouldHandleServerAck(env.ack_type)) {
             await this.handleServerAck(env.msg_id);
           }
           return;
@@ -640,18 +641,7 @@ export class SocketManager {
               reactions: {}
             });
 
-            const existingContact = await db.contacts.get(payload.peerPubKey);
-            await db.contacts.put({
-              pubKey: payload.peerPubKey,
-              name: existingContact?.name || payload.peerPubKey.substring(0, 8) + '...',
-              avatar: existingContact?.avatar,
-              username: existingContact?.username,
-              lastMessageAt: payload.timestamp,
-              pinned: existingContact?.pinned,
-              draft: existingContact?.draft,
-              archived: existingContact?.archived,
-              mutedUntil: existingContact?.mutedUntil,
-            });
+            await this.upsertDirectContact(payload.peerPubKey, payload.timestamp);
             void this.refreshContactProfile(payload.peerPubKey);
             return;
           }
@@ -781,16 +771,7 @@ export class SocketManager {
                   }
 
                 // Update contact
-                const contactExists = await db.contacts.get(peerPubKey);
-                if (!contactExists) {
-                  await db.contacts.put({
-                    pubKey: peerPubKey,
-                    name: peerPubKey.substring(0, 8) + '...',
-                    lastMessageAt: Date.now()
-                  });
-                } else {
-                  await db.contacts.update(peerPubKey, { lastMessageAt: Date.now() });
-                }
+                await this.upsertDirectContact(peerPubKey, Date.now());
                 void this.refreshContactProfile(peerPubKey);
                 if (senderPubKey !== pubKey) {
                   this.sendSelfSyncDirectMessage({
@@ -952,6 +933,26 @@ export class SocketManager {
     });
 
     return this.isRealtimeReady();
+  }
+
+  async recoverTransport(timeoutMs = 5000) {
+    const { myPublicKey } = useAppStore.getState();
+    if (!myPublicKey) {
+      return false;
+    }
+
+    if (!this.ws || this.ws.readyState === WebSocket.CLOSING || this.ws.readyState === WebSocket.CLOSED) {
+      this.connect(myPublicKey);
+    }
+
+    const ready = await this.ensureRealtimeReady(timeoutMs);
+    if (!ready) {
+      return false;
+    }
+
+    void this.flushOutgoingDirectMessages();
+    void this.flushOutgoingGroupEvents();
+    return true;
   }
 
   getSessionHeaders(): HeadersInit {
@@ -1204,6 +1205,23 @@ export class SocketManager {
     } catch (error) {
       console.warn('Failed to send self-sync payload', error);
     }
+  }
+
+  private async upsertDirectContact(peerPubKey: string, timestamp: number) {
+    const existingContact = await db.contacts.get(peerPubKey);
+    await db.contacts.put({
+      pubKey: peerPubKey,
+      name: existingContact?.name || `${peerPubKey.substring(0, 8)}...`,
+      avatar: existingContact?.avatar,
+      username: existingContact?.username,
+      lastMessageAt: Math.max(existingContact?.lastMessageAt ?? 0, timestamp),
+      pinned: existingContact?.pinned,
+      draft: existingContact?.draft,
+      archived: existingContact?.archived,
+      mutedUntil: existingContact?.mutedUntil,
+      verifiedIdentityFingerprint: existingContact?.verifiedIdentityFingerprint,
+      verifiedIdentityAt: existingContact?.verifiedIdentityAt,
+    });
   }
 
   private async enqueueOutgoingDirectMessage(message: OutgoingDirectMessage) {
@@ -1638,6 +1656,8 @@ export class SocketManager {
       status: 'pending',
       reactions: {}
     });
+    await this.upsertDirectContact(recipientPubKey, createdAt);
+    void this.refreshContactProfile(recipientPubKey);
     await this.enqueueOutgoingDirectMessage(queuedMessage);
 
     if (this.canSendImmediately()) {

@@ -1,11 +1,7 @@
 import { socketManager } from './socket';
+import { appConfig } from './config';
 
-const ICE_SERVERS: RTCIceServer[] = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:global.stun.twilio.com:3478' },
-];
+const ICE_SERVERS: RTCIceServer[] = appConfig.rtcIceServers;
 
 export class WebRTCManager {
   private peerConnection: RTCPeerConnection | null = null;
