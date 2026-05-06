@@ -37,6 +37,7 @@ var bufferPool = sync.Pool{
 
 var routedEnvelopeTypes = map[string]bool{
 	"message":          true,
+	"session_reset":    true,
 	"self_sync":        true,
 	"group_message":    true,
 	"group_edit":       true,
@@ -366,6 +367,8 @@ func floodPolicyForEvent(eventType string) (category string, limit int, window t
 		return "call", 36, 10 * time.Second
 	case "message", "group_message", "channel_message":
 		return "message", 80, 10 * time.Second
+	case "session_reset":
+		return "control", 24, 10 * time.Second
 	case "edit", "delete", "reaction", "group_edit", "group_delete", "group_reaction", "channel_edit", "channel_delete", "channel_reaction", "channel_pin":
 		return "interaction", 60, 10 * time.Second
 	default:

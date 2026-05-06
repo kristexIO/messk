@@ -64,6 +64,7 @@ const DIRECT_RETRY_BASE_DELAY_MS = 3_000;
 const DIRECT_RETRY_MAX_DELAY_MS = 30_000;
 const SOCKET_FAST_RECONNECT_ATTEMPTS = 5;
 const SOCKET_IDLE_RECONNECT_DELAY_MS = 60_000;
+const SESSION_RESET_COOLDOWN_MS = 15_000;
 const messageStatusRank: Record<StoredMessage['status'], number> = {
   pending: 0,
   sent: 1,
@@ -313,6 +314,7 @@ export class SocketManager {
   private flushingDirectOutbox = false;
   private outboxFlushTimer: ReturnType<typeof setInterval> | null = null;
   private lastRateLimitedToastAt = 0;
+  private lastSessionResetNoticeAt = new Map<string, number>();
   private api = new SocketApiClient(() => this.sessionToken);
 
   private releaseAuthWaiters() {
@@ -493,12 +495,22 @@ export class SocketManager {
           return;
         }
 
+        if (env.type === 'session_reset') {
+          if (!env.sender_pub_key || env.recipient_pub_key !== pubKey) {
+            return;
+          }
+          await this.handlePeerSessionReset(env.sender_pub_key);
+          return;
+        }
+
         // 3. Message interactions
         if (env.type === 'edit') {
            if (!env.sender_pub_key || !env.data || !env.msg_id) return;
            const plaintext = await this.decryptInSession(env.sender_pub_key, env.data);
            if (plaintext) {
                await markMessageEdited(env.msg_id, plaintext);
+           } else if (env.sender_pub_key !== pubKey) {
+               this.sendSessionResetNotice(env.sender_pub_key, pubKey);
            }
            return;
         }
@@ -806,6 +818,9 @@ export class SocketManager {
             }
           } else {
              console.error("Failed to decrypt message from", senderPubKey);
+             if (senderPubKey !== pubKey) {
+               this.sendSessionResetNotice(senderPubKey, pubKey);
+             }
           }
           return;
         }
@@ -1232,6 +1247,69 @@ export class SocketManager {
       verifiedIdentityFingerprint: existingContact?.verifiedIdentityFingerprint,
       verifiedIdentityAt: existingContact?.verifiedIdentityAt,
     });
+  }
+
+  private sendSessionResetNotice(peerPubKey: string, myPublicKey: string) {
+    if (!this.canSendImmediately()) {
+      return;
+    }
+
+    const lastSentAt = this.lastSessionResetNoticeAt.get(peerPubKey) ?? 0;
+    const now = Date.now();
+    if (now - lastSentAt < SESSION_RESET_COOLDOWN_MS) {
+      return;
+    }
+    this.lastSessionResetNoticeAt.set(peerPubKey, now);
+
+    try {
+      this.sendEnvelope({
+        type: 'session_reset',
+        recipient_pub_key: peerPubKey,
+        sender_pub_key: myPublicKey,
+      });
+    } catch (error) {
+      console.warn('Failed to send session reset notice', error);
+    }
+  }
+
+  private async handlePeerSessionReset(peerPubKey: string) {
+    const { myPublicKey, mySecretKey } = useAppStore.getState();
+    if (!myPublicKey || !mySecretKey) {
+      return;
+    }
+
+    await db.sessions.delete(peerPubKey);
+
+    const resendCandidates = await db.messages
+      .where('peerPublicKey')
+      .equals(peerPubKey)
+      .filter((message) => {
+        if (message.senderPublicKey !== myPublicKey) {
+          return false;
+        }
+        return message.status === 'pending' || message.status === 'sent';
+      })
+      .toArray();
+
+    for (const message of resendCandidates) {
+      const encryptedPayload = await this.encryptInSession(peerPubKey, message.text, mySecretKey, myPublicKey);
+      await this.enqueueOutgoingDirectMessage({
+        id: message.msgId,
+        recipientPubKey: peerPubKey,
+        senderPubKey: myPublicKey,
+        data: encryptedPayload,
+        createdAt: message.timestamp,
+        attempts: 0,
+      });
+      if (message.id) {
+        await updateMessageAndSync(message.id, { status: 'pending' });
+      }
+    }
+
+    toast('Secure session refreshed. Retrying undelivered messages.', { icon: '↻' });
+    if (this.canSendImmediately()) {
+      await this.flushOutgoingDirectMessages();
+    }
   }
 
   private async enqueueOutgoingDirectMessage(message: OutgoingDirectMessage) {

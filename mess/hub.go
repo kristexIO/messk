@@ -333,7 +333,7 @@ func (h *Hub) NotifyUser(msg *Message) {
 
 func shouldPersistOffline(messageType string) bool {
 	switch messageType {
-	case "typing", "delivery_receipt", "read_receipt", "call_offer", "call_answer", "call_reject", "call_end", "ice_candidate":
+	case "typing", "delivery_receipt", "read_receipt", "call_offer", "call_answer", "call_reject", "call_end", "ice_candidate", "session_reset":
 		return false
 	default:
 		return true

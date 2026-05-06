@@ -447,6 +447,13 @@ func TestNormalizeRoutedEnvelopeRequiresMessageID(t *testing.T) {
 	}, sender); !ok {
 		t.Fatal("expected typing without msg_id to be allowed")
 	}
+
+	if _, ok := normalizeRoutedEnvelope(Envelope{
+		Type:            "session_reset",
+		RecipientPubKey: recipient,
+	}, sender); !ok {
+		t.Fatal("expected session_reset without msg_id to be allowed")
+	}
 }
 
 func TestNormalizeRoutedEnvelopeRejectsInvalidRecipient(t *testing.T) {
