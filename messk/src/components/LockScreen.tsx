@@ -6,12 +6,20 @@ import { verifyPin } from '../lib/security';
 export const LockScreen: React.FC = () => {
   const [pin, setPin] = useState('');
   const [error, setError] = useState('');
-  const { setLocked, pinHash } = useAppStore();
+  const { setLocked, pinHash, mySecretKey, isIdentityRemembered, unlockRememberedIdentity } = useAppStore();
 
   const handleUnlock = async () => {
     if (pin.length !== 4 || !pinHash) return;
     const isValid = await verifyPin(pin, pinHash);
     if (isValid) {
+      if (!mySecretKey && isIdentityRemembered) {
+        const restored = await unlockRememberedIdentity(pin);
+        if (!restored) {
+          setError('Could not restore secure session');
+          setPin('');
+          return;
+        }
+      }
       setError('');
       setPin('');
       setLocked(false);
@@ -39,6 +47,19 @@ export const LockScreen: React.FC = () => {
         if (pin.length === 4 && pinHash) {
           void verifyPin(pin, pinHash).then((isValid) => {
             if (isValid) {
+              if (!mySecretKey && isIdentityRemembered) {
+                void unlockRememberedIdentity(pin).then((restored) => {
+                  if (restored) {
+                    setError('');
+                    setPin('');
+                    setLocked(false);
+                    return;
+                  }
+                  setError('Could not restore secure session');
+                  setPin('');
+                });
+                return;
+              }
               setError('');
               setPin('');
               setLocked(false);
@@ -53,7 +74,7 @@ export const LockScreen: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [pin, pinHash, setLocked]);
+  }, [isIdentityRemembered, mySecretKey, pin, pinHash, setLocked, unlockRememberedIdentity]);
 
   return (
     <div className="fixed inset-0 z-[500] flex items-center justify-center bg-black/40 backdrop-blur-3xl">

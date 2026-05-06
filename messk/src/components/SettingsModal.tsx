@@ -7,7 +7,7 @@ import { socketManager } from '../lib/socket';
 import { db, getDatabaseNameForIdentity } from '../lib/db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import Dexie from 'dexie';
-import { hashPin } from '../lib/security';
+import { clearRememberedIdentity, hashPin, rememberIdentityWithPin, verifyPin } from '../lib/security';
 import { createEncryptedBackup, downloadEncryptedBackup, parseBackupFile, restoreBackup } from '../lib/backup';
 import { prepareAvatarDataUrl } from '../lib/images';
 import { useI18n } from '../lib/i18n';
@@ -21,6 +21,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     nickname,
     avatar,
     username,
+    mySecretKey,
     myPublicKey,
     theme,
     designStyle,
@@ -34,6 +35,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     logout,
     isIdentityRemembered,
     forgetRememberedIdentity,
+    setIdentityRemembered,
     pinHash,
     setPinHash,
     lockApp,
@@ -161,7 +163,34 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
 
   const handleForgetDevice = () => {
     forgetRememberedIdentity();
-    setSecurityMessage('This build no longer stores your identity secret in browser storage. Use your seed phrase to restore the session after restart.');
+    setSecurityMessage('Secure device restore disabled. Reopening the app will require your seed phrase again.');
+  };
+
+  const handleRememberDevice = async () => {
+    if (!pinHash) {
+      setSecurityMessage('Set a PIN first to enable secure restore on this device.');
+      return;
+    }
+    if (!myPublicKey || !mySecretKey) {
+      setSecurityMessage('Sign in before enabling secure device restore.');
+      return;
+    }
+
+    const pin = window.prompt('Enter your current PIN to enable secure restore on this device.');
+    if (!pin) {
+      setSecurityMessage('Device restore setup cancelled.');
+      return;
+    }
+
+    const validPin = await verifyPin(pin, pinHash);
+    if (!validPin) {
+      setSecurityMessage('PIN verification failed. Device restore was not enabled.');
+      return;
+    }
+
+    await rememberIdentityWithPin(myPublicKey, mySecretKey, pin);
+    setIdentityRemembered(true);
+    setSecurityMessage('This device can now restore your session after refresh or restart using your PIN.');
   };
 
   const handleRevokeSession = async (token: string) => {
@@ -215,16 +244,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
 
     const nextPinHash = await hashPin(pinInput);
     setPinHash(nextPinHash);
+    if (myPublicKey && mySecretKey) {
+      await rememberIdentityWithPin(myPublicKey, mySecretKey, pinInput);
+      setIdentityRemembered(true);
+      setSecurityMessage('This device can now restore your session after refresh or restart using your PIN.');
+    }
     setPinInput('');
     setPinConfirm('');
     setPinMessage('PIN lock enabled.');
   };
 
   const handleRemovePin = () => {
+    clearRememberedIdentity();
+    setIdentityRemembered(false);
     setPinHash(null);
     setPinInput('');
     setPinConfirm('');
     setPinMessage('PIN lock disabled.');
+    setSecurityMessage('Secure device restore disabled.');
   };
 
   const handleExportBackup = async () => {
@@ -571,24 +608,34 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                     Device persistence
                   </div>
                   <p className="mt-2 text-xs leading-5 text-text-muted">
-                    Identity secrets are no longer stored in browser local storage. Chats remain on this device, but reopening the app requires your seed phrase.
+                    This device can keep an encrypted copy of your identity secret. It stays locked behind your PIN and lets you recover the session after refresh without exposing the raw key in browser storage.
                   </p>
                 </div>
                 <div className={`rounded-full px-3 py-1 text-xs font-semibold ${
                   isIdentityRemembered ? 'bg-emerald-400/10 text-emerald-200' : 'bg-amber-400/10 text-amber-100'
                 }`}>
-                  {isIdentityRemembered ? 'Remembered' : 'Seed required on restart'}
+                  {isIdentityRemembered ? 'PIN restore ready' : 'Seed required on restart'}
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-3">
-                <button
-                  onClick={handleForgetDevice}
-                  className="settings-secondary-button px-5 py-2.5 rounded-xl transition-all"
-                >
-                  Confirm secure mode
-                </button>
+                {isIdentityRemembered ? (
+                  <button
+                    onClick={handleForgetDevice}
+                    className="settings-secondary-button px-5 py-2.5 rounded-xl transition-all"
+                  >
+                    Forget this device
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => void handleRememberDevice()}
+                    disabled={!pinHash || !mySecretKey}
+                    className="settings-secondary-button px-5 py-2.5 rounded-xl transition-all disabled:opacity-60"
+                  >
+                    Remember this device
+                  </button>
+                )}
                 <span className="text-xs text-text-muted">
-                  Existing auto-login data, if any, is cleared without deleting local chats.
+                  {pinHash ? 'A valid PIN is required before this device can restore your session.' : 'Set a PIN first to allow encrypted restore on this device.'}
                 </span>
               </div>
               <div className="text-xs text-text-muted min-h-4">{securityMessage}</div>

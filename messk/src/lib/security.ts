@@ -1,9 +1,26 @@
 const encoder = new TextEncoder();
 const PIN_HASH_PREFIX = 'pbkdf2:v1';
 const PIN_HASH_ITERATIONS = 210_000;
+const REMEMBERED_IDENTITY_STORAGE_KEY = 'messenger_remembered_identity_v2';
+const REMEMBERED_IDENTITY_PREFIX = 'pinbox:v1';
+const REMEMBERED_IDENTITY_ITERATIONS = 310_000;
 
 type StoredSettings = {
   pinHash?: string | null;
+};
+
+type RememberedIdentityPayload = {
+  publicKey: string;
+  secretKey: string;
+  savedAt: number;
+};
+
+type RememberedIdentityEnvelope = {
+  version: string;
+  iterations: number;
+  salt: string;
+  iv: string;
+  ciphertext: string;
 };
 
 function readSettings(): StoredSettings {
@@ -48,6 +65,10 @@ function base64ToBytes(value: string): Uint8Array {
   return bytes;
 }
 
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return new Uint8Array(bytes).buffer;
+}
+
 function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) {
     return false;
@@ -84,6 +105,37 @@ async function derivePinHash(pin: string, salt: Uint8Array, iterations: number):
     256
   );
   return new Uint8Array(bits);
+}
+
+async function derivePinAesKey(
+  pin: string,
+  salt: Uint8Array,
+  iterations: number,
+  usages: KeyUsage[]
+): Promise<CryptoKey> {
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(pin),
+    'PBKDF2',
+    false,
+    ['deriveKey']
+  );
+
+  return crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      hash: 'SHA-256',
+      salt: toArrayBuffer(salt),
+      iterations,
+    },
+    keyMaterial,
+    {
+      name: 'AES-GCM',
+      length: 256,
+    },
+    false,
+    usages
+  );
 }
 
 export async function hashPin(pin: string): Promise<string> {
@@ -128,4 +180,82 @@ export function getStoredPinHash(): string | null {
 
 export function persistPinHash(pinHash: string | null): void {
   writeSettings({ pinHash });
+}
+
+export function hasRememberedIdentity(): boolean {
+  return Boolean(localStorage.getItem(REMEMBERED_IDENTITY_STORAGE_KEY));
+}
+
+export function clearRememberedIdentity(): void {
+  localStorage.removeItem(REMEMBERED_IDENTITY_STORAGE_KEY);
+}
+
+export async function rememberIdentityWithPin(
+  publicKey: string,
+  secretKey: string,
+  pin: string
+): Promise<void> {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await derivePinAesKey(pin, salt, REMEMBERED_IDENTITY_ITERATIONS, ['encrypt']);
+  const payload = encoder.encode(
+    JSON.stringify({
+      publicKey,
+      secretKey,
+      savedAt: Date.now(),
+    } satisfies RememberedIdentityPayload)
+  );
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: toArrayBuffer(iv) }, key, payload);
+  const envelope: RememberedIdentityEnvelope = {
+    version: REMEMBERED_IDENTITY_PREFIX,
+    iterations: REMEMBERED_IDENTITY_ITERATIONS,
+    salt: bytesToBase64(salt),
+    iv: bytesToBase64(iv),
+    ciphertext: bytesToBase64(new Uint8Array(ciphertext)),
+  };
+  localStorage.setItem(REMEMBERED_IDENTITY_STORAGE_KEY, JSON.stringify(envelope));
+}
+
+export async function restoreRememberedIdentityWithPin(
+  pin: string
+): Promise<{ publicKey: string; secretKey: string } | null> {
+  const raw = localStorage.getItem(REMEMBERED_IDENTITY_STORAGE_KEY);
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const envelope = JSON.parse(raw) as Partial<RememberedIdentityEnvelope>;
+    if (
+      envelope.version !== REMEMBERED_IDENTITY_PREFIX ||
+      typeof envelope.iterations !== 'number' ||
+      typeof envelope.salt !== 'string' ||
+      typeof envelope.iv !== 'string' ||
+      typeof envelope.ciphertext !== 'string'
+    ) {
+      return null;
+    }
+
+    const salt = base64ToBytes(envelope.salt);
+    const iv = base64ToBytes(envelope.iv);
+    const ciphertext = base64ToBytes(envelope.ciphertext);
+    const key = await derivePinAesKey(pin, salt, envelope.iterations, ['decrypt']);
+    const plaintext = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: toArrayBuffer(iv) },
+      key,
+      toArrayBuffer(ciphertext)
+    );
+    const payload = JSON.parse(new TextDecoder().decode(plaintext)) as Partial<RememberedIdentityPayload>;
+
+    if (typeof payload.publicKey !== 'string' || typeof payload.secretKey !== 'string') {
+      return null;
+    }
+
+    return {
+      publicKey: payload.publicKey,
+      secretKey: payload.secretKey,
+    };
+  } catch {
+    return null;
+  }
 }

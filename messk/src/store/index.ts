@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { migrateLocalDataToEncryptedAtRest, persistIdentityKeyPair, setVaultKey, switchActiveDatabase } from '../lib/db';
+import { clearRememberedIdentity, getStoredPinHash, hasRememberedIdentity, persistPinHash, restoreRememberedIdentityWithPin } from '../lib/security';
+import { prepareDatabaseForIdentity } from '../lib/db';
 
 export type Theme = 'dark' | 'light' | 'cyberpunk' | 'forest';
 export type DesignStyle = 'glass' | 'neumorph' | 'telegram';
@@ -56,6 +58,8 @@ interface AppState {
   setUiMode: (uiMode: UiMode) => void;
   setLanguage: (language: Language) => void;
   restoreRememberedIdentity: () => Promise<void>;
+  unlockRememberedIdentity: (pin: string) => Promise<boolean>;
+  setIdentityRemembered: (isRemembered: boolean) => void;
   forgetRememberedIdentity: () => void;
   logout: () => void;
 }
@@ -118,7 +122,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   groupSyncStatus: { state: 'idle', lastSyncAt: null, error: null },
   channelSyncStatus: { state: 'idle', lastSyncAt: null, error: null },
   isLocked: false,
-  pinHash: savedSettings.pinHash || null,
+  pinHash: getStoredPinHash(),
   theme: normalizeTheme(savedSettings.theme),
   designStyle: normalizeDesignStyle(savedSettings.designStyle),
   uiMode: normalizeUiMode(savedSettings.uiMode),
@@ -137,7 +141,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       avatar: savedProfile?.avatar ?? null,
       username: savedProfile?.username ?? null,
       isRestoringIdentity: false,
-      isIdentityRemembered: false,
+      isIdentityRemembered: hasRememberedIdentity(),
     });
     void persistIdentityKeyPair(publicKey, secretKey).catch((error) => {
       console.error('Failed to persist current identity key pair', error);
@@ -187,10 +191,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setPinHash: (pinHash) => {
     set((state) => ({ pinHash, isLocked: pinHash ? state.isLocked : false }));
-    localStorage.setItem('messenger_settings', JSON.stringify({
-      ...loadSettings(),
-      pinHash
-    }));
+    persistPinHash(pinHash);
+    if (!pinHash) {
+      clearRememberedIdentity();
+      set({ isIdentityRemembered: false });
+    }
   },
 
   lockApp: () => set((state) => state.pinHash ? { isLocked: true } : state),
@@ -231,16 +236,53 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   restoreRememberedIdentity: async () => {
+    const hasStoredPinHash = Boolean(getStoredPinHash());
+    const remembered = hasRememberedIdentity();
+
+    if (remembered && hasStoredPinHash) {
+      set({
+        isLocked: true,
+        isRestoringIdentity: false,
+        isIdentityRemembered: true,
+      });
+      return;
+    }
+
+    if (remembered && !hasStoredPinHash) {
+      clearRememberedIdentity();
+    }
+
     set({ isRestoringIdentity: false, isIdentityRemembered: false });
   },
 
+  unlockRememberedIdentity: async (pin) => {
+    const restored = await restoreRememberedIdentityWithPin(pin);
+    if (!restored) {
+      return false;
+    }
+
+    await prepareDatabaseForIdentity(restored.publicKey);
+    get().setKeys(restored.publicKey, restored.secretKey);
+    set({
+      isLocked: false,
+      isIdentityRemembered: true,
+    });
+    return true;
+  },
+
+  setIdentityRemembered: (isIdentityRemembered) => {
+    set({ isIdentityRemembered });
+  },
+
   forgetRememberedIdentity: () => {
+    clearRememberedIdentity();
     set({ isIdentityRemembered: false });
   },
   
   logout: () => {
     switchActiveDatabase(null);
     setVaultKey(null);
+    clearRememberedIdentity();
     set({
       myPublicKey: null,
       mySecretKey: null,
@@ -262,7 +304,6 @@ export const useAppStore = create<AppState>((set, get) => ({
 
 // Initialize theme on load
 if (typeof document !== 'undefined') {
-  localStorage.removeItem('messenger_remembered_identity');
   document.documentElement.setAttribute('data-theme', normalizeTheme(savedSettings.theme));
   document.documentElement.setAttribute('data-style', normalizeDesignStyle(savedSettings.designStyle));
   document.documentElement.setAttribute('data-ui', normalizeUiMode(savedSettings.uiMode));

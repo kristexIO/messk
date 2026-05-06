@@ -1,5 +1,10 @@
-import { describe, expect, it } from 'vitest';
-import { hashPin, verifyPin } from './security';
+import { afterEach, describe, expect, it } from 'vitest';
+import { clearRememberedIdentity, hashPin, hasRememberedIdentity, rememberIdentityWithPin, restoreRememberedIdentityWithPin, verifyPin } from './security';
+
+afterEach(() => {
+  clearRememberedIdentity();
+  localStorage.clear();
+});
 
 describe('PIN security', () => {
   it('hashes PINs with a salted PBKDF2 envelope', async () => {
@@ -18,5 +23,16 @@ describe('PIN security', () => {
 
     await expect(verifyPin('1234', legacyHash)).resolves.toBe(true);
     await expect(verifyPin('0000', legacyHash)).resolves.toBe(false);
+  });
+
+  it('stores remembered identities behind a PIN-encrypted envelope', async () => {
+    await rememberIdentityWithPin('pub-key', 'secret-key', '1234');
+
+    expect(hasRememberedIdentity()).toBe(true);
+    await expect(restoreRememberedIdentityWithPin('1234')).resolves.toEqual({
+      publicKey: 'pub-key',
+      secretKey: 'secret-key',
+    });
+    await expect(restoreRememberedIdentityWithPin('0000')).resolves.toBeNull();
   });
 });
