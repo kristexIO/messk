@@ -735,6 +735,53 @@ export async function rebuildAllThreadStats(database: MessengerDatabase = db) {
   await syncThreadStatsForMany(threadIds, database);
 }
 
+export async function reconcileDirectContactsFromMessages(database: MessengerDatabase = db) {
+  const [messages, groupThreads, channelThreads] = await Promise.all([
+    database.messages.toArray(),
+    database.groupThreads.toArray(),
+    database.channelThreads.toArray(),
+  ]);
+
+  const nonDirectThreadIds = new Set([
+    ...groupThreads.map((group) => group.id),
+    ...channelThreads.map((channel) => channel.id),
+  ]);
+  const latestByPeer = new Map<string, StoredMessage>();
+
+  for (const message of messages) {
+    const peerPublicKey = message.peerPublicKey?.trim();
+    if (!peerPublicKey || nonDirectThreadIds.has(peerPublicKey)) {
+      continue;
+    }
+    const current = latestByPeer.get(peerPublicKey);
+    if (!current || message.timestamp >= current.timestamp) {
+      latestByPeer.set(peerPublicKey, message);
+    }
+  }
+
+  for (const [peerPublicKey, latestMessage] of latestByPeer) {
+    const existingContact = await database.contacts.get(peerPublicKey);
+    await database.contacts.put({
+      pubKey: peerPublicKey,
+      name: existingContact?.name || `${peerPublicKey.substring(0, 8)}...`,
+      avatar: existingContact?.avatar,
+      username: existingContact?.username,
+      lastMessageAt: Math.max(existingContact?.lastMessageAt ?? 0, latestMessage.timestamp),
+      pinned: existingContact?.pinned,
+      draft: existingContact?.draft,
+      archived:
+        existingContact?.archived && latestMessage.senderPublicKey === peerPublicKey
+          ? false
+          : existingContact?.archived,
+      mutedUntil: existingContact?.mutedUntil,
+      verifiedIdentityFingerprint: existingContact?.verifiedIdentityFingerprint,
+      verifiedIdentityAt: existingContact?.verifiedIdentityAt,
+    });
+  }
+
+  await syncThreadStatsForMany([...latestByPeer.keys()], database);
+}
+
 export async function clearThreadStats(threadId: string, database: MessengerDatabase = db) {
   if (!threadId) return;
   await database.threadStats.delete(threadId);

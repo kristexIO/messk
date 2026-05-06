@@ -1,7 +1,14 @@
 import { useAppStore } from '../store';
 import { decryptMessage, encryptMessage, x3dhInitiate, x3dhRespond } from './crypto';
 import { RatchetManager, type RatchetMessage } from './ratchet';
-import { db, type OutgoingDirectMessage, type OutgoingGroupEvent, type Session, type StoredMessage } from './db';
+import {
+  db,
+  reconcileDirectContactsFromMessages,
+  type OutgoingDirectMessage,
+  type OutgoingGroupEvent,
+  type Session,
+  type StoredMessage,
+} from './db';
 import { box, randomBytes, secretbox } from 'tweetnacl';
 import { decodeBase64, encodeBase64 } from 'tweetnacl-util';
 import { sendDesktopNotification } from './notifications';
@@ -431,6 +438,9 @@ export class SocketManager {
           void this.refreshOwnProfile(pubKey);
           void this.syncMyProfile();
           void this.refreshKnownProfiles();
+          void reconcileDirectContactsFromMessages().catch((error) => {
+            console.warn('Failed to reconcile direct chats from local history', error);
+          });
           void this.flushOutgoingDirectMessages();
           void this.flushOutgoingGroupEvents();
           return;
@@ -641,7 +651,7 @@ export class SocketManager {
               reactions: {}
             });
 
-            await this.upsertDirectContact(payload.peerPubKey, payload.timestamp);
+            await this.upsertDirectContact(payload.peerPubKey, payload.timestamp, { unarchive: true });
             void this.refreshContactProfile(payload.peerPubKey);
             return;
           }
@@ -771,7 +781,7 @@ export class SocketManager {
                   }
 
                 // Update contact
-                await this.upsertDirectContact(peerPubKey, Date.now());
+                await this.upsertDirectContact(peerPubKey, Date.now(), { unarchive: true });
                 void this.refreshContactProfile(peerPubKey);
                 if (senderPubKey !== pubKey) {
                   this.sendSelfSyncDirectMessage({
@@ -1207,7 +1217,7 @@ export class SocketManager {
     }
   }
 
-  private async upsertDirectContact(peerPubKey: string, timestamp: number) {
+  private async upsertDirectContact(peerPubKey: string, timestamp: number, options?: { unarchive?: boolean }) {
     const existingContact = await db.contacts.get(peerPubKey);
     await db.contacts.put({
       pubKey: peerPubKey,
@@ -1217,7 +1227,7 @@ export class SocketManager {
       lastMessageAt: Math.max(existingContact?.lastMessageAt ?? 0, timestamp),
       pinned: existingContact?.pinned,
       draft: existingContact?.draft,
-      archived: existingContact?.archived,
+      archived: options?.unarchive ? false : existingContact?.archived,
       mutedUntil: existingContact?.mutedUntil,
       verifiedIdentityFingerprint: existingContact?.verifiedIdentityFingerprint,
       verifiedIdentityAt: existingContact?.verifiedIdentityAt,
@@ -1656,7 +1666,7 @@ export class SocketManager {
       status: 'pending',
       reactions: {}
     });
-    await this.upsertDirectContact(recipientPubKey, createdAt);
+    await this.upsertDirectContact(recipientPubKey, createdAt, { unarchive: true });
     void this.refreshContactProfile(recipientPubKey);
     await this.enqueueOutgoingDirectMessage(queuedMessage);
 

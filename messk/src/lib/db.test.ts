@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { MessengerDatabase, getDatabaseNameForIdentity, migrateLocalDataToEncryptedAtRest, persistIdentityKeyPair, prepareDatabaseForIdentity, setVaultKey, switchActiveDatabase } from './db';
+import { MessengerDatabase, getDatabaseNameForIdentity, migrateLocalDataToEncryptedAtRest, persistIdentityKeyPair, prepareDatabaseForIdentity, reconcileDirectContactsFromMessages, setVaultKey, switchActiveDatabase } from './db';
 
 describe('MessengerDatabase', () => {
   const dbNames: string[] = [];
@@ -293,5 +293,49 @@ describe('MessengerDatabase', () => {
     await expect(reopenedFirst.messages.count()).resolves.toBe(1);
     await expect(reopenedSecond.keypairs.count()).resolves.toBe(0);
     await expect(reopenedSecond.messages.count()).resolves.toBe(0);
+  });
+
+  it('rebuilds direct contacts from stored direct messages only', async () => {
+    const name = `MessengerDB-reconcile-${crypto.randomUUID()}`;
+    dbNames.push(name);
+    const db = new MessengerDatabase(name);
+    databases.push(db);
+    setVaultKey('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=');
+    await db.open();
+
+    await db.messages.bulkAdd([
+      {
+        msgId: 'direct-1',
+        peerPublicKey: 'peer-direct',
+        senderPublicKey: 'peer-direct',
+        text: 'hello',
+        timestamp: 100,
+        status: 'delivered',
+      },
+      {
+        msgId: 'group-1',
+        peerPublicKey: 'group-thread',
+        senderPublicKey: 'peer-direct',
+        text: 'group message',
+        timestamp: 200,
+        status: 'delivered',
+      },
+    ]);
+    await db.groupThreads.put({
+      id: 'group-thread',
+      title: 'Group',
+      role: 'member',
+      members: [],
+      memberCount: 0,
+      createdAt: 1,
+    });
+
+    await reconcileDirectContactsFromMessages(db);
+
+    await expect(db.contacts.get('peer-direct')).resolves.toMatchObject({
+      pubKey: 'peer-direct',
+      lastMessageAt: 100,
+    });
+    await expect(db.contacts.get('group-thread')).resolves.toBeUndefined();
   });
 });
