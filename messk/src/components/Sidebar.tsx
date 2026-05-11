@@ -2,7 +2,7 @@
 import { useAppStore } from '../store';
 import { db, getDatabaseNameForIdentity, rebuildAllThreadStats } from '../lib/db';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { KeyRound, Copy, Check, LogOut, MessageSquareOff, UserPlus, Edit2, Settings, QrCode, Search, Pin, Archive, BellOff, Bell, Inbox, Sparkles, Plus, Megaphone } from 'lucide-react';
+import { KeyRound, Copy, Check, LogOut, MessageSquareOff, UserPlus, Edit2, Settings, QrCode, Search, Pin, Archive, BellOff, Bell, Inbox, Plus, Megaphone, Users } from 'lucide-react';
 import { socketManager } from '../lib/socket';
 import { decodeBase64 } from 'tweetnacl-util';
 import { UserIdentityModal } from './UserIdentityModal';
@@ -14,6 +14,7 @@ import { CreateChatModal } from './CreateChatModal';
 import { refreshGroupAvailability, syncChannels, syncGroups } from '../lib/community';
 import { toast } from 'react-hot-toast';
 import { useI18n } from '../lib/i18n';
+import { SETTINGS_STORAGE_KEY } from '../lib/storage';
 
 const INITIAL_SIDEBAR_SECTION_LIMIT = 24;
 const SIDEBAR_SECTION_STEP = 24;
@@ -278,7 +279,7 @@ export const Sidebar: React.FC = () => {
       getDatabaseNameForIdentity(null),
     ]));
     socketManager.disconnect();
-    localStorage.removeItem('messenger_settings');
+    localStorage.removeItem(SETTINGS_STORAGE_KEY);
     logout();
     db.close();
     void Promise.all(databaseNames.map((databaseName) => Dexie.delete(databaseName).catch(() => undefined)))
@@ -556,7 +557,7 @@ export const Sidebar: React.FC = () => {
                   onClick={handleOpenQuickGroup}
                   className="mt-1 flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left text-sm text-white transition-all hover:bg-white/[0.06]"
                 >
-                  <Sparkles className="h-4 w-4 text-cyan-200" />
+                  <Users className="h-4 w-4 text-accent" />
                   <div>
                     <div className="font-medium">{t('newGroup')}</div>
                     <div className="text-[11px] text-text-muted">{t('newGroupHint')}</div>
@@ -619,7 +620,7 @@ export const Sidebar: React.FC = () => {
         <div className="mb-4 rounded-[26px] border border-white/8 bg-white/[0.03] p-3">
           <div className="mb-3 flex items-center justify-between px-2">
             <div className="flex items-center gap-2">
-              <Sparkles className="h-4 w-4 text-accent" />
+              <Users className="h-4 w-4 text-accent" />
               <span className="text-xs font-semibold uppercase tracking-[0.22em] text-text-muted">{t('groups')}</span>
             </div>
             <button
@@ -829,7 +830,7 @@ export const Sidebar: React.FC = () => {
           <div className="mb-4 rounded-[26px] border border-amber-300/15 bg-amber-300/[0.04] p-3">
             <div className="mb-3 flex items-center justify-between px-2">
               <div className="flex items-center gap-2">
-                <Sparkles className="h-4 w-4 text-amber-200" />
+                <Inbox className="h-4 w-4 text-accent" />
                 <span className="text-xs font-semibold uppercase tracking-[0.22em] text-amber-100/80">{t('invites')}</span>
               </div>
               <span className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] text-white">
@@ -1048,11 +1049,6 @@ export const Sidebar: React.FC = () => {
                   ? t('noUnreadChats')
                   : t('noRecentChats')}
             </p>
-            {activeFilter === 'inbox' ? (
-              <p className="mt-2 max-w-xs text-xs text-text-muted">
-                {t('emptyInboxHint')}
-              </p>
-            ) : null}
           </div>
         ) : null}
       </div>

@@ -36,9 +36,9 @@ export async function applyOptimisticChannelReaction(targetMsgId: string, myPubl
   await applyMessageReaction(targetMsgId, myPublicKey, reaction);
 }
 
-export async function handleIncomingChannelMessage(env: IncomingEnvelopeLike) {
+export async function handleIncomingChannelMessage(env: IncomingEnvelopeLike): Promise<boolean> {
   if (!env.group_id || !env.sender_pub_key || !env.data || !env.msg_id) {
-    return;
+    return false;
   }
 
   const existingMsg = await db.messages.where('msgId').equals(env.msg_id).first();
@@ -46,7 +46,7 @@ export async function handleIncomingChannelMessage(env: IncomingEnvelopeLike) {
     if (existingMsg.id && env.sender_pub_key === useAppStore.getState().myPublicKey && existingMsg.status !== 'delivered') {
       await updateMessageAndSync(existingMsg.id, { status: 'delivered' });
     }
-    return;
+    return true;
   }
 
   await addMessageAndSync({
@@ -67,11 +67,12 @@ export async function handleIncomingChannelMessage(env: IncomingEnvelopeLike) {
     const preview = getMessageNotificationPreview(env.data);
     sendDesktopNotification(`Mention in ${channel?.title ?? 'channel'}`, preview);
   }
+  return true;
 }
 
-export async function handleIncomingChannelEdit(env: IncomingEnvelopeLike) {
+export async function handleIncomingChannelEdit(env: IncomingEnvelopeLike): Promise<boolean> {
   if (!env.group_id || !env.target_msg_id || !env.data || !env.sender_pub_key) {
-    return;
+    return false;
   }
 
   const msg = await db.messages.where('msgId').equals(env.target_msg_id).first();
@@ -84,12 +85,14 @@ export async function handleIncomingChannelEdit(env: IncomingEnvelopeLike) {
       actorPubKey: env.sender_pub_key,
       msgId: env.target_msg_id,
     });
+    return true;
   }
+  return false;
 }
 
-export async function handleIncomingChannelDelete(env: IncomingEnvelopeLike) {
+export async function handleIncomingChannelDelete(env: IncomingEnvelopeLike): Promise<boolean> {
   if (!env.group_id || !env.target_msg_id || !env.sender_pub_key) {
-    return;
+    return false;
   }
 
   const msg = await db.messages.where('msgId').equals(env.target_msg_id).first();
@@ -102,23 +105,27 @@ export async function handleIncomingChannelDelete(env: IncomingEnvelopeLike) {
       actorPubKey: env.sender_pub_key,
       msgId: env.target_msg_id,
     });
+    return true;
   }
+  return false;
 }
 
-export async function handleIncomingChannelReaction(env: IncomingEnvelopeLike) {
+export async function handleIncomingChannelReaction(env: IncomingEnvelopeLike): Promise<boolean> {
   if (!env.group_id || !env.target_msg_id || !env.sender_pub_key) {
-    return;
+    return false;
   }
 
   const msg = await db.messages.where('msgId').equals(env.target_msg_id).first();
   if (msg?.id && msg.peerPublicKey === env.group_id) {
     await applyMessageReaction(env.target_msg_id, env.sender_pub_key, env.reaction ?? null);
+    return true;
   }
+  return false;
 }
 
-export async function handleIncomingChannelPin(env: IncomingEnvelopeLike) {
+export async function handleIncomingChannelPin(env: IncomingEnvelopeLike): Promise<boolean> {
   if (!env.group_id || !env.sender_pub_key) {
-    return;
+    return false;
   }
 
   const nextPinnedMsgId = env.target_msg_id?.trim() || null;
@@ -130,4 +137,5 @@ export async function handleIncomingChannelPin(env: IncomingEnvelopeLike) {
     actorPubKey: env.sender_pub_key,
     msgId: nextPinnedMsgId ?? undefined,
   });
+  return true;
 }

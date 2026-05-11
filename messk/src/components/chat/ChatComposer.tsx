@@ -1,6 +1,7 @@
 import React from 'react';
-import { Loader2, Mic, Paperclip, Send, Square } from 'lucide-react';
+import { Loader2, Mic, Paperclip, Send, Square, X } from 'lucide-react';
 import { MentionSuggestions, type MentionSuggestion } from './MentionSuggestions';
+import type { ReplyPreview } from '../../lib/message-format';
 
 type ChatComposerProps = {
   onSubmit: (event: React.FormEvent<HTMLFormElement>) => void | Promise<void>;
@@ -25,6 +26,8 @@ type ChatComposerProps = {
   sendAriaLabel: string;
   accentTone?: 'accent' | 'violet';
   onTypingChange?: (nextValue: string) => void;
+  replyTarget?: ReplyPreview | null;
+  onCancelReply?: () => void;
 };
 
 export function ChatComposer({
@@ -50,6 +53,8 @@ export function ChatComposer({
   sendAriaLabel,
   accentTone = 'accent',
   onTypingChange,
+  replyTarget,
+  onCancelReply,
 }: ChatComposerProps) {
   const focusAccentClass =
     accentTone === 'violet' ? 'focus-within:border-violet-300/40' : 'focus-within:border-accent/40';
@@ -60,7 +65,24 @@ export function ChatComposer({
     <form onSubmit={onSubmit} className="mx-auto flex max-w-5xl items-end gap-2 sm:gap-3">
       <input type="file" className="hidden" ref={fileInputRef} onChange={onFileChange} />
 
-      <div className={`composer-input relative flex flex-1 items-end gap-2 rounded-2xl border border-white/10 bg-white/5 p-2 transition-all ${focusAccentClass} focus-within:bg-white/10`}>
+      <div className={`composer-input relative flex flex-1 flex-col rounded-2xl border border-white/10 bg-white/5 p-2 transition-all ${focusAccentClass} focus-within:bg-white/10`}>
+        {replyTarget ? (
+          <div className="mb-2 flex w-full items-start justify-between gap-3 rounded-xl border border-white/10 bg-black/15 px-3 py-2">
+            <div className="min-w-0">
+              <div className="text-[11px] font-semibold uppercase text-text-muted">Reply</div>
+              <div className="mt-0.5 truncate text-sm text-white/85">{replyTarget.preview}</div>
+            </div>
+            <button
+              type="button"
+              onClick={onCancelReply}
+              className="rounded-lg p-1 text-text-muted transition-colors hover:bg-white/10 hover:text-white"
+              aria-label="Cancel reply"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        ) : null}
+        <div className="flex w-full items-end gap-2">
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
@@ -111,6 +133,7 @@ export function ChatComposer({
             {isRecording ? <Square className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
           </button>
         ) : null}
+        </div>
       </div>
 
       {messageInput.trim() || isUploading ? (

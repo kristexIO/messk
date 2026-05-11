@@ -347,6 +347,19 @@ func TestServeWsRejectsInvalidPublicKeyBeforeUpgrade(t *testing.T) {
 	}
 }
 
+func TestServeWsRejectsStaleClientBeforeUpgrade(t *testing.T) {
+	hub := NewHub(nil, nil, nil)
+	pubKey := base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012"))
+	req := httptest.NewRequest(http.MethodGet, "/ws?pub="+pubKey, nil)
+	rec := httptest.NewRecorder()
+
+	serveWs(hub, rec, req, context.Background())
+
+	if rec.Code != http.StatusUpgradeRequired {
+		t.Fatalf("expected 426, got %d", rec.Code)
+	}
+}
+
 func TestNormalizeRoutedEnvelopeOverwritesSender(t *testing.T) {
 	sender := base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012"))
 	recipient := base64.StdEncoding.EncodeToString([]byte("abcdefghijklmnopqrstuvwxyz123456"))

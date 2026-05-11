@@ -58,6 +58,7 @@ import {
   type GroupSenderKeyPayload,
   waitForGroupSenderKey,
 } from './socketGroups';
+import { LOCAL_STATE_VERSION } from './storage';
 
 const WS_URL = appConfig.wsUrl;
 const DIRECT_RETRY_BASE_DELAY_MS = 3_000;
@@ -65,7 +66,9 @@ const DIRECT_RETRY_MAX_DELAY_MS = 30_000;
 const SOCKET_FAST_RECONNECT_ATTEMPTS = 5;
 const SOCKET_IDLE_RECONNECT_DELAY_MS = 60_000;
 const SESSION_RESET_COOLDOWN_MS = 15_000;
+const DIRECT_CRYPTO_STATE_VERSION = 2;
 const messageStatusRank: Record<StoredMessage['status'], number> = {
+  failed: -1,
   pending: 0,
   sent: 1,
   delivered: 2,
@@ -75,6 +78,18 @@ const messageStatusRank: Record<StoredMessage['status'], number> = {
 type RatchetPayload = RatchetMessage & {
   x3dh?: X3DHParams;
 };
+
+function parseEnvelopeX3DH(data?: string): X3DHParams | undefined {
+  if (!data) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(data) as RatchetPayload;
+    return parsed.x3dh;
+  } catch {
+    return undefined;
+  }
+}
 
 type GroupInvitePayload = {
   groupId: string;
@@ -388,7 +403,7 @@ export class SocketManager {
           : 'connecting'
     );
 
-    const url = `${WS_URL}?pub=${encodeURIComponent(pubKey)}`;
+    const url = `${WS_URL}?pub=${encodeURIComponent(pubKey)}&state=${encodeURIComponent(LOCAL_STATE_VERSION)}`;
     if (this.reconnectAttempts === 0) {
       console.info('Connecting to WS:', url);
     }
@@ -433,10 +448,11 @@ export class SocketManager {
           this.sessionToken = env.session_token ?? null;
           this.reconnectAttempts = 0;
           useAppStore.getState().setConnectionStatus('connected');
+          await this.migrateLegacyDirectCryptoState(pubKey);
           this.releaseAuthWaiters();
           this.startOutboxLoop();
           // Upload prekeys if we don't have enough
-          this.ensurePreKeys(pubKey);
+          void this.ensurePreKeys(pubKey);
           void this.refreshOwnProfile(pubKey);
           void this.syncMyProfile();
           void this.refreshKnownProfiles();
@@ -495,11 +511,30 @@ export class SocketManager {
           return;
         }
 
+        if (env.type === 'session_repair') {
+          if (!env.sender_pub_key || env.recipient_pub_key !== pubKey || !env.data) {
+            return;
+          }
+
+          await db.sessions.delete(env.sender_pub_key);
+          const plaintext = await this.decryptInSession(env.sender_pub_key, env.data, parseEnvelopeX3DH(env.data));
+          if (plaintext) {
+            this.acknowledgeOfflineEnvelope(env);
+            void this.flushOutgoingDirectMessages();
+          } else {
+            await db.sessions.delete(env.sender_pub_key);
+            this.sendSessionResetNotice(env.sender_pub_key, pubKey);
+            this.acknowledgeOfflineEnvelope(env);
+          }
+          return;
+        }
+
         if (env.type === 'session_reset') {
           if (!env.sender_pub_key || env.recipient_pub_key !== pubKey) {
             return;
           }
           await this.handlePeerSessionReset(env.sender_pub_key);
+          this.acknowledgeOfflineEnvelope(env);
           return;
         }
 
@@ -509,8 +544,13 @@ export class SocketManager {
            const plaintext = await this.decryptInSession(env.sender_pub_key, env.data);
            if (plaintext) {
                await markMessageEdited(env.msg_id, plaintext);
-           } else if (env.sender_pub_key !== pubKey) {
+               this.acknowledgeOfflineEnvelope(env);
+           } else {
+             if (env.sender_pub_key !== pubKey) {
+               await db.sessions.delete(env.sender_pub_key);
                this.sendSessionResetNotice(env.sender_pub_key, pubKey);
+             }
+             this.acknowledgeOfflineEnvelope(env);
            }
            return;
         }
@@ -518,12 +558,14 @@ export class SocketManager {
         if (env.type === 'delete') {
             if (!env.msg_id) return;
             await markMessageDeleted(env.msg_id);
+            this.acknowledgeOfflineEnvelope(env);
             return;
         }
 
         if (env.type === 'reaction') {
             if (!env.msg_id || !env.sender_pub_key) return;
             await applyMessageReaction(env.msg_id, env.sender_pub_key, env.reaction ?? null);
+            this.acknowledgeOfflineEnvelope(env);
             return;
         }
         if (env.type === 'group_invite') {
@@ -545,6 +587,7 @@ export class SocketManager {
             memberCount: payload.memberCount,
             createdAt: Date.now(),
           });
+          this.acknowledgeOfflineEnvelope(env);
 
           try {
             const group = await refreshGroupAvailability(payload.groupId);
@@ -582,15 +625,20 @@ export class SocketManager {
             createdAt: Date.now(),
             distributedAt: Date.now(),
           });
+          this.acknowledgeOfflineEnvelope(env);
           await this.flushPendingGroupEvents(payload.groupId, env.sender_pub_key);
           return;
         }
         if (env.type === 'group_message') {
-          await this.handleIncomingGroupMessage(env);
+          if (await this.handleIncomingGroupMessage(env)) {
+            this.acknowledgeOfflineEnvelope(env);
+          }
           return;
         }
         if (env.type === 'group_edit') {
-          await this.handleIncomingGroupEdit(env);
+          if (await this.handleIncomingGroupEdit(env)) {
+            this.acknowledgeOfflineEnvelope(env);
+          }
           return;
         }
         if (env.type === 'group_delete') {
@@ -604,31 +652,44 @@ export class SocketManager {
               editedAt: undefined,
               reactions: {},
             });
+            this.acknowledgeOfflineEnvelope(env);
           }
           return;
         }
         if (env.type === 'group_reaction') {
-          await this.handleIncomingGroupReaction(env);
+          if (await this.handleIncomingGroupReaction(env)) {
+            this.acknowledgeOfflineEnvelope(env);
+          }
           return;
         }
         if (env.type === 'channel_message') {
-          await this.handleIncomingChannelMessage(env);
+          if (await this.handleIncomingChannelMessage(env)) {
+            this.acknowledgeOfflineEnvelope(env);
+          }
           return;
         }
         if (env.type === 'channel_edit') {
-          await this.handleIncomingChannelEdit(env);
+          if (await this.handleIncomingChannelEdit(env)) {
+            this.acknowledgeOfflineEnvelope(env);
+          }
           return;
         }
         if (env.type === 'channel_delete') {
-          await this.handleIncomingChannelDelete(env);
+          if (await this.handleIncomingChannelDelete(env)) {
+            this.acknowledgeOfflineEnvelope(env);
+          }
           return;
         }
         if (env.type === 'channel_reaction') {
-          await this.handleIncomingChannelReaction(env);
+          if (await this.handleIncomingChannelReaction(env)) {
+            this.acknowledgeOfflineEnvelope(env);
+          }
           return;
         }
         if (env.type === 'channel_pin') {
-          await this.handleIncomingChannelPin(env);
+          if (await this.handleIncomingChannelPin(env)) {
+            this.acknowledgeOfflineEnvelope(env);
+          }
           return;
         }
         if (env.type === 'self_sync') {
@@ -650,6 +711,7 @@ export class SocketManager {
               if (messageStatusRank[payload.status] > messageStatusRank[existingMsg.status]) {
                 await updateMessageAndSync(existingMsg.id, { status: payload.status });
               }
+              this.acknowledgeOfflineEnvelope(env);
               return;
             }
 
@@ -665,6 +727,7 @@ export class SocketManager {
 
             await this.upsertDirectContact(payload.peerPubKey, payload.timestamp, { unarchive: true });
             void this.refreshContactProfile(payload.peerPubKey);
+            this.acknowledgeOfflineEnvelope(env);
             return;
           }
 
@@ -678,6 +741,7 @@ export class SocketManager {
               editedAt: payload.editedAt,
               deletedAt: undefined,
             });
+            this.acknowledgeOfflineEnvelope(env);
             return;
           }
 
@@ -688,6 +752,7 @@ export class SocketManager {
               editedAt: undefined,
               reactions: {},
             });
+            this.acknowledgeOfflineEnvelope(env);
             return;
           }
 
@@ -699,23 +764,35 @@ export class SocketManager {
               delete nextReactions[payload.actorPubKey];
             }
             await updateMessageAndSync(existingMsg.id, { reactions: nextReactions });
+            this.acknowledgeOfflineEnvelope(env);
             return;
           }
           return;
         }
         if (env.type === 'message' || env.type === 'offline_message') {
-          const isForMe = env.recipient_pub_key === pubKey;
-          const isFromMe = env.sender_pub_key === pubKey;
-          
-          if (!isForMe && !isFromMe) return;
-
-          const senderPubKey = env.sender_pub_key;
-          const recipientPubKey = env.recipient_pub_key;
+          const myPubKey = pubKey.trim();
+          const senderPubKey = env.sender_pub_key?.trim();
+          const recipientPubKey = env.recipient_pub_key?.trim();
           const msgId = env.msg_id || crypto.randomUUID(); // Fallback if old format
           
           if (!senderPubKey || !recipientPubKey) {
               console.warn("Received message without sender or recipient. Ignoring.", env);
               return;
+          }
+
+          const isForMe = recipientPubKey === myPubKey;
+          const isFromMe = senderPubKey === myPubKey;
+
+          if (!isForMe && !isFromMe) return;
+
+          if (senderPubKey === recipientPubKey) {
+            console.warn("Ignoring self-addressed direct message:", msgId);
+            const existingMsg = await db.messages.where('msgId').equals(msgId).first();
+            if (existingMsg?.id && existingMsg.status !== 'delivered' && existingMsg.status !== 'read') {
+              await updateMessageAndSync(existingMsg.id, { status: 'delivered' });
+            }
+            this.acknowledgeOfflineEnvelope(env);
+            return;
           }
 
           // Mirror echo from multi-device sync: the backend sends our own
@@ -730,6 +807,7 @@ export class SocketManager {
             if (existingMsg?.id && existingMsg.status === 'sent') {
               await updateMessageAndSync(existingMsg.id, { status: 'delivered' });
             }
+            this.acknowledgeOfflineEnvelope(env);
             return;
           }
 
@@ -752,17 +830,11 @@ export class SocketManager {
                 msg_id: msgId
               }));
             }
+            this.acknowledgeOfflineEnvelope(env);
             return;
           }
 
-          // Parse data to see if there's x3dh
-          let x3dh: X3DHParams | undefined;
-          try {
-            const parsed = JSON.parse(env.data ?? '') as RatchetPayload;
-            x3dh = parsed.x3dh;
-          } catch {
-            x3dh = undefined;
-          }
+          const x3dh = parseEnvelopeX3DH(env.data);
 
           const plaintext = await this.decryptInSession(peerPubKey, env.data ?? '', x3dh);
           if (plaintext) {
@@ -816,11 +888,14 @@ export class SocketManager {
                 msg_id: msgId
               }));
             }
+            this.acknowledgeOfflineEnvelope(env);
           } else {
              console.error("Failed to decrypt message from", senderPubKey);
              if (senderPubKey !== pubKey) {
+               await db.sessions.delete(peerPubKey);
                this.sendSessionResetNotice(senderPubKey, pubKey);
              }
+             this.acknowledgeOfflineEnvelope(env);
           }
           return;
         }
@@ -1150,8 +1225,8 @@ export class SocketManager {
     }
   }
 
-  private async handleIncomingGroupMessage(env: IncomingEnvelope) {
-    if (!env.group_id || !env.sender_pub_key || !env.data || !env.msg_id) return;
+  private async handleIncomingGroupMessage(env: IncomingEnvelope): Promise<boolean> {
+    if (!env.group_id || !env.sender_pub_key || !env.data || !env.msg_id) return false;
     await this.ensureGroupThreadAvailable(env.group_id);
 
     const existingMsg = await db.messages.where('msgId').equals(env.msg_id).first();
@@ -1159,7 +1234,7 @@ export class SocketManager {
       if (existingMsg.id && env.sender_pub_key === useAppStore.getState().myPublicKey && existingMsg.status !== 'delivered') {
         await updateMessageAndSync(existingMsg.id, { status: 'delivered' });
       }
-      return;
+      return true;
     }
 
     let plaintext = env.data;
@@ -1167,13 +1242,13 @@ export class SocketManager {
       const senderKey = await this.waitForGroupSenderKey(env.group_id, env.sender_pub_key, false);
       if (!senderKey) {
         this.enqueuePendingGroupEvent(env);
-        return;
+        return false;
       }
 
       const decrypted = await this.decryptWithSenderKey(senderKey.key, env.data);
       if (!decrypted) {
         reportGroupIssue('group-message-decrypt', 'Failed to decrypt a group message.');
-        return;
+        return false;
       }
       plaintext = decrypted;
     }
@@ -1196,6 +1271,7 @@ export class SocketManager {
       const preview = getMessageNotificationPreview(plaintext);
       sendDesktopNotification(`Mention in ${group?.title ?? 'group'}`, preview);
     }
+    return true;
   }
 
   private async enqueueOutgoingGroupEvent(event: OutgoingGroupEvent) {
@@ -1212,6 +1288,21 @@ export class SocketManager {
       throw new Error('Secure channel is not ready yet');
     }
     sendJsonEnvelope((message) => ws.send(JSON.stringify(message)), payload);
+  }
+
+  private acknowledgeOfflineEnvelope(env: IncomingEnvelope) {
+    if (!env.msg_id || !this.canSendImmediately()) {
+      return;
+    }
+
+    try {
+      this.sendEnvelope({
+        type: 'offline_ack',
+        msg_id: env.msg_id,
+      });
+    } catch (error) {
+      console.warn('Failed to acknowledge offline envelope', error);
+    }
   }
 
   private sendSelfSyncDirectMessage(payload: SelfSyncPayload) {
@@ -1246,6 +1337,7 @@ export class SocketManager {
       mutedUntil: existingContact?.mutedUntil,
       verifiedIdentityFingerprint: existingContact?.verifiedIdentityFingerprint,
       verifiedIdentityAt: existingContact?.verifiedIdentityAt,
+      pinnedMsgId: existingContact?.pinnedMsgId,
     });
   }
 
@@ -1264,6 +1356,7 @@ export class SocketManager {
     try {
       this.sendEnvelope({
         type: 'session_reset',
+        msg_id: crypto.randomUUID(),
         recipient_pub_key: peerPubKey,
         sender_pub_key: myPublicKey,
       });
@@ -1279,6 +1372,12 @@ export class SocketManager {
     }
 
     await db.sessions.delete(peerPubKey);
+    await db.outgoingDirectMessages
+      .where('recipientPubKey')
+      .equals(peerPubKey)
+      .filter((message) => message.senderPubKey === myPublicKey)
+      .delete();
+    await this.sendSessionRepairEnvelope(peerPubKey, mySecretKey, myPublicKey);
 
     const resendCandidates = await db.messages
       .where('peerPublicKey')
@@ -1287,7 +1386,7 @@ export class SocketManager {
         if (message.senderPublicKey !== myPublicKey) {
           return false;
         }
-        return message.status === 'pending' || message.status === 'sent';
+        return message.status === 'pending' || message.status === 'failed';
       })
       .toArray();
 
@@ -1320,6 +1419,23 @@ export class SocketManager {
     sendDirectEnvelope((payload) => this.sendEnvelope(payload), message);
   }
 
+  private async sendSessionRepairEnvelope(peerPubKey: string, mySecretKey: string, myPublicKey: string) {
+    const data = await this.encryptInSession(
+      peerPubKey,
+      JSON.stringify({ kind: 'session_repair', createdAt: Date.now() }),
+      mySecretKey,
+      myPublicKey
+    );
+
+    this.sendEnvelope({
+      type: 'session_repair',
+      msg_id: crypto.randomUUID(),
+      recipient_pub_key: peerPubKey,
+      sender_pub_key: myPublicKey,
+      data,
+    });
+  }
+
   private sendSelfSyncEnvelope(message: OutgoingDirectMessage) {
     const { myPublicKey } = useAppStore.getState();
     if (!this.canSendImmediately() || !myPublicKey || !message.syncData) {
@@ -1330,6 +1446,17 @@ export class SocketManager {
 
   private async markDirectAttempt(message: OutgoingDirectMessage) {
     await markDirectAttempt(message);
+  }
+
+  private async migrateLegacyDirectCryptoState(myPublicKey: string) {
+    const migrationKey = `messk:direct-crypto-state:v${DIRECT_CRYPTO_STATE_VERSION}:${myPublicKey}`;
+    if (localStorage.getItem(migrationKey) === 'done') {
+      return;
+    }
+
+    await db.sessions.clear();
+    await db.outgoingDirectMessages.clear();
+    localStorage.setItem(migrationKey, 'done');
   }
 
   private async handleServerAck(msgId: string) {
@@ -1343,7 +1470,7 @@ export class SocketManager {
     }
 
     const msg = await db.messages.where('msgId').equals(msgId).first();
-    if (msg?.id && msg.status === 'pending') {
+    if (msg?.id && (msg.status === 'pending' || msg.status === 'failed')) {
       await updateMessageAndSync(msg.id, { status: 'sent' });
       if (queued) {
         this.sendSelfSyncDirectMessage({
@@ -1381,17 +1508,43 @@ export class SocketManager {
           continue;
         }
         try {
+          const localMessage = await db.messages.where('msgId').equals(message.id).first();
+          if (localMessage?.id && localMessage.status === 'failed') {
+            await updateMessageAndSync(localMessage.id, { status: 'pending' });
+          }
           this.sendDirectEnvelope(message);
           this.sendSelfSyncEnvelope(message);
           await this.markDirectAttempt(message);
         } catch (error) {
           console.warn('Failed to flush queued direct message', message.id, error);
+          await updateMessageByMsgID(message.id, { status: 'failed' });
           break;
         }
       }
     } finally {
       this.flushingDirectOutbox = false;
     }
+  }
+
+  async retryDirectMessage(msgId: string) {
+    const queuedMessage = await db.outgoingDirectMessages.get(msgId);
+    if (!queuedMessage) {
+      throw new Error('This message is no longer waiting in the retry queue.');
+    }
+
+    await db.outgoingDirectMessages.update(msgId, {
+      attempts: 0,
+      lastAttemptAt: undefined,
+    });
+    await updateMessageByMsgID(msgId, { status: 'pending' });
+
+    if (this.canSendImmediately()) {
+      await this.flushOutgoingDirectMessages();
+      toast.success('Retry started.');
+      return;
+    }
+
+    toast('Message will retry when the secure channel is back.', { icon: '...' });
   }
 
   private async flushOutgoingGroupEvents() {
@@ -1495,7 +1648,6 @@ export class SocketManager {
             }));
           }
 
-          await db.outgoingGroupEvents.delete(event.id);
         } catch (error) {
           console.warn('Failed to flush queued group event', event.type, error);
           break;
@@ -1506,26 +1658,26 @@ export class SocketManager {
     }
   }
 
-  private async handleIncomingGroupEdit(env: IncomingEnvelope) {
-    if (!env.group_id || !env.sender_pub_key || !env.target_msg_id || !env.data) return;
+  private async handleIncomingGroupEdit(env: IncomingEnvelope): Promise<boolean> {
+    if (!env.group_id || !env.sender_pub_key || !env.target_msg_id || !env.data) return false;
     await this.ensureGroupThreadAvailable(env.group_id);
 
     const senderKey = await this.waitForGroupSenderKey(env.group_id, env.sender_pub_key, false);
     if (!senderKey) {
       this.enqueuePendingGroupEvent(env);
-      return;
+      return false;
     }
 
     const plaintext = await this.decryptWithSenderKey(senderKey.key, env.data);
     if (!plaintext) {
       reportGroupIssue('group-edit-decrypt', 'Failed to decrypt a group edit.');
-      return;
+      return false;
     }
 
     const payload = parseGroupEditPayload(plaintext);
     if (!payload) {
       reportGroupIssue('group-edit-payload', 'Received an invalid group edit payload.');
-      return;
+      return false;
     }
 
     const msg = await db.messages.where('msgId').equals(env.target_msg_id).first();
@@ -1535,29 +1687,31 @@ export class SocketManager {
         editedAt: Date.now(),
         deletedAt: undefined,
       });
+      return true;
     }
+    return false;
   }
 
-  private async handleIncomingGroupReaction(env: IncomingEnvelope) {
-    if (!env.group_id || !env.sender_pub_key || !env.target_msg_id || !env.data) return;
+  private async handleIncomingGroupReaction(env: IncomingEnvelope): Promise<boolean> {
+    if (!env.group_id || !env.sender_pub_key || !env.target_msg_id || !env.data) return false;
     await this.ensureGroupThreadAvailable(env.group_id);
 
     const senderKey = await this.waitForGroupSenderKey(env.group_id, env.sender_pub_key, false);
     if (!senderKey) {
       this.enqueuePendingGroupEvent(env);
-      return;
+      return false;
     }
 
     const plaintext = await this.decryptWithSenderKey(senderKey.key, env.data);
     if (!plaintext) {
       reportGroupIssue('group-reaction-decrypt', 'Failed to decrypt a group reaction.');
-      return;
+      return false;
     }
 
     const payload = parseGroupReactionPayload(plaintext);
     if (!payload) {
       reportGroupIssue('group-reaction-payload', 'Received an invalid group reaction payload.');
-      return;
+      return false;
     }
 
     const msg = await db.messages.where('msgId').equals(env.target_msg_id).first();
@@ -1569,27 +1723,29 @@ export class SocketManager {
         delete reactions[env.sender_pub_key];
       }
       await updateMessageAndSync(msg.id, { reactions });
+      return true;
     }
+    return false;
   }
 
-  private async handleIncomingChannelMessage(env: IncomingEnvelope) {
-    await handleIncomingChannelMessageEvent(env);
+  private async handleIncomingChannelMessage(env: IncomingEnvelope): Promise<boolean> {
+    return handleIncomingChannelMessageEvent(env);
   }
 
-  private async handleIncomingChannelEdit(env: IncomingEnvelope) {
-    await handleIncomingChannelEditEvent(env);
+  private async handleIncomingChannelEdit(env: IncomingEnvelope): Promise<boolean> {
+    return handleIncomingChannelEditEvent(env);
   }
 
-  private async handleIncomingChannelDelete(env: IncomingEnvelope) {
-    await handleIncomingChannelDeleteEvent(env);
+  private async handleIncomingChannelDelete(env: IncomingEnvelope): Promise<boolean> {
+    return handleIncomingChannelDeleteEvent(env);
   }
 
-  private async handleIncomingChannelReaction(env: IncomingEnvelope) {
-    await handleIncomingChannelReactionEvent(env);
+  private async handleIncomingChannelReaction(env: IncomingEnvelope): Promise<boolean> {
+    return handleIncomingChannelReactionEvent(env);
   }
 
-  private async handleIncomingChannelPin(env: IncomingEnvelope) {
-    await handleIncomingChannelPinEvent(env);
+  private async handleIncomingChannelPin(env: IncomingEnvelope): Promise<boolean> {
+    return handleIncomingChannelPinEvent(env);
   }
 
 
@@ -1634,27 +1790,44 @@ export class SocketManager {
       return null;
     }
 
-    let session: Session | undefined = await db.sessions.get(peerPubKey);
+    const decryptAndPersist = async (session: Session, consumedPreKeyId?: number) => {
+      const plaintext = await RatchetManager.decrypt(session, ratchetData);
+      if (!plaintext) {
+        return null;
+      }
 
-    // Handle X3DH
-    if (!session && x3dh) {
+      await db.sessions.put({ ...session });
+      if (consumedPreKeyId !== undefined) {
+        await db.prekeys.delete(consumedPreKeyId);
+      }
+      return plaintext;
+    };
+
+    const createX3DHSession = async (): Promise<{ session: Session; consumedPreKeyId?: number } | null> => {
+      if (!x3dh?.ephemeralPub) {
+        return null;
+      }
+
       const { ephemeralPub, preKeyPubUsed } = x3dh;
       let myPreKeyPriv: string | null = null;
+      let consumedPreKeyId: number | undefined;
+
       if (preKeyPubUsed) {
         const storedPreKey = await db.prekeys.where('publicKey').equals(preKeyPubUsed).first();
         if (storedPreKey) {
           myPreKeyPriv = storedPreKey.secretKey;
-          await db.prekeys.delete(storedPreKey.id!);
+          consumedPreKeyId = storedPreKey.id;
         }
       }
 
       // Create session regardless of whether a prekey was used.
       // x3dhRespond handles null prekey by zeroing the DH components,
       // matching x3dhInitiate's fallback path.
-      if (ephemeralPub) {
-        const sharedSecret = await x3dhRespond(mySecretKey, myPreKeyPriv, null, peerPubKey, ephemeralPub, x3dh.pqcCiphertext ?? null);
-        const ratchetKP = box.keyPair();
-        session = {
+      const sharedSecret = await x3dhRespond(mySecretKey, myPreKeyPriv, null, peerPubKey, ephemeralPub, x3dh.pqcCiphertext ?? null);
+      const ratchetKP = box.keyPair();
+      return {
+        consumedPreKeyId,
+        session: {
           peerPublicKey: peerPubKey,
           rootKey: encodeBase64(sharedSecret),
           sendChainKey: null,
@@ -1666,18 +1839,25 @@ export class SocketManager {
           recvChainIndex: 0,
           previousSendChainLength: 0,
           skippedKeys: {}
-        };
-        await db.sessions.put({ ...session });
+        }
+      };
+    };
+
+    const existingSession = await db.sessions.get(peerPubKey);
+    if (existingSession) {
+      const plaintext = await decryptAndPersist(existingSession);
+      if (plaintext || !x3dh) {
+        return plaintext;
       }
+
+      await db.sessions.delete(peerPubKey);
     }
 
-    if (!session) return null;
-
-    const plaintext = await RatchetManager.decrypt(session, ratchetData);
-    if (plaintext) {
-      await db.sessions.put({ ...session });
+    const fresh = await createX3DHSession();
+    if (!fresh) {
+      return null;
     }
-    return plaintext;
+    return decryptAndPersist(fresh.session, fresh.consumedPreKeyId);
   }
 
   private async getPreKeyBundle(peerPubKey: string): Promise<string | null> {
@@ -1749,9 +1929,14 @@ export class SocketManager {
     await this.enqueueOutgoingDirectMessage(queuedMessage);
 
     if (this.canSendImmediately()) {
-      this.sendDirectEnvelope(queuedMessage);
-      this.sendSelfSyncEnvelope(queuedMessage);
-      await this.markDirectAttempt(queuedMessage);
+      try {
+        this.sendDirectEnvelope(queuedMessage);
+        this.sendSelfSyncEnvelope(queuedMessage);
+        await this.markDirectAttempt(queuedMessage);
+      } catch (error) {
+        await updateMessageByMsgID(msgId, { status: 'failed' });
+        throw error;
+      }
     } else {
       toast('Queued and will send when connection is back.', { icon: 'вЏі' });
     }

@@ -192,7 +192,7 @@ func (h *Hub) Run() {
 					return
 				}
 
-				offlineMsgs, err := h.db.GetAndDeleteOfflineMessages(ctx, c.PubKey)
+				offlineMsgs, err := h.db.ListOfflineMessages(ctx, c.PubKey)
 				if err != nil {
 					log.Printf("Failed to get offline messages for %s: %v", c.PubKey, err)
 					return
@@ -255,17 +255,15 @@ func (h *Hub) publishRoute(msg *Message) {
 	}
 }
 
-func (h *Hub) routeToLocal(msg *Message, allowPublish bool) {
+func (h *Hub) routeToLocal(msg *Message, allowPublish bool) bool {
 	if msg == nil {
-		return
+		return false
 	}
 	if isGroupRoutedType(msg.Type) {
-		h.routeGroupMessage(msg, allowPublish)
-		return
+		return h.routeGroupMessage(msg, allowPublish)
 	}
 	if isChannelRoutedType(msg.Type) {
-		h.routeChannelMessage(msg, allowPublish)
-		return
+		return h.routeChannelMessage(msg, allowPublish)
 	}
 
 	if allowPublish && h.rdb != nil {
@@ -273,23 +271,25 @@ func (h *Hub) routeToLocal(msg *Message, allowPublish bool) {
 	}
 
 	delivered := h.deliverToPubKey(msg.RecipientPubKey, msg.Payload, "slow recipient")
-	if !delivered && allowPublish && shouldPersistOffline(msg.Type) {
-		h.saveOfflineMessage(msg)
+	shouldPersist := shouldPersistOfflineMessage(msg)
+	if !delivered && allowPublish && shouldPersist {
+		return h.saveOfflineMessage(msg) == nil
 	}
+	return delivered || !shouldPersist
 }
 
-func (h *Hub) routeChannelMessage(msg *Message, allowPublish bool) {
+func (h *Hub) routeChannelMessage(msg *Message, allowPublish bool) bool {
 	if h.db == nil {
-		return
+		return false
 	}
 
 	var env Envelope
 	if err := json.Unmarshal(msg.Payload, &env); err != nil {
 		log.Printf("Failed to decode channel message envelope: %v", err)
-		return
+		return false
 	}
 	if env.GroupID == "" {
-		return
+		return false
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -298,13 +298,14 @@ func (h *Hub) routeChannelMessage(msg *Message, allowPublish bool) {
 	subscriberPubKeys, err := h.db.ListChannelSubscriberPubKeys(ctx, env.GroupID)
 	if err != nil {
 		log.Printf("Failed to load channel subscribers for %s: %v", env.GroupID, err)
-		return
+		return false
 	}
 
 	if allowPublish && h.rdb != nil {
 		h.publishRoute(msg)
 	}
 
+	accepted := true
 	for _, subscriberPubKey := range subscriberPubKeys {
 		if subscriberPubKey == "" {
 			continue
@@ -314,14 +315,17 @@ func (h *Hub) routeChannelMessage(msg *Message, allowPublish bool) {
 		}
 
 		if allowPublish && subscriberPubKey != msg.SenderPubKey && shouldPersistOffline(msg.Type) {
-			h.saveOfflineMessage(&Message{
+			if err := h.saveOfflineMessage(&Message{
 				Type:            msg.Type,
 				SenderPubKey:    msg.SenderPubKey,
 				RecipientPubKey: subscriberPubKey,
 				Payload:         msg.Payload,
-			})
+			}); err != nil {
+				accepted = false
+			}
 		}
 	}
+	return accepted
 }
 
 func (h *Hub) NotifyUser(msg *Message) {
@@ -340,18 +344,33 @@ func shouldPersistOffline(messageType string) bool {
 	}
 }
 
-func (h *Hub) routeGroupMessage(msg *Message, allowPublish bool) {
+func shouldPersistOfflineMessage(msg *Message) bool {
+	if msg == nil {
+		return false
+	}
+	if msg.Type != "session_reset" {
+		return shouldPersistOffline(msg.Type)
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(msg.Payload, &env); err != nil {
+		return false
+	}
+	return isValidMessageID(env.MsgID)
+}
+
+func (h *Hub) routeGroupMessage(msg *Message, allowPublish bool) bool {
 	if h.db == nil {
-		return
+		return false
 	}
 
 	var env Envelope
 	if err := json.Unmarshal(msg.Payload, &env); err != nil {
 		log.Printf("Failed to decode group message envelope: %v", err)
-		return
+		return false
 	}
 	if env.GroupID == "" {
-		return
+		return false
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -360,13 +379,14 @@ func (h *Hub) routeGroupMessage(msg *Message, allowPublish bool) {
 	memberPubKeys, err := h.db.ListGroupMemberPubKeys(ctx, env.GroupID)
 	if err != nil {
 		log.Printf("Failed to load group members for %s: %v", env.GroupID, err)
-		return
+		return false
 	}
 
 	if allowPublish && h.rdb != nil {
 		h.publishRoute(msg)
 	}
 
+	accepted := true
 	for _, memberPubKey := range memberPubKeys {
 		if memberPubKey == "" {
 			continue
@@ -376,29 +396,31 @@ func (h *Hub) routeGroupMessage(msg *Message, allowPublish bool) {
 		}
 
 		if allowPublish && memberPubKey != msg.SenderPubKey && shouldPersistOffline(msg.Type) {
-			h.saveOfflineMessage(&Message{
+			if err := h.saveOfflineMessage(&Message{
 				Type:            msg.Type,
 				SenderPubKey:    msg.SenderPubKey,
 				RecipientPubKey: memberPubKey,
 				Payload:         msg.Payload,
-			})
+			}); err != nil {
+				accepted = false
+			}
 		}
 	}
+	return accepted
 }
 
-func (h *Hub) saveOfflineMessage(msg *Message) {
+func (h *Hub) saveOfflineMessage(msg *Message) error {
 	if h.db == nil || msg == nil || msg.RecipientPubKey == "" {
-		return
+		return nil
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := h.db.SaveOfflineMessage(ctx, msg.SenderPubKey, msg.RecipientPubKey, msg.Payload); err != nil {
-			log.Printf("Failed to save offline message for %s: %v", msg.RecipientPubKey, err)
-		} else {
-			log.Printf("Offline message saved for %s", msg.RecipientPubKey)
-		}
-	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.db.SaveOfflineMessage(ctx, msg.SenderPubKey, msg.RecipientPubKey, msg.Payload); err != nil {
+		log.Printf("Failed to save offline message for %s: %v", msg.RecipientPubKey, err)
+		return err
+	}
+	log.Printf("Offline message saved for %s", msg.RecipientPubKey)
+	return nil
 }
 
 func (h *Hub) dropClient(client *Client, reason string) {

@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@300;400;500;600;700&display=swap');
 @import "tailwindcss";
 
 @theme {
@@ -9,6 +9,84 @@
   
   --color-accent-blue: #3b82f6;
   --color-accent-pink: #ec4899;
+}
+
+:root[data-font-size="small"] {
+  font-size: 14px;
+}
+
+:root[data-font-size="normal"] {
+  font-size: 16px;
+}
+
+:root[data-font-size="large"] {
+  font-size: 18px;
+}
+
+:root[data-density="compact"] .message-list {
+  padding-top: 0.75rem;
+  padding-bottom: 0.75rem;
+}
+
+:root[data-density="compact"] .message-list > * + * {
+  margin-top: 0.75rem;
+}
+
+:root[data-density="compact"] .chat-bubble-send,
+:root[data-density="compact"] .chat-bubble-recv {
+  padding: 0.5rem 0.85rem;
+}
+
+:root[data-density="compact"] .chat-header {
+  min-height: 64px;
+}
+
+:root[data-density="compact"] .chat-composer {
+  padding-top: 0.75rem;
+  padding-bottom: 0.75rem;
+}
+
+.settings-theme-preview {
+  position: relative;
+  width: 100%;
+  min-height: 56px;
+  overflow: hidden;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.settings-theme-preview span {
+  position: absolute;
+  border-radius: 999px;
+}
+
+.settings-theme-preview span:nth-child(1) {
+  left: 10px;
+  top: 10px;
+  width: 22px;
+  height: 22px;
+  background: rgba(255, 255, 255, 0.34);
+}
+
+.settings-theme-preview span:nth-child(2) {
+  right: 10px;
+  top: 12px;
+  width: 42%;
+  height: 10px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.settings-theme-preview span:nth-child(3) {
+  right: 10px;
+  bottom: 12px;
+  width: 58%;
+  height: 12px;
+  background: rgba(255, 255, 255, 0.32);
+}
+
+.settings-theme-system {
+  background: linear-gradient(135deg, #17212b 0 49%, #f5f8fb 50% 100%);
 }
 
 :root {
@@ -1281,4 +1359,630 @@
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-muted);
+}
+
+/* Strict Telegram-style web redesign */
+:root[data-ui="classic"] {
+  --bg-main: #0e1621;
+  --bg-gradient: #0e1621;
+  --bg-card: #17212b;
+  --border-glass: #263241;
+  --text-main: #e7edf3;
+  --text-muted: #8fa1b3;
+  --accent: #2aabee;
+  --accent-glow: rgba(42, 171, 238, 0.18);
+  --tg-app: #0e1621;
+  --tg-sidebar: #17212b;
+  --tg-panel: #17212b;
+  --tg-panel-soft: #1b2733;
+  --tg-panel-hover: #202e3c;
+  --tg-active: #223447;
+  --tg-line: #263241;
+  --tg-line-strong: #314153;
+  --tg-input: #111c27;
+  --tg-input-focus: #142231;
+  --tg-chat: #0e1621;
+  --tg-bubble-in: #182533;
+  --tg-bubble-out: #2b5278;
+  --tg-bubble-out-border: #35628d;
+  --tg-bubble-out-text: #ffffff;
+  --tg-danger: #e05d5d;
+}
+
+:root[data-ui="classic"][data-theme="cyberpunk"] {
+  --bg-main: #10121b;
+  --bg-gradient: #10121b;
+  --bg-card: #1b1d2b;
+  --border-glass: #31344d;
+  --text-main: #f1efff;
+  --text-muted: #aaa6c9;
+  --accent: #9b7cff;
+  --accent-glow: rgba(155, 124, 255, 0.18);
+  --tg-app: #10121b;
+  --tg-sidebar: #171926;
+  --tg-panel: #1b1d2b;
+  --tg-panel-soft: #22253a;
+  --tg-panel-hover: #292d45;
+  --tg-active: #302f54;
+  --tg-line: #31344d;
+  --tg-line-strong: #454766;
+  --tg-input: #131520;
+  --tg-input-focus: #191c2a;
+  --tg-chat: #0d1018;
+  --tg-bubble-in: #1b1d2b;
+  --tg-bubble-out: #4c4176;
+  --tg-bubble-out-border: #665493;
+  --tg-bubble-out-text: #ffffff;
+  --tg-danger: #f06f7b;
+}
+
+:root[data-ui="classic"][data-theme="forest"] {
+  --bg-main: #0f1714;
+  --bg-gradient: #0f1714;
+  --bg-card: #17241f;
+  --border-glass: #294137;
+  --text-main: #e9f5ef;
+  --text-muted: #8ba99a;
+  --accent: #38b77a;
+  --accent-glow: rgba(56, 183, 122, 0.16);
+  --tg-app: #0f1714;
+  --tg-sidebar: #14201b;
+  --tg-panel: #17241f;
+  --tg-panel-soft: #1d2d26;
+  --tg-panel-hover: #23372e;
+  --tg-active: #244536;
+  --tg-line: #294137;
+  --tg-line-strong: #345245;
+  --tg-input: #111d18;
+  --tg-input-focus: #15231d;
+  --tg-chat: #0c1411;
+  --tg-bubble-in: #17241f;
+  --tg-bubble-out: #276747;
+  --tg-bubble-out-border: #347c58;
+  --tg-bubble-out-text: #ffffff;
+  --tg-danger: #e06d65;
+}
+
+:root[data-ui="classic"][data-theme="light"] {
+  --bg-main: #e7edf3;
+  --bg-gradient: #e7edf3;
+  --bg-card: #ffffff;
+  --border-glass: #d7e0ea;
+  --text-main: #17212b;
+  --text-muted: #68798b;
+  --accent: #2481cc;
+  --accent-glow: rgba(36, 129, 204, 0.14);
+  --tg-app: #e7edf3;
+  --tg-sidebar: #ffffff;
+  --tg-panel: #ffffff;
+  --tg-panel-soft: #f4f7fa;
+  --tg-panel-hover: #edf3f8;
+  --tg-active: #e3f1fb;
+  --tg-line: #d7e0ea;
+  --tg-line-strong: #c5d2df;
+  --tg-input: #f5f8fb;
+  --tg-input-focus: #ffffff;
+  --tg-chat: #dfe7ef;
+  --tg-bubble-in: #ffffff;
+  --tg-bubble-out: #d4ecfb;
+  --tg-bubble-out-border: #b9d9ef;
+  --tg-bubble-out-text: #17212b;
+  --tg-danger: #d14b4b;
+}
+
+:root[data-ui="classic"],
+:root[data-ui="classic"] body,
+:root[data-ui="classic"] #root {
+  background: var(--tg-app) !important;
+  color: var(--text-main);
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+}
+
+:root[data-ui="classic"] body {
+  background-image: none !important;
+  letter-spacing: 0;
+}
+
+:root[data-ui="classic"] body::selection {
+  background: var(--accent-glow);
+}
+
+:root[data-ui="classic"] button,
+:root[data-ui="classic"] input,
+:root[data-ui="classic"] textarea,
+:root[data-ui="classic"] select {
+  font: inherit;
+  letter-spacing: 0;
+}
+
+:root[data-ui="classic"] .messk-shell,
+:root[data-ui="classic"] .auth-screen {
+  background: var(--tg-chat) !important;
+  color: var(--text-main) !important;
+}
+
+:root[data-ui="classic"] .messk-shell::before,
+:root[data-ui="classic"] .auth-screen::before,
+:root[data-ui="classic"] .auth-screen > .fixed:not(.auth-language-switcher) {
+  display: none !important;
+}
+
+:root[data-ui="classic"] .premium-glass,
+:root[data-ui="classic"] .auth-card,
+:root[data-ui="classic"] .identity-card,
+:root[data-ui="classic"] .workspace-tabs,
+:root[data-ui="classic"] .quick-create-menu,
+:root[data-ui="classic"] .sidebar-metrics,
+:root[data-ui="classic"] .feature-tile,
+:root[data-ui="classic"] .settings-panel,
+:root[data-ui="classic"] .settings-section,
+:root[data-ui="classic"] .settings-choice {
+  background: var(--tg-panel) !important;
+  border: 1px solid var(--tg-line) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+}
+
+:root[data-ui="classic"] .messk-sidebar {
+  background: var(--tg-sidebar) !important;
+  border: 0 !important;
+  border-right: 1px solid var(--tg-line) !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+:root[data-ui="classic"] .chat-stage {
+  background: var(--tg-chat) !important;
+}
+
+:root[data-ui="classic"] .chat-stage::before {
+  display: none !important;
+}
+
+:root[data-ui="classic"] .chat-header,
+:root[data-ui="classic"] .chat-composer {
+  background: var(--tg-panel) !important;
+  border-color: var(--tg-line) !important;
+  border-left: 0 !important;
+  border-right: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+}
+
+:root[data-ui="classic"] .chat-header {
+  min-height: 64px;
+  border-top: 0 !important;
+}
+
+:root[data-ui="classic"] .chat-composer {
+  border-bottom: 0 !important;
+}
+
+:root[data-ui="classic"] .message-list {
+  background: var(--tg-chat) !important;
+}
+
+:root[data-ui="classic"] .messk-shell aside {
+  background: var(--tg-sidebar) !important;
+  border-color: var(--tg-line) !important;
+  box-shadow: none !important;
+}
+
+:root[data-ui="classic"] .sidebar-brand h1,
+:root[data-ui="classic"] .auth-card h1,
+:root[data-ui="classic"] .auth-card h2,
+:root[data-ui="classic"] .settings-panel h2,
+:root[data-ui="classic"] .settings-panel h3 {
+  color: var(--text-main) !important;
+  letter-spacing: 0 !important;
+  -webkit-text-fill-color: currentColor;
+}
+
+:root[data-ui="classic"] .messk-shell .bg-gradient-to-r,
+:root[data-ui="classic"] .messk-shell .bg-gradient-to-br,
+:root[data-ui="classic"] .auth-screen .bg-gradient-to-r,
+:root[data-ui="classic"] .auth-screen .bg-gradient-to-br {
+  background-image: none !important;
+}
+
+:root[data-ui="classic"] .messk-shell .text-transparent,
+:root[data-ui="classic"] .auth-screen .text-transparent {
+  color: inherit !important;
+  -webkit-text-fill-color: currentColor;
+}
+
+:root[data-ui="classic"] .messk-shell [class*="shadow-"],
+:root[data-ui="classic"] .auth-screen [class*="shadow-"],
+:root[data-ui="classic"] .messk-shell [class*="drop-shadow"],
+:root[data-ui="classic"] .auth-screen [class*="drop-shadow"] {
+  box-shadow: none !important;
+  filter: none !important;
+}
+
+:root[data-ui="classic"] .messk-shell [class*="backdrop-blur"],
+:root[data-ui="classic"] .auth-screen [class*="backdrop-blur"] {
+  backdrop-filter: none !important;
+}
+
+:root[data-ui="classic"] .messk-shell .rounded-\[26px\],
+:root[data-ui="classic"] .messk-shell .rounded-\[22px\],
+:root[data-ui="classic"] .messk-shell .rounded-\[32px\],
+:root[data-ui="classic"] .messk-shell .rounded-\[28px\],
+:root[data-ui="classic"] .auth-screen .rounded-\[26px\],
+:root[data-ui="classic"] .auth-screen .rounded-\[22px\],
+:root[data-ui="classic"] .auth-screen .rounded-\[32px\],
+:root[data-ui="classic"] .auth-screen .rounded-\[28px\] {
+  border-radius: 10px !important;
+}
+
+:root[data-ui="classic"] .messk-shell .rounded-3xl,
+:root[data-ui="classic"] .messk-shell .rounded-2xl,
+:root[data-ui="classic"] .auth-screen .rounded-3xl,
+:root[data-ui="classic"] .auth-screen .rounded-2xl {
+  border-radius: 10px !important;
+}
+
+:root[data-ui="classic"] .messk-shell .rounded-xl,
+:root[data-ui="classic"] .auth-screen .rounded-xl {
+  border-radius: 8px !important;
+}
+
+:root[data-ui="classic"] .messk-shell .rounded-lg,
+:root[data-ui="classic"] .auth-screen .rounded-lg {
+  border-radius: 6px !important;
+}
+
+:root[data-ui="classic"] .messk-shell .border-white\/5,
+:root[data-ui="classic"] .messk-shell .border-white\/8,
+:root[data-ui="classic"] .messk-shell .border-white\/10,
+:root[data-ui="classic"] .messk-shell .border-white\/20,
+:root[data-ui="classic"] .auth-screen .border-white\/5,
+:root[data-ui="classic"] .auth-screen .border-white\/10,
+:root[data-ui="classic"] .auth-screen .border-white\/20 {
+  border-color: var(--tg-line) !important;
+}
+
+:root[data-ui="classic"] .messk-shell .bg-white\/5,
+:root[data-ui="classic"] .messk-shell .bg-white\/10,
+:root[data-ui="classic"] .messk-shell .bg-white\/\[0\.02\],
+:root[data-ui="classic"] .messk-shell .bg-white\/\[0\.03\],
+:root[data-ui="classic"] .messk-shell .bg-white\/\[0\.04\],
+:root[data-ui="classic"] .messk-shell .bg-white\/\[0\.05\],
+:root[data-ui="classic"] .messk-shell .bg-white\/\[0\.08\],
+:root[data-ui="classic"] .messk-shell .bg-black\/10,
+:root[data-ui="classic"] .auth-screen .bg-white\/5,
+:root[data-ui="classic"] .auth-screen .bg-white\/10,
+:root[data-ui="classic"] .auth-screen .bg-black\/10 {
+  background-color: var(--tg-panel-soft) !important;
+}
+
+:root[data-ui="classic"] .messk-shell .bg-\[\#10162f\],
+:root[data-ui="classic"] .messk-shell .bg-\[\#121937\],
+:root[data-ui="classic"] .messk-shell .bg-accent\/10,
+:root[data-ui="classic"] .messk-shell .bg-violet-300\/10,
+:root[data-ui="classic"] .messk-shell .bg-amber-300\/\[0\.04\] {
+  background-color: var(--tg-active) !important;
+}
+
+:root[data-ui="classic"] .messk-shell .border-accent\/30,
+:root[data-ui="classic"] .messk-shell .border-violet-300\/30,
+:root[data-ui="classic"] .messk-shell .border-amber-300\/15 {
+  border-color: var(--tg-line-strong) !important;
+}
+
+:root[data-ui="classic"] .messk-shell .text-white,
+:root[data-ui="classic"] .auth-screen .text-white,
+:root[data-ui="classic"] .messk-shell .text-white\/70,
+:root[data-ui="classic"] .auth-screen .text-white\/70,
+:root[data-ui="classic"] .messk-shell .text-white\/80,
+:root[data-ui="classic"] .auth-screen .text-white\/80 {
+  color: var(--text-main) !important;
+}
+
+:root[data-ui="classic"] .messk-shell .text-text-muted,
+:root[data-ui="classic"] .auth-screen .text-text-muted {
+  color: var(--text-muted) !important;
+}
+
+:root[data-ui="classic"] .messk-shell .text-accent,
+:root[data-ui="classic"] .messk-shell .text-cyan-200,
+:root[data-ui="classic"] .messk-shell .text-violet-200,
+:root[data-ui="classic"] .messk-shell .text-amber-200,
+:root[data-ui="classic"] .messk-shell .text-amber-100\/80,
+:root[data-ui="classic"] .auth-screen .text-accent,
+:root[data-ui="classic"] .auth-screen .text-cyan-200,
+:root[data-ui="classic"] .auth-screen .text-violet-200 {
+  color: var(--accent) !important;
+}
+
+:root[data-ui="classic"] .messk-shell .bg-accent,
+:root[data-ui="classic"] .auth-screen .bg-accent {
+  background-color: var(--accent) !important;
+}
+
+:root[data-ui="classic"] .connection-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: max-content;
+  margin-top: 2px;
+  padding: 2px 7px;
+  background: var(--tg-panel-soft) !important;
+  border: 1px solid var(--tg-line) !important;
+  border-radius: 999px !important;
+  color: var(--text-muted) !important;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  box-shadow: none !important;
+}
+
+:root[data-ui="classic"] .connection-chip span {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--text-muted);
+}
+
+:root[data-ui="classic"] .connection-chip.is-online span {
+  background: #4cc38a;
+}
+
+:root[data-ui="classic"] .connection-chip.is-offline span {
+  background: var(--tg-danger);
+}
+
+:root[data-ui="classic"] .connection-chip.is-pending span {
+  background: #e5b567;
+}
+
+:root[data-ui="classic"] .identity-card,
+:root[data-ui="classic"] .workspace-tabs,
+:root[data-ui="classic"] .sidebar-scroll > div,
+:root[data-ui="classic"] .settings-section {
+  background: var(--tg-panel) !important;
+}
+
+:root[data-ui="classic"] .workspace-tabs {
+  padding: 4px !important;
+}
+
+:root[data-ui="classic"] .workspace-tabs button,
+:root[data-ui="classic"] .messk-shell button[aria-pressed] {
+  border-radius: 8px !important;
+  box-shadow: none !important;
+}
+
+:root[data-ui="classic"] .workspace-tabs button:hover,
+:root[data-ui="classic"] .messk-shell button[aria-pressed]:hover,
+:root[data-ui="classic"] .quick-create-menu button:hover {
+  background: var(--tg-panel-hover) !important;
+  color: var(--text-main) !important;
+}
+
+:root[data-ui="classic"] .product-input,
+:root[data-ui="classic"] .composer-input,
+:root[data-ui="classic"] .settings-panel input,
+:root[data-ui="classic"] .settings-panel textarea,
+:root[data-ui="classic"] .settings-panel select,
+:root[data-ui="classic"] .auth-card input,
+:root[data-ui="classic"] .auth-card textarea {
+  background: var(--tg-input) !important;
+  border-color: var(--tg-line) !important;
+  border-radius: 10px !important;
+  color: var(--text-main) !important;
+  box-shadow: none !important;
+  outline: none !important;
+}
+
+:root[data-ui="classic"] .product-input:focus,
+:root[data-ui="classic"] .composer-input:focus,
+:root[data-ui="classic"] .settings-panel input:focus,
+:root[data-ui="classic"] .settings-panel textarea:focus,
+:root[data-ui="classic"] .settings-panel select:focus,
+:root[data-ui="classic"] .auth-card input:focus,
+:root[data-ui="classic"] .auth-card textarea:focus {
+  background: var(--tg-input-focus) !important;
+  border-color: var(--accent) !important;
+  box-shadow: none !important;
+}
+
+:root[data-ui="classic"] .product-input::placeholder,
+:root[data-ui="classic"] .composer-input::placeholder,
+:root[data-ui="classic"] .auth-card input::placeholder,
+:root[data-ui="classic"] .auth-card textarea::placeholder {
+  color: var(--text-muted) !important;
+}
+
+:root[data-ui="classic"] .product-icon-button,
+:root[data-ui="classic"] .btn-premium,
+:root[data-ui="classic"] .settings-panel button {
+  border-radius: 10px !important;
+  box-shadow: none !important;
+}
+
+:root[data-ui="classic"] .product-icon-button {
+  background: var(--tg-panel-soft) !important;
+  border-color: var(--tg-line) !important;
+  color: var(--text-main) !important;
+}
+
+:root[data-ui="classic"] .product-icon-button:hover {
+  background: var(--tg-panel-hover) !important;
+  border-color: var(--tg-line-strong) !important;
+}
+
+:root[data-ui="classic"] .btn-premium {
+  background: var(--accent) !important;
+  border: 1px solid var(--accent) !important;
+  color: #ffffff !important;
+}
+
+:root[data-ui="classic"] .quick-create-menu {
+  background: var(--tg-panel) !important;
+  border-color: var(--tg-line) !important;
+  padding: 6px !important;
+}
+
+:root[data-ui="classic"] .sidebar-scroll button,
+:root[data-ui="classic"] .sidebar-scroll [role="button"] {
+  box-shadow: none !important;
+}
+
+:root[data-ui="classic"] .sidebar-scroll button:hover,
+:root[data-ui="classic"] .sidebar-scroll [role="button"]:hover {
+  background: var(--tg-panel-hover) !important;
+  border-color: var(--tg-line-strong) !important;
+}
+
+:root[data-ui="classic"] .chat-bubble-send,
+:root[data-ui="classic"] .chat-bubble-recv {
+  max-width: min(74%, 640px);
+  border-radius: 12px !important;
+  padding: 8px 11px !important;
+  line-height: 1.45;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+}
+
+:root[data-ui="classic"] .chat-bubble-send {
+  background: var(--tg-bubble-out) !important;
+  border: 1px solid var(--tg-bubble-out-border) !important;
+  color: var(--tg-bubble-out-text) !important;
+}
+
+:root[data-ui="classic"] .chat-bubble-recv {
+  background: var(--tg-bubble-in) !important;
+  border: 1px solid var(--tg-line) !important;
+  color: var(--text-main) !important;
+}
+
+:root[data-ui="classic"] .chat-bubble-send .text-text-muted,
+:root[data-ui="classic"] .chat-bubble-send .text-white\/50,
+:root[data-ui="classic"] .chat-bubble-send .text-white\/60,
+:root[data-ui="classic"] .chat-bubble-send .text-white\/70 {
+  color: rgba(255, 255, 255, 0.72) !important;
+}
+
+:root[data-ui="classic"][data-theme="light"] .chat-bubble-send .text-text-muted,
+:root[data-ui="classic"][data-theme="light"] .chat-bubble-send .text-white\/50,
+:root[data-ui="classic"][data-theme="light"] .chat-bubble-send .text-white\/60,
+:root[data-ui="classic"][data-theme="light"] .chat-bubble-send .text-white\/70 {
+  color: rgba(23, 33, 43, 0.68) !important;
+}
+
+:root[data-ui="classic"] .chat-bubble-recv .text-text-muted,
+:root[data-ui="classic"] .chat-bubble-recv .text-white\/50,
+:root[data-ui="classic"] .chat-bubble-recv .text-white\/60,
+:root[data-ui="classic"] .chat-bubble-recv .text-white\/70 {
+  color: var(--text-muted) !important;
+}
+
+:root[data-ui="classic"] .message-list a,
+:root[data-ui="classic"] .chat-bubble-send a,
+:root[data-ui="classic"] .chat-bubble-recv a {
+  color: var(--accent) !important;
+}
+
+:root[data-ui="classic"] .chat-empty-state {
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+}
+
+:root[data-ui="classic"] .empty-orb {
+  background: var(--tg-panel) !important;
+  border-color: var(--tg-line) !important;
+  color: var(--accent) !important;
+  box-shadow: none !important;
+}
+
+:root[data-ui="classic"] .chat-empty-state .feature-tile {
+  background: var(--tg-panel) !important;
+  border-color: var(--tg-line) !important;
+}
+
+:root[data-ui="classic"] .auth-card {
+  border-radius: 12px !important;
+}
+
+:root[data-ui="classic"] .auth-language-switcher,
+:root[data-ui="classic"] .settings-language-switcher {
+  background: var(--tg-panel) !important;
+  border: 1px solid var(--tg-line) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+}
+
+:root[data-ui="classic"] .auth-language-pill,
+:root[data-ui="classic"] .settings-language-pill {
+  border-radius: 8px !important;
+  color: var(--text-muted) !important;
+}
+
+:root[data-ui="classic"] .auth-language-pill:hover,
+:root[data-ui="classic"] .settings-language-pill:hover,
+:root[data-ui="classic"] .auth-language-pill.is-active,
+:root[data-ui="classic"] .settings-language-pill.is-active {
+  background: var(--accent) !important;
+  color: #ffffff !important;
+  box-shadow: none !important;
+}
+
+:root[data-ui="classic"] .trust-chip {
+  background: var(--tg-panel-soft) !important;
+  border: 1px solid var(--tg-line) !important;
+  color: var(--text-muted) !important;
+  box-shadow: none !important;
+}
+
+:root[data-ui="classic"] .settings-backdrop,
+:root[data-ui="classic"] .modal-backdrop {
+  background: rgba(5, 10, 16, 0.72) !important;
+  backdrop-filter: none !important;
+}
+
+:root[data-ui="classic"][data-theme="light"] .settings-backdrop,
+:root[data-ui="classic"][data-theme="light"] .modal-backdrop {
+  background: rgba(23, 33, 43, 0.24) !important;
+}
+
+:root[data-ui="classic"] ::-webkit-scrollbar-thumb {
+  background: var(--tg-line-strong);
+}
+
+:root[data-ui="classic"] ::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+@media (max-width: 768px) {
+  :root[data-ui="classic"] .messk-sidebar {
+    border-right: 0 !important;
+  }
+
+  :root[data-ui="classic"] .chat-header {
+    min-height: 58px;
+  }
+
+  :root[data-ui="classic"] .chat-bubble-send,
+  :root[data-ui="classic"] .chat-bubble-recv {
+    max-width: min(88vw, 360px);
+  }
+}
+
+@media (max-width: 640px) {
+  :root[data-ui="classic"] .auth-screen {
+    padding-top: 92px !important;
+    align-items: flex-start !important;
+  }
+
+  :root[data-ui="classic"] .auth-language-switcher {
+    top: 14px !important;
+    max-width: calc(100vw - 32px);
+  }
+
+  :root[data-ui="classic"] .auth-card {
+    margin-top: 0 !important;
+  }
 }

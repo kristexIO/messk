@@ -2,11 +2,14 @@ import { create } from 'zustand';
 import { migrateLocalDataToEncryptedAtRest, persistIdentityKeyPair, setVaultKey, switchActiveDatabase } from '../lib/db';
 import { clearRememberedIdentity, getStoredPinHash, hasRememberedIdentity, persistPinHash, restoreRememberedIdentityWithPin } from '../lib/security';
 import { prepareDatabaseForIdentity } from '../lib/db';
+import { SETTINGS_STORAGE_KEY } from '../lib/storage';
 
-export type Theme = 'dark' | 'light' | 'cyberpunk' | 'forest';
+export type Theme = 'system' | 'dark' | 'light' | 'cyberpunk' | 'forest';
 export type DesignStyle = 'glass' | 'neumorph' | 'telegram';
 export type UiMode = 'classic' | 'next';
 export type Language = 'en' | 'ru' | 'fr' | 'de';
+export type FontSize = 'small' | 'normal' | 'large';
+export type InterfaceDensity = 'compact' | 'comfortable';
 
 export type CollectionSyncStatus = {
   state: 'idle' | 'syncing' | 'synced' | 'error';
@@ -37,6 +40,9 @@ interface AppState {
   designStyle: DesignStyle;
   uiMode: UiMode;
   language: Language;
+  fontSize: FontSize;
+  interfaceDensity: InterfaceDensity;
+  autoLockMinutes: number;
   isRestoringIdentity: boolean;
   isIdentityRemembered: boolean;
 
@@ -57,6 +63,9 @@ interface AppState {
   setDesignStyle: (designStyle: DesignStyle) => void;
   setUiMode: (uiMode: UiMode) => void;
   setLanguage: (language: Language) => void;
+  setFontSize: (fontSize: FontSize) => void;
+  setInterfaceDensity: (interfaceDensity: InterfaceDensity) => void;
+  setAutoLockMinutes: (minutes: number) => void;
   restoreRememberedIdentity: () => Promise<void>;
   unlockRememberedIdentity: (pin: string) => Promise<boolean>;
   setIdentityRemembered: (isRemembered: boolean) => void;
@@ -67,7 +76,7 @@ interface AppState {
 // Helper to load settings from local storage
 const loadSettings = () => {
   try {
-    const saved = localStorage.getItem('messenger_settings');
+    const saved = localStorage.getItem(SETTINGS_STORAGE_KEY);
     return saved ? JSON.parse(saved) : {};
   } catch {
     return {};
@@ -81,7 +90,7 @@ const normalizeLanguage = (value: unknown): Language => {
 };
 
 const normalizeTheme = (value: unknown): Theme => {
-  return value === 'light' || value === 'cyberpunk' || value === 'forest' || value === 'dark' ? value : 'dark';
+  return value === 'system' || value === 'light' || value === 'cyberpunk' || value === 'forest' || value === 'dark' ? value : 'dark';
 };
 
 const normalizeDesignStyle = (value: unknown): DesignStyle => {
@@ -90,6 +99,44 @@ const normalizeDesignStyle = (value: unknown): DesignStyle => {
 
 const normalizeUiMode = (value: unknown): UiMode => {
   return value === 'next' || value === 'classic' ? value : 'classic';
+};
+
+const normalizeFontSize = (value: unknown): FontSize => {
+  return value === 'small' || value === 'large' || value === 'normal' ? value : 'normal';
+};
+
+const normalizeInterfaceDensity = (value: unknown): InterfaceDensity => {
+  return value === 'compact' || value === 'comfortable' ? value : 'comfortable';
+};
+
+const normalizeAutoLockMinutes = (value: unknown): number => {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 240 ? value : 15;
+};
+
+const resolveTheme = (theme: Theme): Exclude<Theme, 'system'> => {
+  if (theme !== 'system') {
+    return theme;
+  }
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return 'dark';
+  }
+  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+};
+
+const applyThemeAttribute = (theme: Theme) => {
+  if (typeof document === 'undefined') return;
+  document.documentElement.setAttribute('data-theme-choice', theme);
+  document.documentElement.setAttribute('data-theme', resolveTheme(theme));
+};
+
+const applyFontSizeAttribute = (fontSize: FontSize) => {
+  if (typeof document === 'undefined') return;
+  document.documentElement.setAttribute('data-font-size', fontSize);
+};
+
+const applyInterfaceDensityAttribute = (interfaceDensity: InterfaceDensity) => {
+  if (typeof document === 'undefined') return;
+  document.documentElement.setAttribute('data-density', interfaceDensity);
 };
 
 const loadProfileForKey = (publicKey: string): { nickname?: string | null; avatar?: string | null; username?: string | null } | null => {
@@ -127,6 +174,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   designStyle: normalizeDesignStyle(savedSettings.designStyle),
   uiMode: normalizeUiMode(savedSettings.uiMode),
   language: normalizeLanguage(savedSettings.language),
+  fontSize: normalizeFontSize(savedSettings.fontSize),
+  interfaceDensity: normalizeInterfaceDensity(savedSettings.interfaceDensity),
+  autoLockMinutes: normalizeAutoLockMinutes(savedSettings.autoLockMinutes),
   isRestoringIdentity: true,
   isIdentityRemembered: false,
 
@@ -162,7 +212,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       : settings.profiles;
 
     set({ nickname, avatar, username });
-    localStorage.setItem('messenger_settings', JSON.stringify({
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
       ...settings,
       nickname,
       avatar,
@@ -202,8 +252,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   
   setTheme: (theme) => {
     set({ theme });
-    document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('messenger_settings', JSON.stringify({
+    applyThemeAttribute(theme);
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
       ...loadSettings(),
       theme
     }));
@@ -212,7 +262,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setDesignStyle: (designStyle) => {
     set({ designStyle });
     document.documentElement.setAttribute('data-style', designStyle);
-    localStorage.setItem('messenger_settings', JSON.stringify({
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
       ...loadSettings(),
       designStyle
     }));
@@ -221,7 +271,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setUiMode: (uiMode) => {
     set({ uiMode });
     document.documentElement.setAttribute('data-ui', uiMode);
-    localStorage.setItem('messenger_settings', JSON.stringify({
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
       ...loadSettings(),
       uiMode
     }));
@@ -229,9 +279,36 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setLanguage: (language) => {
     set({ language });
-    localStorage.setItem('messenger_settings', JSON.stringify({
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
       ...loadSettings(),
       language
+    }));
+  },
+
+  setFontSize: (fontSize) => {
+    set({ fontSize });
+    applyFontSizeAttribute(fontSize);
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
+      ...loadSettings(),
+      fontSize
+    }));
+  },
+
+  setInterfaceDensity: (interfaceDensity) => {
+    set({ interfaceDensity });
+    applyInterfaceDensityAttribute(interfaceDensity);
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
+      ...loadSettings(),
+      interfaceDensity
+    }));
+  },
+
+  setAutoLockMinutes: (autoLockMinutes) => {
+    const normalized = normalizeAutoLockMinutes(autoLockMinutes);
+    set({ autoLockMinutes: normalized });
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
+      ...loadSettings(),
+      autoLockMinutes: normalized
     }));
   },
 
@@ -304,7 +381,20 @@ export const useAppStore = create<AppState>((set, get) => ({
 
 // Initialize theme on load
 if (typeof document !== 'undefined') {
-  document.documentElement.setAttribute('data-theme', normalizeTheme(savedSettings.theme));
+  applyThemeAttribute(normalizeTheme(savedSettings.theme));
   document.documentElement.setAttribute('data-style', normalizeDesignStyle(savedSettings.designStyle));
   document.documentElement.setAttribute('data-ui', normalizeUiMode(savedSettings.uiMode));
+  applyFontSizeAttribute(normalizeFontSize(savedSettings.fontSize));
+  applyInterfaceDensityAttribute(normalizeInterfaceDensity(savedSettings.interfaceDensity));
+}
+
+if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+  const media = window.matchMedia('(prefers-color-scheme: light)');
+  const syncSystemTheme = () => {
+    const currentTheme = normalizeTheme(loadSettings().theme);
+    if (currentTheme === 'system') {
+      applyThemeAttribute(currentTheme);
+    }
+  };
+  media.addEventListener?.('change', syncSystemTheme);
 }

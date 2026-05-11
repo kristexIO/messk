@@ -1119,10 +1119,7 @@ func (db *DB) SaveOfflineMessage(ctx context.Context, senderPubKey, recipientPub
 	msgID := extractMessageID(payload)
 	var lastErr error
 	for attempt := 0; attempt < 5; attempt++ {
-		_, err := db.db.ExecContext(ctx, `
-			INSERT OR IGNORE INTO offline_messages (sender_pub_key, recipient_pub_key, msg_id, payload)
-			VALUES (?, ?, ?, ?);
-		`, senderPubKey, recipientPubKey, msgID, payload)
+		err := db.saveOfflineMessageOnce(ctx, senderPubKey, recipientPubKey, msgID, payload)
 		if err == nil {
 			return nil
 		}
@@ -1136,7 +1133,128 @@ func (db *DB) SaveOfflineMessage(ctx context.Context, senderPubKey, recipientPub
 	return lastErr
 }
 
-// GetAndDeleteOfflineMessages возвращает все сообщения для пользователя и удаляет их из БД
+// saveOfflineMessageOnce updates an existing undelivered envelope before
+// inserting. That lets a resent message repair stale ciphertext after a
+// session reset.
+func (db *DB) saveOfflineMessageOnce(ctx context.Context, senderPubKey, recipientPubKey, msgID string, payload []byte) error {
+	if strings.TrimSpace(msgID) != "" {
+		result, err := db.db.ExecContext(ctx, `
+			UPDATE offline_messages
+			SET sender_pub_key = ?, payload = ?, created_at = CURRENT_TIMESTAMP
+			WHERE sender_pub_key = ? AND recipient_pub_key = ? AND msg_id = ?;
+		`, senderPubKey, payload, senderPubKey, recipientPubKey, msgID)
+		if err != nil {
+			return err
+		}
+		if affected, err := result.RowsAffected(); err == nil && affected > 0 {
+			return nil
+		}
+	}
+
+	_, err := db.db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO offline_messages (sender_pub_key, recipient_pub_key, msg_id, payload)
+		VALUES (?, ?, ?, ?);
+	`, senderPubKey, recipientPubKey, msgID, payload)
+	return err
+}
+
+func (db *DB) ListOfflineMessages(ctx context.Context, pubKey string) ([]*Message, error) {
+	rows, err := db.db.QueryContext(ctx, `
+		SELECT id, sender_pub_key, recipient_pub_key, payload
+		FROM offline_messages
+		WHERE recipient_pub_key = ?
+		ORDER BY id ASC
+		LIMIT ?
+	`, pubKey, offlineDeliveryBatchLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []*Message
+	staleIDs := make([]any, 0)
+	for rows.Next() {
+		var msg Message
+		var id int64
+		if err := rows.Scan(&id, &msg.SenderPubKey, &msg.RecipientPubKey, &msg.Payload); err != nil {
+			return nil, err
+		}
+		if shouldDropOfflineMessage(pubKey, &msg) {
+			staleIDs = append(staleIDs, id)
+			continue
+		}
+		messages = append(messages, &msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := db.deleteOfflineMessageIDs(ctx, staleIDs); err != nil {
+		return nil, err
+	}
+	return messages, nil
+}
+
+func (db *DB) DeleteOfflineMessage(ctx context.Context, recipientPubKey, msgID string) (int64, error) {
+	recipientPubKey = strings.TrimSpace(recipientPubKey)
+	msgID = strings.TrimSpace(msgID)
+	if recipientPubKey == "" || msgID == "" {
+		return 0, nil
+	}
+
+	result, err := db.db.ExecContext(ctx, `
+		DELETE FROM offline_messages
+		WHERE recipient_pub_key = ? AND msg_id = ?;
+	`, recipientPubKey, msgID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+func (db *DB) deleteOfflineMessageIDs(ctx context.Context, ids []any) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
+	_, err := db.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM offline_messages WHERE id IN (%s)", placeholders), ids...)
+	return err
+}
+
+func shouldDropOfflineMessage(recipientPubKey string, msg *Message) bool {
+	if msg == nil {
+		return true
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(msg.Payload, &env); err != nil {
+		return true
+	}
+	if !isValidMessageID(env.MsgID) {
+		return true
+	}
+
+	if env.Type == "message" || env.Type == "offline_message" {
+		senderPubKey := strings.TrimSpace(env.SenderPubKey)
+		if senderPubKey == "" {
+			senderPubKey = strings.TrimSpace(msg.SenderPubKey)
+		}
+		envelopeRecipient := strings.TrimSpace(env.RecipientPubKey)
+		if envelopeRecipient == "" {
+			envelopeRecipient = strings.TrimSpace(msg.RecipientPubKey)
+		}
+		recipientPubKey = strings.TrimSpace(recipientPubKey)
+		return senderPubKey != "" && senderPubKey == envelopeRecipient && envelopeRecipient == recipientPubKey
+	}
+
+	return false
+}
+
+// GetAndDeleteOfflineMessages returns all queued messages for a user and
+// deletes them. Realtime websocket replay uses ListOfflineMessages and removes
+// records after explicit client offline_ack.
 func (db *DB) GetAndDeleteOfflineMessages(ctx context.Context, pubKey string) ([]*Message, error) {
 	// Deliver in insertion order and delete only after the batch is read.
 	tx, err := db.db.BeginTx(ctx, nil)
@@ -1166,6 +1284,9 @@ func (db *DB) GetAndDeleteOfflineMessages(ctx context.Context, pubKey string) ([
 			return nil, err
 		}
 		ids = append(ids, id)
+		if shouldDropOfflineMessage(pubKey, &msg) {
+			continue
+		}
 		messages = append(messages, &msg)
 	}
 	if err := rows.Err(); err != nil {

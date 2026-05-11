@@ -1,9 +1,9 @@
 import React from 'react';
-import { Check, CheckCheck, Clock3, Download, FileIcon, Pencil, Pin, Play, Square, Trash2 } from 'lucide-react';
+import { AlertCircle, Check, CheckCheck, Clock3, CornerUpRight, Download, FileIcon, Pencil, Pin, Play, Reply, RotateCcw, Square, Trash2 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { decryptFile } from '../../lib/attachments';
 import { type StoredMessage } from '../../lib/db';
-import { parseRichTextMessage, type MessageMention } from '../../lib/message-format';
+import { parseRichTextMessage, type MessageMention, type ReplyPreview } from '../../lib/message-format';
 import { VoiceWaveform } from '../VoiceWaveform';
 import { normalizeReactionValue } from './messageUtils';
 
@@ -19,10 +19,11 @@ type FilePayload = {
 type VoicePayload = {
   url: string;
   key: string;
+  duration?: number;
 };
 
 type ParsedMessageContent =
-  | { kind: 'text'; text: string; mentions: MessageMention[] }
+  | { kind: 'text'; text: string; mentions: MessageMention[]; replyTo?: ReplyPreview }
   | { kind: 'file'; payload: FilePayload }
   | { kind: 'voice'; payload: VoicePayload };
 
@@ -52,7 +53,34 @@ function parseMessageContent(text: string): ParsedMessageContent {
   }
 
   const parsedRichText = parseRichTextMessage(text);
-  return { kind: 'text', text: parsedRichText.text, mentions: parsedRichText.mentions };
+  return { kind: 'text', text: parsedRichText.text, mentions: parsedRichText.mentions, replyTo: parsedRichText.replyTo };
+}
+
+function findFirstUrl(text: string): URL | null {
+  const match = text.match(/https?:\/\/[^\s<>"']+/i);
+  if (!match) return null;
+  try {
+    return new URL(match[0]);
+  } catch {
+    return null;
+  }
+}
+
+function LinkPreview({ text }: { text: string }) {
+  const url = React.useMemo(() => findFirstUrl(text), [text]);
+  if (!url) return null;
+
+  return (
+    <a
+      href={url.toString()}
+      target="_blank"
+      rel="noreferrer"
+      className="mt-3 block rounded-xl border border-white/10 bg-black/15 px-3 py-2 text-left transition-colors hover:bg-black/25"
+    >
+      <div className="text-[11px] font-semibold uppercase text-white/55">{url.hostname.replace(/^www\./, '')}</div>
+      <div className="mt-1 truncate text-sm font-medium text-white/90">{url.pathname === '/' ? url.origin : `${url.origin}${url.pathname}`}</div>
+    </a>
+  );
 }
 
 function renderTextWithMentions(text: string, mentions: MessageMention[], onMentionClick?: (pubKey: string) => void) {
@@ -95,7 +123,14 @@ function renderTextWithMentions(text: string, mentions: MessageMention[], onMent
 
 const VoiceMessage = React.memo(({ voiceData, downloadFile }: { voiceData: VoicePayload; downloadFile: DownloadFileFn }) => {
   const [isPlaying, setIsPlaying] = React.useState(false);
+  const [playbackRate, setPlaybackRate] = React.useState<1 | 1.5 | 2>(1);
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
+
+  React.useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.playbackRate = playbackRate;
+    }
+  }, [playbackRate]);
 
   const togglePlay = async () => {
     if (isPlaying) {
@@ -109,6 +144,7 @@ const VoiceMessage = React.memo(({ voiceData, downloadFile }: { voiceData: Voice
         const blob = await decryptFile(voiceData.url, voiceData.key);
         const url = URL.createObjectURL(blob);
         audioRef.current = new Audio(url);
+        audioRef.current.playbackRate = playbackRate;
         audioRef.current.onended = () => setIsPlaying(false);
       } catch {
         toast.error('Failed to decrypt voice message');
@@ -132,6 +168,14 @@ const VoiceMessage = React.memo(({ voiceData, downloadFile }: { voiceData: Voice
         <VoiceWaveform />
       </div>
       <button
+        type="button"
+        onClick={() => setPlaybackRate((current) => (current === 1 ? 1.5 : current === 1.5 ? 2 : 1))}
+        className="rounded-lg border border-white/10 px-2 py-1 text-[11px] font-semibold text-white/75 transition-colors hover:bg-white/10 hover:text-white"
+        title="Playback speed"
+      >
+        {playbackRate}x
+      </button>
+      <button
         onClick={() => downloadFile(voiceData.url, voiceData.key, 'voice.webm')}
         className="p-2 text-white/50 hover:text-white transition-colors"
       >
@@ -149,6 +193,9 @@ type MessageBubbleProps = {
   onEdit: (msg: StoredMessage) => void;
   onDelete: (msg: StoredMessage) => void;
   onReact: (msg: StoredMessage, reaction: string) => void;
+  onReply?: (msg: StoredMessage) => void;
+  onForward?: (msg: StoredMessage) => void;
+  onRetry?: (msg: StoredMessage) => void;
   canModerate?: boolean;
   canPin?: boolean;
   isPinned?: boolean;
@@ -159,6 +206,7 @@ type MessageBubbleProps = {
   onEditDraftChange?: (value: string) => void;
   onEditSave?: () => void;
   onEditCancel?: () => void;
+  retryDetails?: string;
 };
 
 export const MessageBubble = React.memo(({
@@ -169,6 +217,9 @@ export const MessageBubble = React.memo(({
   onEdit,
   onDelete,
   onReact,
+  onReply,
+  onForward,
+  onRetry,
   canModerate = false,
   canPin = false,
   isPinned = false,
@@ -179,6 +230,7 @@ export const MessageBubble = React.memo(({
   onEditDraftChange,
   onEditSave,
   onEditCancel,
+  retryDetails,
 }: MessageBubbleProps) => {
   const isDeleted = Boolean(msg.deletedAt);
   const reactionEntries = React.useMemo(
@@ -225,6 +277,36 @@ export const MessageBubble = React.memo(({
                 {reaction}
               </button>
             ))}
+            {onReply ? (
+              <button
+                type="button"
+                onClick={() => onReply(msg)}
+                className="rounded-lg p-1.5 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+                title="Reply"
+              >
+                <Reply className="w-3.5 h-3.5" />
+              </button>
+            ) : null}
+            {onForward ? (
+              <button
+                type="button"
+                onClick={() => onForward(msg)}
+                className="rounded-lg p-1.5 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+                title="Forward"
+              >
+                <CornerUpRight className="w-3.5 h-3.5" />
+              </button>
+            ) : null}
+            {isMine && onRetry && (msg.status === 'pending' || msg.status === 'failed') ? (
+              <button
+                type="button"
+                onClick={() => onRetry(msg)}
+                className={`rounded-lg p-1.5 transition-colors ${msg.status === 'failed' ? 'text-red-200 hover:bg-red-500/20' : 'text-amber-100 hover:bg-amber-400/20'}`}
+                title={retryDetails || 'Retry send'}
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+            ) : null}
             {isMine || canModerate ? (
               <>
                 <button
@@ -252,6 +334,12 @@ export const MessageBubble = React.memo(({
                 <Pin className="w-3.5 h-3.5" />
               </button>
             ) : null}
+          </div>
+        ) : null}
+        {!isDeleted && parsedContent.kind === 'text' && parsedContent.replyTo ? (
+          <div className="mb-2 rounded-xl border-l-2 border-white/35 bg-black/15 px-3 py-2">
+            <div className="text-[11px] font-semibold text-white/65">Reply to {parsedContent.replyTo.senderPubKey.slice(0, 8)}...</div>
+            <div className="mt-0.5 line-clamp-2 text-xs text-white/75">{parsedContent.replyTo.preview}</div>
           </div>
         ) : null}
         <div className="text-[15px] leading-relaxed break-words whitespace-pre-wrap">
@@ -299,7 +387,10 @@ export const MessageBubble = React.memo(({
               </div>
             </div>
           ) : (
-            renderTextWithMentions(parsedContent.text, parsedContent.mentions, onMentionClick)
+            <>
+              {renderTextWithMentions(parsedContent.text, parsedContent.mentions, onMentionClick)}
+              <LinkPreview text={parsedContent.text} />
+            </>
           )}
         </div>
         {hasReactions ? (
@@ -336,7 +427,9 @@ export const MessageBubble = React.memo(({
           {isMine && (
             <span className="flex items-center gap-1.5 flex-shrink-0">
               <span className="text-[10px] font-medium uppercase tracking-wide">
-                {msg.status === 'pending'
+                {msg.status === 'failed'
+                  ? 'error'
+                  : msg.status === 'pending'
                   ? 'pending'
                   : msg.status === 'read' && !isGroupMessage
                     ? 'read'
@@ -344,7 +437,9 @@ export const MessageBubble = React.memo(({
                       ? (isGroupMessage ? 'distributed' : 'delivered')
                       : 'sent'}
               </span>
-              {msg.status === 'pending' ? (
+              {msg.status === 'failed' ? (
+                <AlertCircle className="w-3.5 h-3.5 text-red-300" />
+              ) : msg.status === 'pending' ? (
                 <Clock3 className="w-3.5 h-3.5 text-amber-200" />
               ) : msg.status === 'read' && !isGroupMessage ? (
                 <CheckCheck className="w-3.5 h-3.5 text-emerald-300" />

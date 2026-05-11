@@ -12,7 +12,7 @@ import { CallOverlay } from '../components/CallOverlay';
 import { toast } from 'react-hot-toast';
 import { appConfig } from '../lib/config';
 import { fetchWithTimeout, toNetworkErrorMessage, UPLOAD_REQUEST_TIMEOUT_MS } from '../lib/http';
-import { encodeRichTextMessage, isMentioningPubKey, parseRichTextMessage } from '../lib/message-format';
+import { encodeRichTextMessage, getMessageNotificationPreview, isMentioningPubKey, parseRichTextMessage, type ReplyPreview } from '../lib/message-format';
 import { deriveMentionHandle, getPublicKeyFingerprint } from '../lib/identity';
 import { useI18n } from '../lib/i18n';
 import {
@@ -131,6 +131,8 @@ export const Chat: React.FC = () => {
   const [inviteBusyToken, setInviteBusyToken] = React.useState<string | null>(null);
   const [editingMsgId, setEditingMsgId] = React.useState<string | null>(null);
   const [editingDraft, setEditingDraft] = React.useState('');
+  const [replyTarget, setReplyTarget] = React.useState<ReplyPreview | null>(null);
+  const [isDraggingFile, setIsDraggingFile] = React.useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -211,10 +213,22 @@ export const Chat: React.FC = () => {
     if (!activeChannelId || !activeChannel?.pinnedMsgId) return undefined;
     return db.messages.where('msgId').equals(activeChannel.pinnedMsgId).first();
   }, [activeChannelId, activeChannel?.pinnedMsgId]);
+  const pinnedDirectMessage = useLiveQuery(() => {
+    if (!activePeerKey || !activeContact?.pinnedMsgId) return undefined;
+    return db.messages.where('msgId').equals(activeContact.pinnedMsgId).first();
+  }, [activePeerKey, activeContact?.pinnedMsgId]);
+  const pinnedGroupMessage = useLiveQuery(() => {
+    if (!activeGroupId || !activeGroup?.pinnedMsgId) return undefined;
+    return db.messages.where('msgId').equals(activeGroup.pinnedMsgId).first();
+  }, [activeGroupId, activeGroup?.pinnedMsgId]);
   const queuedGroupEvents = useLiveQuery(() => {
     if (!activeGroupId) return [];
     return db.outgoingGroupEvents.where('groupId').equals(activeGroupId).sortBy('createdAt');
   }, [activeGroupId]);
+  const queuedDirectMessages = useLiveQuery(() => {
+    if (!activePeerKey) return [];
+    return db.outgoingDirectMessages.where('recipientPubKey').equals(activePeerKey).sortBy('createdAt');
+  }, [activePeerKey]);
   const isChatMuted = Boolean(activeContact?.mutedUntil && activeContact.mutedUntil > nowTs);
   const canManageGroupMembers = activeGroup?.role === 'owner' || activeGroup?.role === 'admin';
   const canManageChannelSubscribers = activeChannel?.role === 'owner' || activeChannel?.role === 'admin';
@@ -356,6 +370,19 @@ export const Chat: React.FC = () => {
     if (pubKey === myPublicKey) return 'You';
     return participantNames?.[pubKey] || fallbackParticipantName(pubKey);
   }, [myPublicKey, participantNames]);
+  const getThreadMessagePreview = React.useCallback((msg: StoredMessage | undefined) => {
+    if (!msg) return '';
+    return getMessageNotificationPreview(msg.text);
+  }, []);
+  const buildReplyPreview = React.useCallback((msg: StoredMessage): ReplyPreview => ({
+    msgId: msg.msgId,
+    senderPubKey: msg.senderPublicKey,
+    preview: getMessageNotificationPreview(msg.text),
+  }), []);
+  const queuedDirectById = React.useMemo(
+    () => new Map((queuedDirectMessages ?? []).map((message) => [message.id, message] as const)),
+    [queuedDirectMessages]
+  );
 
   useEffect(() => {
     if (!activePeerKey) {
@@ -418,6 +445,7 @@ export const Chat: React.FC = () => {
       setMentionQuery('');
       setMentionStartIndex(null);
       setMentionSelectionIndex(0);
+      setReplyTarget(null);
     });
   }, [activeThreadId]);
 
@@ -595,7 +623,7 @@ export const Chat: React.FC = () => {
   const submitCurrentMessage = React.useCallback(async () => {
     if (!messageInput.trim() || !myPublicKey) return;
 
-    const plaintext = encodeRichTextMessage(messageInput.trim(), mentionHandleDirectory);
+    const plaintext = encodeRichTextMessage(messageInput.trim(), mentionHandleDirectory, replyTarget);
 
     try {
       if (activeGroupId && mySecretKey) {
@@ -614,11 +642,12 @@ export const Chat: React.FC = () => {
       if (activeThreadId) {
         setDraftOverrides((current) => ({ ...current, [activeThreadId]: '' }));
       }
+      setReplyTarget(null);
     } catch (err) {
       console.error("Failed to send", err);
       toast.error(err instanceof Error ? err.message : "Failed to send message");
     }
-  }, [activeChannelId, activeGroupId, activePeerKey, activeThreadId, closeMentionMenu, mentionHandleDirectory, messageInput, myPublicKey, mySecretKey]);
+  }, [activeChannelId, activeGroupId, activePeerKey, activeThreadId, closeMentionMenu, mentionHandleDirectory, messageInput, myPublicKey, mySecretKey, replyTarget]);
 
   const handleSendMessage = React.useCallback((e: React.FormEvent) => {
     e.preventDefault();
@@ -635,9 +664,8 @@ export const Chat: React.FC = () => {
     }
   }, [activePeerKey, myPublicKey]);
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !mySecretKey || !myPublicKey || (!activePeerKey && !activeGroupId && !activeChannelId)) return;
+  const handleSelectedFile = React.useCallback(async (file: File) => {
+    if (!mySecretKey || !myPublicKey || (!activePeerKey && !activeGroupId && !activeChannelId)) return;
     if (file.size > MAX_ATTACHMENT_SIZE_BYTES) {
       toast.error('This file is too large. Please choose a file smaller than 75 MB.');
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -697,7 +725,34 @@ export const Chat: React.FC = () => {
       setIsUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
+  }, [activeChannelId, activeGroupId, activePeerKey, myPublicKey, mySecretKey]);
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    await handleSelectedFile(file);
   };
+
+  const handleDragOver = React.useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!activeThreadId || !Array.from(event.dataTransfer.types).includes('Files')) return;
+    event.preventDefault();
+    setIsDraggingFile(true);
+  }, [activeThreadId]);
+
+  const handleDragLeave = React.useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setIsDraggingFile(false);
+  }, []);
+
+  const handleDrop = React.useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!activeThreadId) return;
+    event.preventDefault();
+    setIsDraggingFile(false);
+    const file = event.dataTransfer.files?.[0];
+    if (file) {
+      void handleSelectedFile(file);
+    }
+  }, [activeThreadId, handleSelectedFile]);
 
   const handleVoiceUpload = async (file: File) => {
     if (!mySecretKey || !myPublicKey || (!activePeerKey && !activeGroupId && !activeChannelId)) return;
@@ -1296,6 +1351,48 @@ export const Chat: React.FC = () => {
   const handleReaction = (msg: StoredMessage, reaction: string) => {
     void handleReactToMessage(msg, reaction);
   };
+
+  const handleReplyMessage = (msg: StoredMessage) => {
+    if (msg.deletedAt) return;
+    setReplyTarget(buildReplyPreview(msg));
+    messageInputRef.current?.focus();
+  };
+
+  const handleForwardMessage = (msg: StoredMessage) => {
+    if (!activeThreadId || msg.deletedAt) return;
+    const parsed = parseRichTextMessage(msg.text);
+    const preview = parsed.hasRichPayload ? parsed.text : getMessageNotificationPreview(msg.text);
+    const nextValue = `Forwarded: ${preview}`;
+    setDraftOverrides((current) => ({ ...current, [activeThreadId]: nextValue }));
+    requestAnimationFrame(() => {
+      messageInputRef.current?.focus();
+      messageInputRef.current?.setSelectionRange(nextValue.length, nextValue.length);
+    });
+  };
+
+  const handleRetryDirectMessage = async (msg: StoredMessage) => {
+    if (!activePeerKey || msg.senderPublicKey !== myPublicKey) return;
+    try {
+      await socketManager.retryDirectMessage(msg.msgId);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to retry message');
+    }
+  };
+
+  const handleToggleDirectPin = async (msg: StoredMessage) => {
+    if (!activePeerKey || msg.deletedAt) return;
+    const nextPinnedMsgId = activeContact?.pinnedMsgId === msg.msgId ? null : msg.msgId;
+    await db.contacts.update(activePeerKey, { pinnedMsgId: nextPinnedMsgId });
+    toast.success(nextPinnedMsgId ? 'Message pinned.' : 'Pinned message cleared.');
+  };
+
+  const handleToggleGroupPin = async (msg: StoredMessage) => {
+    if (!activeGroupId || msg.deletedAt || !canManageGroupMembers) return;
+    const nextPinnedMsgId = activeGroup?.pinnedMsgId === msg.msgId ? null : msg.msgId;
+    await db.groupThreads.update(activeGroupId, { pinnedMsgId: nextPinnedMsgId });
+    toast.success(nextPinnedMsgId ? 'Group message pinned locally.' : 'Pinned group message cleared.');
+  };
+
   const handleEditMessage = async (msg: StoredMessage) => {
     if ((!activePeerKey && !activeGroupId && !activeChannelId) || !myPublicKey || msg.deletedAt) return;
     if (activeChannelId && msg.senderPublicKey !== myPublicKey && activeChannel?.role !== 'owner' && activeChannel?.role !== 'admin') {
@@ -1308,7 +1405,7 @@ export const Chat: React.FC = () => {
       setEditingMsgId(null);
       return;
     }
-    const encodedText = encodeRichTextMessage(nextText, mentionHandleDirectory);
+    const encodedText = encodeRichTextMessage(nextText, mentionHandleDirectory, currentParsed.replyTo);
 
     try {
       if (activeGroupId) {
@@ -1388,6 +1485,11 @@ export const Chat: React.FC = () => {
     activeContact?.verifiedIdentityFingerprint &&
     activePeerFingerprint &&
     activeContact.verifiedIdentityFingerprint === activePeerFingerprint
+  );
+  const hasIdentityKeyMismatch = Boolean(
+    activeContact?.verifiedIdentityFingerprint &&
+    activePeerFingerprint &&
+    activeContact.verifiedIdentityFingerprint !== activePeerFingerprint
   );
 
   return (
@@ -1605,7 +1707,16 @@ export const Chat: React.FC = () => {
       <div className={`
         ${activePeerKey || activeGroupId || activeChannelId ? 'flex' : 'hidden md:flex'}
         chat-stage w-full flex-col flex-1 relative
-      `}>
+      `}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        {isDraggingFile ? (
+          <div className="pointer-events-none absolute inset-4 z-[90] flex items-center justify-center rounded-3xl border-2 border-dashed border-accent/60 bg-slate-950/70 text-sm font-semibold text-white shadow-2xl backdrop-blur">
+            Drop file to send
+          </div>
+        ) : null}
         {activePeerKey ? (
           <>
             <header className="chat-header premium-glass z-20 flex min-h-20 flex-shrink-0 items-center justify-between border-b border-white/5 px-4 py-3 sm:px-6">
@@ -1776,6 +1887,37 @@ export const Chat: React.FC = () => {
               </div>
             ) : null}
 
+            {hasIdentityKeyMismatch ? (
+              <div className="mx-4 mt-3 rounded-2xl border border-red-400/25 bg-red-400/10 px-4 py-3 text-sm text-red-100 sm:mx-6 sm:mt-4">
+                <div className="font-medium">Contact key changed</div>
+                <div className="mt-1 text-xs text-red-100/75">
+                  Safety number no longer matches your verified fingerprint. Re-check the contact before trusting new messages.
+                </div>
+              </div>
+            ) : null}
+
+            {(queuedDirectMessages?.length ?? 0) > 0 ? (
+              <div className="mx-4 mt-3 rounded-2xl border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm text-amber-100 sm:mx-6 sm:mt-4">
+                <div className="flex items-center gap-2 font-medium">
+                  {connectionStatus === 'connected' ? <Clock3 className="h-4 w-4" /> : <WifiOff className="h-4 w-4" />}
+                  {queuedDirectMessages?.length} message{queuedDirectMessages?.length === 1 ? '' : 's'} waiting for delivery
+                </div>
+                <div className="mt-1 text-xs text-amber-100/75">
+                  Stored locally and on retry queue. Attempts: {queuedDirectMessages?.reduce((total, item) => total + item.attempts, 0) ?? 0}.
+                </div>
+              </div>
+            ) : null}
+
+            {pinnedDirectMessage && !pinnedDirectMessage.deletedAt ? (
+              <div className="mx-4 mt-3 rounded-2xl border border-accent/25 bg-accent/10 px-4 py-3 text-sm text-white sm:mx-6 sm:mt-4">
+                <div className="flex items-center gap-2 font-medium">
+                  <Pin className="h-4 w-4" />
+                  Pinned message
+                </div>
+                <div className="mt-1 truncate text-xs text-white/75">{getThreadMessagePreview(pinnedDirectMessage)}</div>
+              </div>
+            ) : null}
+
             <div
               ref={messageListRef}
               className="message-list flex-1 overflow-y-auto bg-black/10 p-3 space-y-4 custom-scrollbar sm:p-6 sm:space-y-6"
@@ -1839,12 +1981,19 @@ export const Chat: React.FC = () => {
                         onEdit={handleInitEdit}
                         onDelete={handleDeleteMessage}
                         onReact={handleReaction}
+                        onReply={handleReplyMessage}
+                        onForward={handleForwardMessage}
+                        onRetry={handleRetryDirectMessage}
+                        canPin
+                        isPinned={activeContact?.pinnedMsgId === msg.msgId}
+                        onPin={handleToggleDirectPin}
                         onMentionClick={handleMentionClick}
                         isEditing={editingMsgId === msg.msgId}
                         editDraft={editingDraft}
                         onEditDraftChange={setEditingDraft}
                         onEditSave={() => void handleEditMessage(msg)}
                         onEditCancel={() => { setEditingMsgId(null); setEditingDraft(''); }}
+                        retryDetails={queuedDirectById.get(msg.msgId) ? `Attempts: ${queuedDirectById.get(msg.msgId)?.attempts ?? 0}` : undefined}
                       />
                     </div>
                   </React.Fragment>
@@ -1887,6 +2036,8 @@ export const Chat: React.FC = () => {
                 onToggleRecording={() => void (isRecording ? stopRecording() : startRecording())}
                 attachAriaLabel="Attach file"
                 sendAriaLabel="Send message"
+                replyTarget={replyTarget}
+                onCancelReply={() => setReplyTarget(null)}
               />
             </div>
           </>
@@ -1949,6 +2100,15 @@ export const Chat: React.FC = () => {
                     </div>
                   </div>
                 ) : null}
+                {pinnedGroupMessage && !pinnedGroupMessage.deletedAt ? (
+                  <div className="mx-4 mt-3 rounded-2xl border border-accent/25 bg-accent/10 px-4 py-3 text-sm text-white sm:mx-6 sm:mt-4">
+                    <div className="flex items-center gap-2 font-medium">
+                      <Pin className="h-4 w-4" />
+                      Pinned group message
+                    </div>
+                    <div className="mt-1 truncate text-xs text-white/75">{getThreadMessagePreview(pinnedGroupMessage)}</div>
+                  </div>
+                ) : null}
                 {activeCollectionSync && activeCollectionSync.state !== 'synced' ? (
                   <div className={`mx-4 mt-3 rounded-2xl border px-4 py-3 text-sm sm:mx-6 sm:mt-4 ${
                     activeCollectionSync.state === 'error'
@@ -2009,7 +2169,12 @@ export const Chat: React.FC = () => {
                           onEdit={handleInitEdit}
                           onDelete={handleDeleteMessage}
                           onReact={handleReaction}
+                          onReply={handleReplyMessage}
+                          onForward={handleForwardMessage}
                           canModerate={activeGroup?.role === 'owner' || activeGroup?.role === 'admin'}
+                          canPin={canManageGroupMembers}
+                          isPinned={activeGroup?.pinnedMsgId === msg.msgId}
+                          onPin={handleToggleGroupPin}
                           onMentionClick={handleMentionClick}
                           isEditing={editingMsgId === msg.msgId}
                           editDraft={editingDraft}
@@ -2051,6 +2216,8 @@ export const Chat: React.FC = () => {
                     onToggleRecording={() => void (isRecording ? stopRecording() : startRecording())}
                     attachAriaLabel="Attach file to group"
                     sendAriaLabel="Send group message"
+                    replyTarget={replyTarget}
+                    onCancelReply={() => setReplyTarget(null)}
                   />
                 </div>
               </div>
@@ -2261,6 +2428,8 @@ export const Chat: React.FC = () => {
                             onEdit={handleInitEdit}
                             onDelete={handleDeleteMessage}
                             onReact={handleReaction}
+                            onReply={handleReplyMessage}
+                            onForward={handleForwardMessage}
                             canModerate={activeChannel?.role === 'owner' || activeChannel?.role === 'admin'}
                             canPin={canPinChannelPosts}
                             isPinned={activeChannel?.pinnedMsgId === msg.msgId}
@@ -2312,6 +2481,8 @@ export const Chat: React.FC = () => {
                       attachAriaLabel="Attach file to channel"
                       sendAriaLabel="Publish channel post"
                       accentTone="violet"
+                      replyTarget={replyTarget}
+                      onCancelReply={() => setReplyTarget(null)}
                     />
                   ) : (
                     <div className="mx-auto max-w-4xl rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-text-muted">
@@ -2516,28 +2687,11 @@ export const Chat: React.FC = () => {
             </div>
           </>
         ) : (
-          <div className="chat-empty-state flex-1 flex flex-col items-center justify-center px-6 text-center opacity-80">
-            <div className="empty-orb w-32 h-32 rounded-full border-2 border-dashed border-white/20 flex items-center justify-center mb-6">
-              <ShieldCheck className="w-16 h-16" />
+          <div className="chat-empty-state flex-1 flex flex-col items-center justify-center px-6 text-center">
+            <div className="empty-orb mb-5 flex h-24 w-24 items-center justify-center rounded-2xl border border-white/10 bg-white/5">
+              <ShieldCheck className="h-12 w-12" />
             </div>
             <p className="text-xl font-medium">{t('emptyTitle')}</p>
-            <p className="mt-2 max-w-md text-sm text-text-muted">
-              {t('emptySubtitle')}
-            </p>
-            <div className="mt-6 grid w-full max-w-2xl grid-cols-1 gap-3 md:grid-cols-3">
-              <div className="feature-tile rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left">
-                <div className="text-xs font-semibold uppercase tracking-wide text-accent">{t('findFaster')}</div>
-                <div className="mt-1 text-sm text-text-muted">{t('findFasterText')}</div>
-              </div>
-              <div className="feature-tile rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left">
-                <div className="text-xs font-semibold uppercase tracking-wide text-accent">{t('buildRooms')}</div>
-                <div className="mt-1 text-sm text-text-muted">{t('buildRoomsText')}</div>
-              </div>
-              <div className="feature-tile rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-left">
-                <div className="text-xs font-semibold uppercase tracking-wide text-accent">{t('recoverSafely')}</div>
-                <div className="mt-1 text-sm text-text-muted">{t('recoverSafelyText')}</div>
-              </div>
-            </div>
           </div>
         )}
       </div>

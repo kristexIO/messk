@@ -221,6 +221,82 @@ func TestRouteToLocalDoesNotStoreOfflineTypingEvents(t *testing.T) {
 	}
 }
 
+func TestRouteToLocalStoresAckableSessionResetForOfflineRecipient(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "messenger-test.db")
+	db := InitDB(ctx, dbPath)
+	defer db.Close()
+
+	if err := db.SaveUserIfNotExists(ctx, "sender"); err != nil {
+		t.Fatalf("save sender user: %v", err)
+	}
+	if err := db.SaveUserIfNotExists(ctx, "recipient"); err != nil {
+		t.Fatalf("save recipient user: %v", err)
+	}
+
+	hub := NewHub(db, InitCache(), nil)
+	msg := &Message{
+		Type:            "session_reset",
+		SenderPubKey:    "sender",
+		RecipientPubKey: "recipient",
+		Payload:         []byte(`{"type":"session_reset","msg_id":"reset-1","sender_pub_key":"sender","recipient_pub_key":"recipient"}`),
+	}
+
+	if !hub.routeToLocal(msg, true) {
+		t.Fatal("expected ackable session reset to be accepted")
+	}
+
+	stored, err := db.ListOfflineMessages(ctx, "recipient")
+	if err != nil {
+		t.Fatalf("list offline messages: %v", err)
+	}
+	if len(stored) != 1 {
+		t.Fatalf("expected one stored session reset, got %d", len(stored))
+	}
+
+	deleted, err := db.DeleteOfflineMessage(ctx, "recipient", "reset-1")
+	if err != nil {
+		t.Fatalf("delete reset failed: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("expected reset to be ack-deletable, got deleted=%d", deleted)
+	}
+}
+
+func TestRouteToLocalDoesNotStoreLegacySessionResetWithoutMessageID(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "messenger-test.db")
+	db := InitDB(ctx, dbPath)
+	defer db.Close()
+
+	if err := db.SaveUserIfNotExists(ctx, "sender"); err != nil {
+		t.Fatalf("save sender user: %v", err)
+	}
+	if err := db.SaveUserIfNotExists(ctx, "recipient"); err != nil {
+		t.Fatalf("save recipient user: %v", err)
+	}
+
+	hub := NewHub(db, InitCache(), nil)
+	msg := &Message{
+		Type:            "session_reset",
+		SenderPubKey:    "sender",
+		RecipientPubKey: "recipient",
+		Payload:         []byte(`{"type":"session_reset","sender_pub_key":"sender","recipient_pub_key":"recipient"}`),
+	}
+
+	if !hub.routeToLocal(msg, true) {
+		t.Fatal("expected legacy session reset to be accepted as transient control")
+	}
+
+	stored, err := db.ListOfflineMessages(ctx, "recipient")
+	if err != nil {
+		t.Fatalf("list offline messages: %v", err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("expected no unackable reset to be stored, got %d", len(stored))
+	}
+}
+
 func TestRouteToLocalDoesNotStoreOfflineWebRTCEvents(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "messenger-test.db")
@@ -281,6 +357,172 @@ func TestSaveOfflineMessageDeduplicatesByMessageID(t *testing.T) {
 	}
 	if len(stored) != 1 {
 		t.Fatalf("expected a single deduplicated offline message, got %d", len(stored))
+	}
+}
+
+func TestSaveOfflineMessageReplacesPayloadForRetry(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "messenger-test.db")
+	db := InitDB(ctx, dbPath)
+	defer db.Close()
+
+	if err := db.SaveUserIfNotExists(ctx, "sender"); err != nil {
+		t.Fatalf("save sender user: %v", err)
+	}
+	if err := db.SaveUserIfNotExists(ctx, "recipient"); err != nil {
+		t.Fatalf("save recipient user: %v", err)
+	}
+
+	firstPayload := []byte(`{"type":"message","msg_id":"retry-1","recipient_pub_key":"recipient","data":"stale"}`)
+	secondPayload := []byte(`{"type":"message","msg_id":"retry-1","recipient_pub_key":"recipient","data":"fresh"}`)
+	if err := db.SaveOfflineMessage(ctx, "sender", "recipient", firstPayload); err != nil {
+		t.Fatalf("first save failed: %v", err)
+	}
+	if err := db.SaveOfflineMessage(ctx, "sender", "recipient", secondPayload); err != nil {
+		t.Fatalf("second save failed: %v", err)
+	}
+
+	stored, err := db.ListOfflineMessages(ctx, "recipient")
+	if err != nil {
+		t.Fatalf("list offline messages: %v", err)
+	}
+	if len(stored) != 1 {
+		t.Fatalf("expected a single offline message, got %d", len(stored))
+	}
+	if string(stored[0].Payload) != string(secondPayload) {
+		t.Fatalf("expected retry payload to replace stale payload, got %s", string(stored[0].Payload))
+	}
+}
+
+func TestListOfflineMessagesKeepsMessagesUntilAck(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "messenger-test.db")
+	db := InitDB(ctx, dbPath)
+	defer db.Close()
+
+	if err := db.SaveUserIfNotExists(ctx, "sender"); err != nil {
+		t.Fatalf("save sender user: %v", err)
+	}
+	if err := db.SaveUserIfNotExists(ctx, "recipient"); err != nil {
+		t.Fatalf("save recipient user: %v", err)
+	}
+
+	payload := []byte(`{"type":"message","msg_id":"ack-1","recipient_pub_key":"recipient"}`)
+	if err := db.SaveOfflineMessage(ctx, "sender", "recipient", payload); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	firstList, err := db.ListOfflineMessages(ctx, "recipient")
+	if err != nil {
+		t.Fatalf("first list failed: %v", err)
+	}
+	secondList, err := db.ListOfflineMessages(ctx, "recipient")
+	if err != nil {
+		t.Fatalf("second list failed: %v", err)
+	}
+	if len(firstList) != 1 || len(secondList) != 1 {
+		t.Fatalf("expected message to remain until ack, got first=%d second=%d", len(firstList), len(secondList))
+	}
+
+	deleted, err := db.DeleteOfflineMessage(ctx, "recipient", "ack-1")
+	if err != nil {
+		t.Fatalf("delete acked message failed: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("expected one acked message deleted, got %d", deleted)
+	}
+
+	remaining, err := db.ListOfflineMessages(ctx, "recipient")
+	if err != nil {
+		t.Fatalf("remaining list failed: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("expected no messages after ack, got %d", len(remaining))
+	}
+}
+
+func TestListOfflineMessagesPrunesUnackableLegacyMessage(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "messenger-test.db")
+	db := InitDB(ctx, dbPath)
+	defer db.Close()
+
+	if err := db.SaveUserIfNotExists(ctx, "sender"); err != nil {
+		t.Fatalf("save sender user: %v", err)
+	}
+	if err := db.SaveUserIfNotExists(ctx, "recipient"); err != nil {
+		t.Fatalf("save recipient user: %v", err)
+	}
+
+	if err := db.SaveOfflineMessage(ctx, "sender", "recipient", []byte(`{"type":"message","recipient_pub_key":"recipient","data":"stale"}`)); err != nil {
+		t.Fatalf("save legacy message failed: %v", err)
+	}
+
+	stored, err := db.ListOfflineMessages(ctx, "recipient")
+	if err != nil {
+		t.Fatalf("list offline messages: %v", err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("expected stale legacy message to be pruned, got %d", len(stored))
+	}
+
+	var count int
+	if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM offline_messages WHERE recipient_pub_key = ?`, "recipient").Scan(&count); err != nil {
+		t.Fatalf("count offline messages: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected legacy message to be deleted, got %d rows", count)
+	}
+}
+
+func TestListOfflineMessagesPrunesSelfAddressedDirectMessage(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "messenger-test.db")
+	db := InitDB(ctx, dbPath)
+	defer db.Close()
+
+	if err := db.SaveUserIfNotExists(ctx, "recipient"); err != nil {
+		t.Fatalf("save recipient user: %v", err)
+	}
+
+	payload := []byte(`{"type":"message","msg_id":"self-direct-1","sender_pub_key":"recipient","recipient_pub_key":"recipient","data":"cipher"}`)
+	if err := db.SaveOfflineMessage(ctx, "recipient", "recipient", payload); err != nil {
+		t.Fatalf("save self-addressed message failed: %v", err)
+	}
+
+	stored, err := db.ListOfflineMessages(ctx, "recipient")
+	if err != nil {
+		t.Fatalf("list offline messages: %v", err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("expected self-addressed direct message to be pruned, got %d", len(stored))
+	}
+}
+
+func TestListOfflineMessagesKeepsSelfSyncMessage(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "messenger-test.db")
+	db := InitDB(ctx, dbPath)
+	defer db.Close()
+
+	if err := db.SaveUserIfNotExists(ctx, "recipient"); err != nil {
+		t.Fatalf("save recipient user: %v", err)
+	}
+
+	payload := []byte(`{"type":"self_sync","msg_id":"sync-1:self","sender_pub_key":"recipient","recipient_pub_key":"recipient","data":"cipher"}`)
+	if err := db.SaveOfflineMessage(ctx, "recipient", "recipient", payload); err != nil {
+		t.Fatalf("save self-sync message failed: %v", err)
+	}
+
+	stored, err := db.ListOfflineMessages(ctx, "recipient")
+	if err != nil {
+		t.Fatalf("list offline messages: %v", err)
+	}
+	if len(stored) != 1 {
+		t.Fatalf("expected self-sync message to remain, got %d", len(stored))
+	}
+	if string(stored[0].Payload) != string(payload) {
+		t.Fatalf("self-sync payload mismatch: %s", string(stored[0].Payload))
 	}
 }
 

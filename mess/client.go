@@ -16,11 +16,12 @@ import (
 )
 
 const (
-	writeWait       = 10 * time.Second
-	pongWait        = 60 * time.Second
-	pingPeriod      = (pongWait * 9) / 10
-	maxMessageSize  = 128 * 1024 // 128 KB
-	maxPreKeyUpload = 100
+	writeWait                  = 10 * time.Second
+	pongWait                   = 60 * time.Second
+	pingPeriod                 = (pongWait * 9) / 10
+	maxMessageSize             = 128 * 1024 // 128 KB
+	maxPreKeyUpload            = 100
+	requiredClientStateVersion = "clean_20260511"
 )
 
 var (
@@ -38,6 +39,7 @@ var bufferPool = sync.Pool{
 var routedEnvelopeTypes = map[string]bool{
 	"message":          true,
 	"session_reset":    true,
+	"session_repair":   true,
 	"self_sync":        true,
 	"group_message":    true,
 	"group_edit":       true,
@@ -155,7 +157,23 @@ func (c *Client) readPump() {
 				continue
 			}
 
-			if isGroupRoutedType(env.Type) && env.GroupID != "" {
+			if env.Type == "offline_ack" {
+				if !isValidMessageID(env.MsgID) {
+					logEvent("ws_invalid_offline_ack", map[string]any{
+						"pub_key": c.PubKey,
+					})
+					continue
+				}
+				if c.hub.db != nil {
+					go func(msgID string) {
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer cancel()
+						if _, err := c.hub.db.DeleteOfflineMessage(ctx, c.PubKey, msgID); err != nil {
+							log.Printf("Failed to delete acknowledged offline message %s for %s: %v", msgID, c.PubKey, err)
+						}
+					}(env.MsgID)
+				}
+			} else if isGroupRoutedType(env.Type) && env.GroupID != "" {
 				if allowed, retryAfter := c.allowInboundEvent(env.Type); !allowed {
 					c.sendRateLimitNotice(env.Type, retryAfter)
 					continue
@@ -184,10 +202,13 @@ func (c *Client) readPump() {
 					})
 					continue
 				}
-				c.hub.routeMessage <- &Message{
+				accepted := c.hub.routeToLocal(&Message{
 					Type:         env.Type,
 					SenderPubKey: c.PubKey,
 					Payload:      normalizedMessage,
+				}, true)
+				if accepted {
+					c.sendServerAck(env)
 				}
 			} else if isChannelRoutedType(env.Type) && env.GroupID != "" {
 				if allowed, retryAfter := c.allowInboundEvent(env.Type); !allowed {
@@ -228,10 +249,13 @@ func (c *Client) readPump() {
 					})
 					continue
 				}
-				c.hub.routeMessage <- &Message{
+				accepted := c.hub.routeToLocal(&Message{
 					Type:         env.Type,
 					SenderPubKey: c.PubKey,
 					Payload:      normalizedMessage,
+				}, true)
+				if accepted {
+					c.sendServerAck(env)
 				}
 			} else if routedEnvelopeTypes[env.Type] && env.RecipientPubKey != "" {
 				if allowed, retryAfter := c.allowInboundEvent(env.Type); !allowed {
@@ -246,13 +270,15 @@ func (c *Client) readPump() {
 					})
 					continue
 				}
-				c.hub.routeMessage <- &Message{
+				accepted := c.hub.routeToLocal(&Message{
 					Type:            env.Type,
 					SenderPubKey:    c.PubKey,
 					RecipientPubKey: env.RecipientPubKey,
 					Payload:         normalizedMessage,
+				}, true)
+				if accepted {
+					c.sendServerAck(env)
 				}
-				c.sendServerAck(env)
 			} else if env.Type == "upload_prekeys" {
 				if len(env.PreKeys) > 0 {
 					if !areValidPreKeys(env.PreKeys) {
@@ -367,7 +393,7 @@ func floodPolicyForEvent(eventType string) (category string, limit int, window t
 		return "call", 36, 10 * time.Second
 	case "message", "group_message", "channel_message":
 		return "message", 80, 10 * time.Second
-	case "session_reset":
+	case "session_reset", "session_repair":
 		return "control", 24, 10 * time.Second
 	case "edit", "delete", "reaction", "group_edit", "group_delete", "group_reaction", "channel_edit", "channel_delete", "channel_reaction", "channel_pin":
 		return "interaction", 60, 10 * time.Second
@@ -480,7 +506,7 @@ func normalizeRoutedEnvelope(env Envelope, authenticatedPubKey string) ([]byte, 
 
 func requiresMessageID(messageType string) bool {
 	switch messageType {
-	case "message", "group_message", "group_edit", "group_delete", "group_reaction", "group_sender_key", "channel_message", "channel_edit", "channel_delete", "channel_reaction", "channel_pin", "delivery_receipt", "read_receipt", "edit", "delete", "reaction":
+	case "message", "session_repair", "group_message", "group_edit", "group_delete", "group_reaction", "group_sender_key", "channel_message", "channel_edit", "channel_delete", "channel_reaction", "channel_pin", "delivery_receipt", "read_receipt", "edit", "delete", "reaction":
 		return true
 	default:
 		return false
@@ -618,6 +644,15 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request, globalCtx context
 	if !isValidPublicKey(pubKey) {
 		logEvent("ws_invalid_pubkey", map[string]any{"remote": r.RemoteAddr})
 		http.Error(w, "Invalid public key", http.StatusUnauthorized)
+		return
+	}
+	if r.URL.Query().Get("state") != requiredClientStateVersion {
+		logEvent("ws_stale_client_rejected", map[string]any{
+			"pub_key": pubKey,
+			"remote":  r.RemoteAddr,
+			"state":   r.URL.Query().Get("state"),
+		})
+		http.Error(w, "Client update required", http.StatusUpgradeRequired)
 		return
 	}
 	clientPubKeyBytes, _ := base64.StdEncoding.DecodeString(pubKey)

@@ -2,6 +2,7 @@ import Dexie, { type Table } from 'dexie';
 import { randomBytes, secretbox } from 'tweetnacl';
 import { decodeBase64, encodeBase64 } from 'tweetnacl-util';
 import { parseRichTextMessage } from './message-format';
+import { DEFAULT_DB_NAME } from './storage';
 
 export interface MyKeyPair {
   id?: number;
@@ -16,7 +17,7 @@ export interface StoredMessage {
   senderPublicKey: string; // who actually sent it (could be us or them)
   text: string;
   timestamp: number;
-  status: 'pending' | 'sent' | 'delivered' | 'read';
+  status: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
   reactions?: Record<string, string>;
   editedAt?: number;
   deletedAt?: number;
@@ -37,6 +38,7 @@ export interface Contact {
   mutedUntil?: number;
   verifiedIdentityFingerprint?: string;
   verifiedIdentityAt?: number;
+  pinnedMsgId?: string | null;
 }
 
 export interface ThreadStat {
@@ -53,6 +55,7 @@ export interface GroupThread {
   role: string;
   members: string[];
   memberCount: number;
+  pinnedMsgId?: string | null;
   createdAt: number;
   lastActivityAt?: number;
 }
@@ -188,8 +191,6 @@ const CONTACT_SECRET_FIELDS = ['draft'] as const;
 const KEYPAIR_SECRET_FIELDS = ['secretKey'] as const;
 const PREKEY_SECRET_FIELDS = ['secretKey'] as const;
 const GROUP_SENDER_KEY_SECRET_FIELDS = ['key'] as const;
-const DEFAULT_DB_NAME = 'MessengerDB';
-
 let vaultKey: Uint8Array | null = null;
 let vaultResetScheduled = false;
 

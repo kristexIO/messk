@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useAppStore } from '../store';
-import type { DesignStyle, Language, Theme, UiMode } from '../store';
+import type { DesignStyle, FontSize, InterfaceDensity, Language, Theme, UiMode } from '../store';
 import { X, User, Palette, Shield, LogOut, Camera, Lock, Download, Upload, Database, PhoneCall, PhoneIncoming, PhoneOutgoing, PhoneMissed, Layers } from 'lucide-react';
 import { socketManager } from '../lib/socket';
 import { db, getDatabaseNameForIdentity } from '../lib/db';
@@ -11,6 +11,7 @@ import { clearRememberedIdentity, hashPin, rememberIdentityWithPin, verifyPin } 
 import { createEncryptedBackup, downloadEncryptedBackup, parseBackupFile, restoreBackup } from '../lib/backup';
 import { prepareAvatarDataUrl } from '../lib/images';
 import { useI18n } from '../lib/i18n';
+import { SETTINGS_STORAGE_KEY } from '../lib/storage';
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -26,9 +27,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     theme,
     designStyle,
     uiMode,
+    fontSize,
+    interfaceDensity,
+    autoLockMinutes,
     setTheme,
     setDesignStyle,
     setUiMode,
+    setFontSize,
+    setInterfaceDensity,
+    setAutoLockMinutes,
     language,
     setLanguage,
     setProfile,
@@ -154,7 +161,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
       getDatabaseNameForIdentity(null),
     ]));
     socketManager.disconnect();
-    localStorage.removeItem('messenger_settings');
+    localStorage.removeItem(SETTINGS_STORAGE_KEY);
     logout();
     db.close();
     void Promise.all(databaseNames.map((databaseName) => Dexie.delete(databaseName).catch(() => undefined)))
@@ -320,11 +327,45 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     }
   };
 
+  const handleExportSettingsOnly = () => {
+    const payload = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      profile: {
+        nickname,
+        avatar,
+        username,
+      },
+      appearance: {
+        theme,
+        uiMode,
+        designStyle,
+        fontSize,
+        interfaceDensity,
+        language,
+      },
+      security: {
+        autoLockMinutes,
+        hasPin: Boolean(pinHash),
+        remembersDevice: isIdentityRemembered,
+      },
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `messk-settings-${payload.exportedAt.slice(0, 10)}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setBackupMessage('Settings-only export saved. Messages and keys are excluded.');
+  };
+
   const themes: { id: Theme; name: string; color: string }[] = [
-    { id: 'dark', name: 'Midnight', color: 'bg-[#020617]' },
-    { id: 'cyberpunk', name: 'Cyberpunk', color: 'bg-[#05010d]' },
-    { id: 'forest', name: 'Forest', color: 'bg-[#052e16]' },
-    { id: 'light', name: 'Cloud', color: 'bg-white' },
+    { id: 'system', name: 'System', color: 'settings-theme-system' },
+    { id: 'dark', name: 'Slate', color: 'bg-[#17212b]' },
+    { id: 'cyberpunk', name: 'Violet', color: 'bg-[#4c4176]' },
+    { id: 'forest', name: 'Pine', color: 'bg-[#276747]' },
+    { id: 'light', name: 'Cloud', color: 'bg-[#f5f8fb]' },
   ];
   const languages: { id: Language; code: string; label: string }[] = [
     { id: 'en', code: 'EN', label: t('english') },
@@ -353,8 +394,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     },
   ];
   const uiModes: { id: UiMode; name: string; description: string }[] = [
-    { id: 'classic', name: 'Classic UI', description: 'Current interface, unchanged layout logic' },
-    { id: 'next', name: 'Next UI', description: 'Fully redesigned visual system with stronger hierarchy' },
+    { id: 'classic', name: 'Classic UI', description: 'Strict compact messenger layout' },
+    { id: 'next', name: 'Next UI', description: 'Expressive glass layout with larger hierarchy' },
+  ];
+  const fontSizes: { id: FontSize; name: string }[] = [
+    { id: 'small', name: 'Small' },
+    { id: 'normal', name: 'Normal' },
+    { id: 'large', name: 'Large' },
+  ];
+  const densities: { id: InterfaceDensity; name: string; description: string }[] = [
+    { id: 'compact', name: 'Compact', description: 'Tighter list and chat spacing' },
+    { id: 'comfortable', name: 'Comfortable', description: 'More room for long sessions' },
+  ];
+  const autoLockOptions = [
+    { value: 0, label: 'Never' },
+    { value: 5, label: '5 min' },
+    { value: 15, label: '15 min' },
+    { value: 30, label: '30 min' },
+    { value: 60, label: '1 hour' },
   ];
 
   const getCallOutcomeTone = (outcome: string) => {
@@ -501,7 +558,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                     theme === t.id ? 'is-active' : ''
                   }`}
                 >
-                  <div className={`w-8 h-8 rounded-full shadow-inner ${t.color}`} />
+                  <div className={`settings-theme-preview ${t.color}`} aria-hidden="true">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
                   <span className="text-xs font-medium">{t.name}</span>
                 </button>
               ))}
@@ -523,6 +584,40 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                 ))}
               </div>
             </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="settings-card rounded-2xl p-4">
+                <div className="mb-3 text-xs uppercase tracking-[0.22em] text-text-muted">Font size</div>
+                <div className="grid grid-cols-3 gap-2">
+                  {fontSizes.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setFontSize(item.id)}
+                      className={`settings-choice rounded-xl px-3 py-2 text-xs font-semibold transition-all ${fontSize === item.id ? 'is-active' : ''}`}
+                    >
+                      {item.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="settings-card rounded-2xl p-4">
+                <div className="mb-3 text-xs uppercase tracking-[0.22em] text-text-muted">Density</div>
+                <div className="grid grid-cols-2 gap-2">
+                  {densities.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setInterfaceDensity(item.id)}
+                      className={`settings-choice rounded-xl px-3 py-2 text-left transition-all ${interfaceDensity === item.id ? 'is-active' : ''}`}
+                    >
+                      <div className="text-xs font-semibold">{item.name}</div>
+                      <div className="mt-1 text-[10px] text-text-muted">{item.description}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            {uiMode === 'next' ? (
             <div className="space-y-2">
               <div className="text-xs uppercase tracking-[0.22em] text-text-muted flex items-center gap-2">
                 <Layers className="w-3.5 h-3.5" />
@@ -548,6 +643,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                 ))}
               </div>
             </div>
+            ) : null}
           </section>
 
           <section className="space-y-4">
@@ -693,6 +789,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                 <Lock className="w-4 h-4 text-accent" />
                 App Lock
               </div>
+              <div>
+                <div className="mb-2 text-xs uppercase tracking-[0.22em] text-text-muted">Auto-lock</div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                  {autoLockOptions.map((item) => (
+                    <button
+                      key={item.value}
+                      type="button"
+                      onClick={() => setAutoLockMinutes(item.value)}
+                      className={`settings-choice rounded-xl px-3 py-2 text-xs font-semibold transition-all ${autoLockMinutes === item.value ? 'is-active' : ''}`}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <input
                   type="password"
@@ -739,6 +850,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                   <Download className="w-4 h-4" />
                   Export Backup
                 </button>
+                <button onClick={handleExportSettingsOnly} className="settings-secondary-button px-5 py-2.5 rounded-xl transition-all flex items-center gap-2">
+                  <Download className="w-4 h-4" />
+                  Export Settings Only
+                </button>
                 <label className="settings-secondary-button px-5 py-2.5 rounded-xl transition-all cursor-pointer flex items-center gap-2">
                   <Upload className="w-4 h-4" />
                   Import Backup
@@ -754,6 +869,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
               <div className="flex items-center gap-3">
                 <LogOut className="w-5 h-5" />
                 <span className="font-medium">Logout and Clear Session</span>
+              </div>
+            </button>
+            <button
+              onClick={handleLogout}
+              className="w-full p-4 rounded-xl border border-red-500/40 bg-red-500/10 hover:bg-red-500/15 text-red-200 flex items-center justify-between transition-all"
+            >
+              <div className="flex items-center gap-3">
+                <LogOut className="w-5 h-5" />
+                <span className="font-medium">Panic Logout</span>
               </div>
             </button>
           </section>

@@ -29,15 +29,17 @@ var (
 	churnRate  = flag.Float64("churn", 0.1, "Probability of a client disconnecting/reconnecting per minute")
 )
 
+const requiredClientStateVersion = "clean_20260511"
+
 type Stats struct {
-	Connected      int64
-	AuthSuccess    int64
-	MessagesSent   int64
-	MessagesRecv   int64
-	OfflineRecv    int64
-	Errors         int64
-	LatencySumMs   int64
-	LatencyCount   int64
+	Connected    int64
+	AuthSuccess  int64
+	MessagesSent int64
+	MessagesRecv int64
+	OfflineRecv  int64
+	Errors       int64
+	LatencySumMs int64
+	LatencyCount int64
 }
 
 type Registry struct {
@@ -137,7 +139,7 @@ func runClientLifeCycle(ctx context.Context, id int, reg *Registry, stats *Stats
 			return
 		default:
 			simulateSession(ctx, pubStr, pub, priv, reg, stats)
-			
+
 			// If churn happens or error occurs, wait a bit and reconnect
 			select {
 			case <-ctx.Done():
@@ -153,12 +155,13 @@ func simulateSession(ctx context.Context, pubStr string, pub, priv *[32]byte, re
 	u, _ := url.Parse(*targetURL)
 	q := u.Query()
 	q.Set("pub", pubStr)
+	q.Set("state", requiredClientStateVersion)
 	u.RawQuery = q.Encode()
 
 	dialer := websocket.DefaultDialer
 	header := make(http.Header)
 	header.Set("Origin", "http://localhost:5173")
-	
+
 	conn, _, err := dialer.Dial(u.String(), header)
 	if err != nil {
 		atomic.AddInt64(&stats.Errors, 1)
@@ -231,10 +234,10 @@ func simulateSession(ctx context.Context, pubStr string, pub, priv *[32]byte, re
 			if mrand.Float64() < 0.1 { // 10% are "heavy" (voice/files)
 				payloadSize = 1024 * 10 // 10KB
 			}
-			
+
 			dummyData := make([]byte, payloadSize)
 			crand.Read(dummyData)
-			
+
 			dataMap := map[string]interface{}{
 				"ts":      time.Now().UnixNano(),
 				"payload": base64.StdEncoding.EncodeToString(dummyData),
@@ -247,7 +250,7 @@ func simulateSession(ctx context.Context, pubStr string, pub, priv *[32]byte, re
 				"sender_pub_key":    pubStr,
 				"data":              string(dataJSON),
 			}
-			
+
 			if err := conn.WriteJSON(msg); err != nil {
 				atomic.AddInt64(&stats.Errors, 1)
 				return

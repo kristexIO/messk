@@ -2,7 +2,7 @@ import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { useAppStore } from './store';
 import { Toaster } from 'react-hot-toast';
 import { LockScreen } from './components/LockScreen';
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { socketManager } from './lib/socket';
 import { initNotifications, isTauri } from './lib/notifications';
 import { OnboardingModal } from './components/OnboardingModal';
@@ -11,6 +11,7 @@ import { decodeBase64 } from 'tweetnacl-util';
 import { useI18n } from './lib/i18n';
 import { joinInviteLink, syncChannels, syncGroups } from './lib/community';
 import { toast } from 'react-hot-toast';
+import { ONBOARDING_STORAGE_KEY } from './lib/storage';
 
 const Auth = lazy(async () => {
   const module = await import('./pages/Auth');
@@ -23,16 +24,40 @@ const Chat = lazy(async () => {
 });
 
 function App() {
-  const { myPublicKey, mySecretKey, isLocked, isRestoringIdentity, restoreRememberedIdentity, setActivePeer, setActiveGroup, setActiveChannel } = useAppStore();
+  const { myPublicKey, mySecretKey, isLocked, isRestoringIdentity, restoreRememberedIdentity, setActivePeer, setActiveGroup, setActiveChannel, autoLockMinutes, lockApp } = useAppStore();
   const { t } = useI18n();
+  const lastActivityRef = useRef(0);
   const [hasDismissedOnboarding, setHasDismissedOnboarding] = useState(
-    () => localStorage.getItem('messk_onboarding_seen') === '1'
+    () => localStorage.getItem(ONBOARDING_STORAGE_KEY) === '1'
   );
   const showOnboarding = Boolean(mySecretKey && !isLocked && !hasDismissedOnboarding);
 
   useEffect(() => {
     void restoreRememberedIdentity();
   }, [restoreRememberedIdentity]);
+
+  useEffect(() => {
+    if (!mySecretKey || !autoLockMinutes || isLocked) {
+      return;
+    }
+
+    lastActivityRef.current = Date.now();
+    const markActivity = () => {
+      lastActivityRef.current = Date.now();
+    };
+    const timer = window.setInterval(() => {
+      if (Date.now() - lastActivityRef.current >= autoLockMinutes * 60_000) {
+        lockApp();
+      }
+    }, 15_000);
+    const events = ['pointerdown', 'keydown', 'touchstart', 'wheel'];
+    events.forEach((eventName) => window.addEventListener(eventName, markActivity, { passive: true }));
+
+    return () => {
+      window.clearInterval(timer);
+      events.forEach((eventName) => window.removeEventListener(eventName, markActivity));
+    };
+  }, [autoLockMinutes, isLocked, lockApp, mySecretKey]);
 
   useEffect(() => {
     if (!myPublicKey || isRestoringIdentity) {
@@ -159,12 +184,11 @@ function App() {
     <Router>
       <Toaster position="top-center" toastOptions={{
         style: {
-          background: 'rgba(15, 23, 42, 0.92)',
-          color: '#f8fbff',
-          borderRadius: '18px',
-          border: '1px solid rgba(174, 209, 255, 0.16)',
-          boxShadow: '0 22px 60px rgba(0, 0, 0, 0.35)',
-          backdropFilter: 'blur(18px)',
+          background: 'var(--tg-panel)',
+          color: 'var(--text-main)',
+          borderRadius: '10px',
+          border: '1px solid var(--tg-line)',
+          boxShadow: 'none',
         }
       }} />
       <Routes>
@@ -175,7 +199,7 @@ function App() {
               {showOnboarding && mySecretKey && !isLocked ? (
                 <OnboardingModal
                   onClose={() => {
-                    localStorage.setItem('messk_onboarding_seen', '1');
+                    localStorage.setItem(ONBOARDING_STORAGE_KEY, '1');
                     setHasDismissedOnboarding(true);
                   }}
                 />

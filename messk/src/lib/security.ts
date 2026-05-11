@@ -1,7 +1,8 @@
+import { REMEMBERED_IDENTITY_STORAGE_KEY, SETTINGS_STORAGE_KEY } from './storage';
+
 const encoder = new TextEncoder();
 const PIN_HASH_PREFIX = 'pbkdf2:v1';
 const PIN_HASH_ITERATIONS = 210_000;
-const REMEMBERED_IDENTITY_STORAGE_KEY = 'messenger_remembered_identity_v2';
 const REMEMBERED_IDENTITY_PREFIX = 'pinbox:v1';
 const REMEMBERED_IDENTITY_ITERATIONS = 310_000;
 
@@ -25,7 +26,7 @@ type RememberedIdentityEnvelope = {
 
 function readSettings(): StoredSettings {
   try {
-    const raw = localStorage.getItem('messenger_settings');
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
     return raw ? JSON.parse(raw) as StoredSettings : {};
   } catch {
     return {};
@@ -37,7 +38,7 @@ function writeSettings(patch: StoredSettings): void {
     ...readSettings(),
     ...patch,
   };
-  localStorage.setItem('messenger_settings', JSON.stringify(nextSettings));
+  localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(nextSettings));
 }
 
 async function digestPin(pin: string): Promise<string> {
