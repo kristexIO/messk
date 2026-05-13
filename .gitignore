@@ -9,7 +9,8 @@ mess/query
 dist/
 mess/*.exe
 messk/dist/
-messk/src-tauri/target/
+target/
+clients/**/target/
 
 # Dependencies
 messk/node_modules/

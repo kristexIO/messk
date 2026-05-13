@@ -84,6 +84,7 @@ RELEASES_DIR=\$APP_ROOT/releases
 RELEASE_DIR=\$RELEASES_DIR/\$RELEASE_ID
 CURRENT_LINK=\$APP_ROOT/current
 SHARED_DIR=\$APP_ROOT/shared
+BACKUP_DIR=\$APP_ROOT/backups
 UPLOAD_DIR=/var/lib/messan/uploads
 DB_PATH=/var/lib/messan/messenger.db
 DOMAIN='__DOMAIN__'
@@ -92,7 +93,7 @@ TURN_USERNAME='__TURN_USERNAME__'
 TURN_PASSWORD='__TURN_PASSWORD__'
 KEEP_RELEASES=__KEEP_RELEASES__
 
-mkdir -p \$RELEASES_DIR \$SHARED_DIR \$UPLOAD_DIR \$APP_ROOT/bin
+mkdir -p \$RELEASES_DIR \$SHARED_DIR \$BACKUP_DIR \$UPLOAD_DIR \$APP_ROOT/bin
 touch \$DB_PATH
 
 if [ -z "\$TURN_HOST" ]; then
@@ -210,7 +211,17 @@ VITE_TURN_CREDENTIAL=\${TURN_PASSWORD}
 EOF
 
 apt-get update
-apt-get install -y curl ca-certificates build-essential rsync nginx redis-server certbot python3-certbot-nginx coturn
+apt-get install -y curl ca-certificates build-essential rsync nginx redis-server certbot python3-certbot-nginx coturn sqlite3
+
+if [ -s "\$DB_PATH" ]; then
+  sqlite3 "\$DB_PATH" ".backup '\$BACKUP_DIR/messenger-\$RELEASE_ID.db'" || cp "\$DB_PATH" "\$BACKUP_DIR/messenger-\$RELEASE_ID.db"
+fi
+if [ -f "\$SHARED_DIR/backend.env" ]; then
+  cp "\$SHARED_DIR/backend.env" "\$BACKUP_DIR/backend-\$RELEASE_ID.env"
+fi
+if [ -f "\$SHARED_DIR/turn.env" ]; then
+  cp "\$SHARED_DIR/turn.env" "\$BACKUP_DIR/turn-\$RELEASE_ID.env"
+fi
 
 if ! command -v node >/dev/null 2>&1 || [ "\$(node -p "Number(process.versions.node.split('.')[0])")" -lt 20 ]; then
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash -

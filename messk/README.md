@@ -1,6 +1,7 @@
 # Messk Frontend
 
-React + Tauri desktop client for the E2EE messenger.
+React browser client for the E2EE messenger. Native desktop work lives in
+`clients/windows`.
 
 ## Configuration
 
@@ -18,26 +19,18 @@ VITE_TURN_USERNAME=turn-user
 VITE_TURN_CREDENTIAL=turn-password
 ```
 
-The Tauri CSP in `src-tauri/tauri.conf.json` must also allow the production backend origin before packaging a non-local build.
-
 ## Local Checks
 
 ```powershell
+npm ci
 npm run lint
 npm test
 npm run build
-```
-
-For the desktop shell:
-
-```powershell
-cd src-tauri
-cargo check
 ```
 
 ## Release Notes
 
 - Backup export intentionally excludes identity keys and ratchet session secrets.
 - PQC is disabled until a real ML-KEM implementation is wired in.
-- Production builds should use a reviewed backend origin and matching Tauri CSP.
+- Production builds should use a reviewed backend origin.
 - Production calls need a real TURN relay. STUN-only setups will fail on part of the internet even when chat delivery works.

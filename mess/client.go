@@ -279,6 +279,14 @@ func (c *Client) readPump() {
 				if accepted {
 					c.sendServerAck(env)
 				}
+			} else if env.Type == "clear_prekeys" {
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					if err := c.hub.db.ClearPreKeys(ctx, c.PubKey); err != nil {
+						log.Printf("Error clearing prekeys for %s: %v", c.PubKey, err)
+					}
+				}()
 			} else if env.Type == "upload_prekeys" {
 				if len(env.PreKeys) > 0 {
 					if !areValidPreKeys(env.PreKeys) {

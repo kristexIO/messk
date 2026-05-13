@@ -1347,6 +1347,11 @@ func (db *DB) SavePreKeys(ctx context.Context, userPubKey string, preKeys []stri
 }
 
 // ConsumePreKey возвращает один пре-ключ пользователя и удаляет его (One-Time PreKey)
+func (db *DB) ClearPreKeys(ctx context.Context, userPubKey string) error {
+	_, err := db.db.ExecContext(ctx, "DELETE FROM prekeys WHERE user_pub_key = ?", userPubKey)
+	return err
+}
+
 func (db *DB) ConsumePreKey(ctx context.Context, userPubKey string) (string, error) {
 	var preKey string
 	err := db.db.QueryRowContext(ctx, `

@@ -1,19 +1,14 @@
-import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
-
-// Check if we're running in Tauri (desktop) or browser
-export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-
 let _permissionGranted = false;
 
 /**
  * Initialize notification permissions. Call once on app startup.
  */
 export async function initNotifications(): Promise<void> {
-  if (!isTauri) return;
+  if (!('Notification' in window)) return;
   try {
-    _permissionGranted = await isPermissionGranted();
-    if (!_permissionGranted) {
-      const permission = await requestPermission();
+    _permissionGranted = Notification.permission === 'granted';
+    if (!_permissionGranted && Notification.permission !== 'denied') {
+      const permission = await Notification.requestPermission();
       _permissionGranted = permission === 'granted';
     }
   } catch (e) {
@@ -26,13 +21,13 @@ export async function initNotifications(): Promise<void> {
  * Only shows if the user has granted permission and the app might be in background.
  */
 export function sendDesktopNotification(title: string, body: string): void {
-  if (!isTauri || !_permissionGranted) return;
+  if (!_permissionGranted || !('Notification' in window)) return;
 
   // Don't notify if the window has focus
   if (document.hasFocus()) return;
 
   try {
-    sendNotification({ title, body });
+    new Notification(title, { body });
   } catch (e) {
     console.warn('Failed to send notification:', e);
   }

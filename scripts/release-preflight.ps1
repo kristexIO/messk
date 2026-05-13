@@ -41,12 +41,14 @@ $root = Resolve-Path "$PSScriptRoot\.."
 $backendEnvPath = Join-Path $root "mess\.env.example"
 $frontendEnvPath = Join-Path $root "messk\.env.example"
 $frontendPackagePath = Join-Path $root "messk\package.json"
-$tauriConfigPath = Join-Path $root "messk\src-tauri\tauri.conf.json"
+$windowsCargoPath = Join-Path $root "clients\windows\Cargo.toml"
+$windowsBuildScriptPath = Join-Path $root "scripts\build-windows-client.ps1"
 
 Assert-File $backendEnvPath
 Assert-File $frontendEnvPath
 Assert-File $frontendPackagePath
-Assert-File $tauriConfigPath
+Assert-File $windowsCargoPath
+Assert-File $windowsBuildScriptPath
 
 try {
   $backendUri = [Uri]$BackendOrigin
@@ -117,36 +119,22 @@ if ([string]::IsNullOrWhiteSpace($frontendEnv["VITE_TURN_CREDENTIAL"])) {
   Fail "messk\.env.example must define VITE_TURN_CREDENTIAL"
 }
 
-$tauriConfig = Get-Content -Raw $tauriConfigPath | ConvertFrom-Json
 $frontendPackage = Get-Content -Raw $frontendPackagePath | ConvertFrom-Json
-$csp = [string]$tauriConfig.app.security.csp
-
-if ($frontendPackage.version -ne $tauriConfig.version) {
-  Fail "messk\package.json version '$($frontendPackage.version)' must match Tauri version '$($tauriConfig.version)'"
-}
-
-if ([string]::IsNullOrWhiteSpace($csp)) {
-  Fail "Tauri CSP is empty"
-}
-
-if ($csp -match "'unsafe-eval'") {
-  Fail "Tauri CSP still allows 'unsafe-eval'. Remove it before release."
-}
 
 $httpOrigin = $backendUri.GetLeftPart([UriPartial]::Authority)
-$wsScheme = if ($backendUri.Scheme -eq "https") { "wss" } else { "ws" }
-$wsOrigin = "$($wsScheme)://$($backendUri.Authority)"
 
-if (-not $csp.Contains($httpOrigin)) {
-  Fail "Tauri CSP does not include backend HTTP origin '$httpOrigin'"
+if (-not $AllowLocalhost -and $frontendEnv["VITE_BACKEND_URL"] -ne $httpOrigin) {
+  Fail "messk\.env.example VITE_BACKEND_URL must match '$httpOrigin'"
 }
 
-if (-not $csp.Contains($wsOrigin)) {
-  Fail "Tauri CSP does not include backend WebSocket origin '$wsOrigin'"
+$allFrontendDeps = @()
+foreach ($section in @("dependencies", "devDependencies")) {
+  if ($frontendPackage.PSObject.Properties.Name -contains $section) {
+    $allFrontendDeps += $frontendPackage.$section.PSObject.Properties.Name
+  }
 }
-
-if (-not $AllowLocalhost -and ($csp -match "localhost|127\.0\.0\.1|\[::1\]")) {
-  Fail "Tauri CSP still contains localhost entries. Replace them with production origins."
+if ($allFrontendDeps | Where-Object { $_ -like "@tauri-apps/*" }) {
+  Fail "messk\package.json still contains Tauri dependencies"
 }
 
 Write-Host "Release preflight passed for $httpOrigin"

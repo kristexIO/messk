@@ -3,7 +3,7 @@ param(
   [string]$BackendOrigin,
 
   [switch]$AllowLocalhost,
-  [switch]$SkipTauriPackage
+  [switch]$SkipWindowsClient
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,6 +19,7 @@ function Invoke-External($Description, $Command, $Arguments) {
 $root = Resolve-Path "$PSScriptRoot\.."
 $dist = Join-Path $root "dist"
 $backendDist = Join-Path $dist "backend"
+$windowsDist = Join-Path $dist "windows"
 $buildTime = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 $version = (Get-Content -Raw (Join-Path $root "messk\package.json") | ConvertFrom-Json).version
 $commit = "unknown"
@@ -49,19 +50,22 @@ Invoke-External "== Frontend install ==" "npm" @("ci")
 Invoke-External "== Frontend lint ==" "npm" @("run", "lint")
 Invoke-External "== Frontend tests ==" "npm" @("test")
 Invoke-External "== Frontend build ==" "npm" @("run", "build")
-
-if ($SkipTauriPackage) {
-  Push-Location "src-tauri"
-  Invoke-External "== Tauri cargo check ==" "cargo" @("check")
-  Pop-Location
-} else {
-  Invoke-External "== Tauri package ==" "npm" @("run", "tauri", "--", "build")
-}
 Pop-Location
+
+if (-not $SkipWindowsClient) {
+  & "$PSScriptRoot\build-windows-client.ps1" -Configuration release -RunTests
+  if ($LASTEXITCODE -ne 0) {
+    throw "Native Windows client release build failed"
+  }
+  New-Item -ItemType Directory -Force $windowsDist | Out-Null
+  Copy-Item -Force `
+    -LiteralPath (Join-Path $root "clients\windows\target\release\messk-windows.exe") `
+    -Destination (Join-Path $windowsDist "messk-windows.exe")
+}
 
 Write-Host "Release build completed. Artifacts:"
 Write-Host "- Backend: $backendOut"
 Write-Host "- Frontend dist: $(Join-Path $root "messk\dist")"
-if (-not $SkipTauriPackage) {
-  Write-Host "- Tauri bundles: $(Join-Path $root "messk\src-tauri\target\release\bundle")"
+if (-not $SkipWindowsClient) {
+  Write-Host "- Windows client: $(Join-Path $windowsDist "messk-windows.exe")"
 }

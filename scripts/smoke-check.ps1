@@ -24,8 +24,6 @@ Invoke-External "== Frontend tests ==" "npm" @("test")
 Invoke-External "== Frontend build ==" "npm" @("run", "build")
 Pop-Location
 
-Push-Location "$PSScriptRoot\..\messk\src-tauri"
-Invoke-External "== Tauri cargo check ==" "cargo" @("check")
-Pop-Location
+& "$PSScriptRoot\build-windows-client.ps1" -Configuration debug -RunTests
 
 Write-Host "Smoke check completed."

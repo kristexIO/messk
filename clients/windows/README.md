@@ -1,0 +1,27 @@
+# Messk Windows
+
+Native Windows client prototype. This is not a WebView/Tauri/Electron shell.
+
+Current milestone:
+
+- Rust native desktop window via `eframe`.
+- BIP-39 seed phrase generation/import compatible with the existing web client.
+- NaCl `crypto_box` auth challenge decryption compatible with the Go backend.
+- WebSocket auth against `/ws?pub=...&state=clean_20260511`.
+- Backend `/health` check.
+- X3DH root-key derivation compatible with the web client.
+- Double-ratchet initial direct message encryption compatible with the web client.
+- Live WebSocket receive loop for direct messages with delivery/offline acknowledgements.
+- SQLite local store under `%APPDATA%\Messk\state.sqlite`.
+- Persisted direct messages, ratchet sessions, and retry outbox.
+- Retry backoff for queued direct messages after network/server errors.
+- Persisted one-time prekeys with safe server upload and stale prekey cleanup.
+- Periodic outbox flush while realtime is connected.
+- Identity seed persistence through Windows DPAPI, scoped to the current OS user.
+- Panic reset for local identity, sessions, prekeys, messages, and outbox.
+
+Next milestones:
+
+- Richer delivery history for the retry outbox.
+- Contact list and chat start by username.
+- Native notifications, tray, auto-start, and installer.

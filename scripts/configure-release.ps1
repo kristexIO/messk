@@ -57,29 +57,10 @@ if (-not $AllowLocalhost -and (Test-LocalOrigin $BackendOrigin)) {
 
 $root = Resolve-Path "$PSScriptRoot\.."
 $frontendEnvPath = Join-Path $root "messk\.env.example"
-$tauriConfigPath = Join-Path $root "messk\src-tauri\tauri.conf.json"
-
-if (-not (Test-Path $tauriConfigPath)) {
-  Fail "Tauri config is missing: $tauriConfigPath"
-}
 
 $httpOrigin = $backendUri.GetLeftPart([UriPartial]::Authority)
-$wsScheme = if ($backendUri.Scheme -eq "https") { "wss" } else { "ws" }
-$wsOrigin = "$($wsScheme)://$($backendUri.Authority)"
 
 Set-EnvValue -Path $frontendEnvPath -Key "VITE_BACKEND_URL" -Value $httpOrigin
-
-$csp = "default-src 'self'; connect-src 'self' $wsOrigin $httpOrigin; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: $httpOrigin; media-src 'self' blob: $httpOrigin"
-$escapedCsp = $csp.Replace("\", "\\").Replace('"', '\"')
-$tauriConfigRaw = Get-Content -Raw $tauriConfigPath
-
-if ($tauriConfigRaw -notmatch '"csp"\s*:') {
-  Fail "Tauri config does not contain app.security.csp"
-}
-
-$tauriConfigRaw = [regex]::Replace($tauriConfigRaw, '"csp"\s*:\s*"[^"]*"', "`"csp`": `"$escapedCsp`"", 1)
-$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[System.IO.File]::WriteAllText($tauriConfigPath, $tauriConfigRaw, $utf8NoBom)
 
 & "$PSScriptRoot\release-preflight.ps1" -BackendOrigin $httpOrigin -AllowLocalhost:$AllowLocalhost
 

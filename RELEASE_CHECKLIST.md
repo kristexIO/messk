@@ -2,10 +2,9 @@
 
 ## Before Shipping
 - Set `VITE_BACKEND_URL`, `PORT`, `ALLOWED_ORIGINS`, `DB_PATH`, `MAX_UPLOAD_MB`, `ALLOWED_UPLOAD_MIME_TYPES`, and optional `REDIS_ADDR` for the target environment.
-- Run `powershell -ExecutionPolicy Bypass -File scripts/configure-release.ps1 -BackendOrigin https://your-production-backend.example` to sync `VITE_BACKEND_URL` and Tauri CSP with the production backend origin.
+- Run `powershell -ExecutionPolicy Bypass -File scripts/configure-release.ps1 -BackendOrigin https://your-production-backend.example` to sync `VITE_BACKEND_URL` with the production backend origin.
 - Keep `ENABLE_METADATA_PROXY` disabled unless there is a reviewed production use case.
-- Verify `npm run lint`, `npm test`, `npm run build`, and `go test ./...` are green on the release commit.
-- Verify `cargo check` passes in `messk/src-tauri`.
+- Verify `powershell -ExecutionPolicy Bypass -File scripts/check-all.ps1` is green on the release commit.
 - Run `powershell -ExecutionPolicy Bypass -File scripts/release-preflight.ps1 -BackendOrigin https://your-production-backend.example` before packaging a production release.
 - Run `powershell -ExecutionPolicy Bypass -File scripts/release-build.ps1 -BackendOrigin https://your-production-backend.example` to create release artifacts.
 - Run `powershell -ExecutionPolicy Bypass -File scripts/smoke-check.ps1` from the workspace root before tagging a release.
@@ -30,4 +29,4 @@
 ## Ops Checks
 - Monitor backend logs for `request_start`, `request_end`, auth failures, and offline message saves during staging smoke tests.
 - Verify Redis is either healthy or intentionally absent with acceptable degraded behavior.
-- Keep a tested rollback artifact for both backend and desktop/frontend packages.
+- Keep a tested rollback artifact for backend, web, and native Windows packages.

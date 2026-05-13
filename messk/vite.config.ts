@@ -10,12 +10,12 @@ export default defineConfig({
     strictPort: true,
     host: '127.0.0.1',
   },
-  // Tauri needs relative paths
+  // Relative assets keep static preview and simple Nginx hosting painless.
   base: './',
   build: {
     target: ['es2021', 'chrome105', 'safari15'],
-    minify: !process.env.TAURI_DEBUG ? 'esbuild' : false,
-    sourcemap: !!process.env.TAURI_DEBUG,
+    minify: 'esbuild',
+    sourcemap: false,
     cssCodeSplit: true,
     rollupOptions: {
       output: {
