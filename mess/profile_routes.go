@@ -22,6 +22,25 @@ func registerProfileRoutes(mux *http.ServeMux, hub *Hub, db *DB) {
 		}
 	}))
 
+	directoryResolveHandler := rateLimit(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if _, ok := authorizeSession(hub, w, r); !ok {
+			return
+		}
+		username := strings.TrimSpace(r.URL.Query().Get("username"))
+		if username == "" {
+			http.Error(w, "Missing username", http.StatusBadRequest)
+			return
+		}
+		if strings.HasPrefix(username, "@") {
+			username = username[1:]
+		}
+		writeResolvedUsername(db, w, r, username)
+	})
+
 	resolveUsernameHandler := rateLimit(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -35,29 +54,34 @@ func registerProfileRoutes(mux *http.ServeMux, hub *Hub, db *DB) {
 		if strings.HasPrefix(username, "@") {
 			username = username[1:]
 		}
-
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		defer cancel()
-		pubKey, nickname, avatar, err := db.ResolveUsername(ctx, username)
-		if err == sql.ErrNoRows {
-			http.Error(w, "User not found", http.StatusNotFound)
-			return
-		}
-		if err != nil {
-			http.Error(w, "Internal error", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"pubKey":   pubKey,
-			"nickname": nickname,
-			"avatar":   avatar,
-		})
+		writeResolvedUsername(db, w, r, username)
 	})
 
+	mux.HandleFunc("/directory/resolve", directoryResolveHandler)
 	mux.HandleFunc("/resolve", resolveUsernameHandler)
 	mux.HandleFunc("/profile/resolve", resolveUsernameHandler)
+}
+
+func writeResolvedUsername(db *DB, w http.ResponseWriter, r *http.Request, username string) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	pubKey, nickname, avatar, err := db.ResolveUsername(ctx, username)
+	if err == sql.ErrNoRows {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"username": strings.ToLower(strings.TrimSpace(username)),
+		"pubKey":   pubKey,
+		"nickname": nickname,
+		"avatar":   avatar,
+	})
 }
 
 func handleSaveProfile(hub *Hub, db *DB, w http.ResponseWriter, r *http.Request) {

@@ -7,6 +7,10 @@ describe('shouldHandleServerAck', () => {
     expect(shouldHandleServerAck('group_message')).toBe(true);
     expect(shouldHandleServerAck('channel_message')).toBe(true);
     expect(shouldHandleServerAck('channel_pin')).toBe(true);
+    expect(shouldHandleServerAck('pin')).toBe(true);
+    expect(shouldHandleServerAck('unpin')).toBe(true);
+    expect(shouldHandleServerAck('attachment')).toBe(true);
+    expect(shouldHandleServerAck('forward')).toBe(true);
   });
 
   it('ignores self-sync acknowledgements', () => {

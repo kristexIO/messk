@@ -16,7 +16,7 @@ import { appConfig } from './config';
 import { toast } from 'react-hot-toast';
 import { getMessageNotificationPreview, isMentioningPubKey } from './message-format';
 import { refreshGroupAvailability } from './community';
-import { SocketApiClient, type ResolvedUserProfile, type SessionListResponse } from './socketApi';
+import { SocketApiClient, type DirectHistoryRecord, type ResolvedUserProfile, type SessionListResponse } from './socketApi';
 import {
   addMessageAndSync,
   applyMessageReaction,
@@ -327,6 +327,8 @@ export class SocketManager {
   private pendingGroupEvents = new Map<string, IncomingEnvelope[]>();
   private flushingGroupOutbox = false;
   private flushingDirectOutbox = false;
+  private syncingDirectHistory = new Set<string>();
+  private directHistoryCursorByPeer = new Map<string, number>();
   private outboxFlushTimer: ReturnType<typeof setInterval> | null = null;
   private lastRateLimitedToastAt = 0;
   private lastSessionResetNoticeAt = new Map<string, number>();
@@ -459,6 +461,7 @@ export class SocketManager {
           void reconcileDirectContactsFromMessages().catch((error) => {
             console.warn('Failed to reconcile direct chats from local history', error);
           });
+          void this.syncKnownDirectHistory(pubKey);
           void this.flushOutgoingDirectMessages();
           void this.flushOutgoingGroupEvents();
           return;
@@ -540,10 +543,11 @@ export class SocketManager {
 
         // 3. Message interactions
         if (env.type === 'edit') {
-           if (!env.sender_pub_key || !env.data || !env.msg_id) return;
+           const targetMsgId = env.target_msg_id || env.msg_id;
+           if (!env.sender_pub_key || !env.data || !env.msg_id || !targetMsgId) return;
            const plaintext = await this.decryptInSession(env.sender_pub_key, env.data);
            if (plaintext) {
-               await markMessageEdited(env.msg_id, plaintext);
+               await markMessageEdited(targetMsgId, plaintext, env.sender_pub_key);
                this.acknowledgeOfflineEnvelope(env);
            } else {
              if (env.sender_pub_key !== pubKey) {
@@ -556,17 +560,24 @@ export class SocketManager {
         }
 
         if (env.type === 'delete') {
-            if (!env.msg_id) return;
-            await markMessageDeleted(env.msg_id);
+            const targetMsgId = env.target_msg_id || env.msg_id;
+            if (!env.msg_id || !targetMsgId) return;
+            await markMessageDeleted(targetMsgId, env.sender_pub_key);
             this.acknowledgeOfflineEnvelope(env);
             return;
         }
 
         if (env.type === 'reaction') {
-            if (!env.msg_id || !env.sender_pub_key) return;
-            await applyMessageReaction(env.msg_id, env.sender_pub_key, env.reaction ?? null);
+            const targetMsgId = env.target_msg_id || env.msg_id;
+            if (!env.msg_id || !targetMsgId || !env.sender_pub_key) return;
+            await applyMessageReaction(targetMsgId, env.sender_pub_key, env.reaction ?? null);
             this.acknowledgeOfflineEnvelope(env);
             return;
+        }
+        if (env.type === 'pin' || env.type === 'unpin') {
+          await this.handleDirectPinEnvelope(env, pubKey);
+          this.acknowledgeOfflineEnvelope(env);
+          return;
         }
         if (env.type === 'group_invite') {
           if (!env.sender_pub_key || !env.group_id || !env.data) return;
@@ -1084,11 +1095,284 @@ export class SocketManager {
   }
 
   async resolveUsername(username: string): Promise<ResolvedUserProfile | null> {
+    await this.ensureRealtimeReady();
     return this.api.resolveUsername(username);
   }
 
   async refreshKnownProfiles(force = false) {
     await this.api.refreshKnownProfiles(force);
+  }
+
+  async syncDirectHistory(peerPubKey: string) {
+    const peer = peerPubKey.trim();
+    const { myPublicKey } = useAppStore.getState();
+    if (!peer || !myPublicKey || peer === myPublicKey) {
+      return;
+    }
+
+    if (this.syncingDirectHistory.has(peer)) {
+      return;
+    }
+
+    const ready = await this.ensureRealtimeReady(5000);
+    if (!ready) {
+      return;
+    }
+
+    this.syncingDirectHistory.add(peer);
+    try {
+      const localMessageCount = await db.messages.where('peerPublicKey').equals(peer).count();
+      let cursor = localMessageCount === 0 ? 0 : this.getDirectHistoryCursor(myPublicKey, peer);
+      let pages = 0;
+
+      while (pages < 5) {
+        pages += 1;
+        const response = await this.api.fetchDirectHistory(peer, cursor, 100);
+        let pageCompleted = true;
+        for (const record of response.messages) {
+          const applied = await this.applyDirectHistoryRecord(record, myPublicKey);
+          if (!applied) {
+            pageCompleted = false;
+            break;
+          }
+        }
+
+        if (!pageCompleted) {
+          break;
+        }
+        if (response.nextCursor <= cursor) {
+          break;
+        }
+        cursor = response.nextCursor;
+        this.setDirectHistoryCursor(myPublicKey, peer, cursor);
+
+        if (response.messages.length < response.limit) {
+          break;
+        }
+      }
+    } catch (error) {
+      console.warn(`Failed to sync direct history for ${peer.substring(0, 10)}...`, error);
+    } finally {
+      this.syncingDirectHistory.delete(peer);
+    }
+  }
+
+  private getDirectHistoryCursor(myPublicKey: string, peerPubKey: string) {
+    const cached = this.directHistoryCursorByPeer.get(peerPubKey);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const key = this.directHistoryCursorKey(myPublicKey, peerPubKey);
+    const stored = Number.parseInt(localStorage.getItem(key) || '0', 10);
+    const cursor = Number.isFinite(stored) && stored > 0 ? stored : 0;
+    this.directHistoryCursorByPeer.set(peerPubKey, cursor);
+    return cursor;
+  }
+
+  private setDirectHistoryCursor(myPublicKey: string, peerPubKey: string, cursor: number) {
+    const safeCursor = Math.max(0, cursor);
+    this.directHistoryCursorByPeer.set(peerPubKey, safeCursor);
+    localStorage.setItem(this.directHistoryCursorKey(myPublicKey, peerPubKey), String(safeCursor));
+  }
+
+  private directHistoryCursorKey(myPublicKey: string, peerPubKey: string) {
+    return `messk:direct-history-cursor:${encodeURIComponent(myPublicKey)}:${encodeURIComponent(peerPubKey)}`;
+  }
+
+  private async syncKnownDirectHistory(myPublicKey: string) {
+    try {
+      const contacts = await db.contacts.orderBy('lastMessageAt').reverse().limit(20).toArray();
+      for (const contact of contacts) {
+        if (contact.pubKey && contact.pubKey !== myPublicKey) {
+          void this.syncDirectHistory(contact.pubKey);
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to schedule direct history sync', error);
+    }
+  }
+
+  private normalizeHistoryEnvelope(record: DirectHistoryRecord): IncomingEnvelope | null {
+    const payload = record.ciphertextPayload;
+    if (typeof payload === 'string') {
+      try {
+        return JSON.parse(payload) as IncomingEnvelope;
+      } catch {
+        return null;
+      }
+    }
+    if (!payload || typeof payload !== 'object') {
+      return null;
+    }
+    return {
+      ...payload,
+      type: payload.type || record.envelopeType,
+      msg_id: payload.msg_id || record.msgId,
+      sender_pub_key: payload.sender_pub_key || record.senderPubKey,
+      recipient_pub_key: payload.recipient_pub_key || record.recipientPubKey,
+    };
+  }
+
+  private historyStatusFor(record: DirectHistoryRecord, isFromMe: boolean): StoredMessage['status'] {
+    if (!isFromMe) {
+      return 'delivered';
+    }
+    if (record.deliveryState === 'read') {
+      return 'read';
+    }
+    if (record.deliveryState === 'delivered') {
+      return 'delivered';
+    }
+    return 'sent';
+  }
+
+  private async applyDirectHistoryRecord(record: DirectHistoryRecord, myPublicKey: string): Promise<boolean> {
+    const env = this.normalizeHistoryEnvelope(record);
+    if (!env) {
+      return true;
+    }
+
+    const senderPubKey = env.sender_pub_key?.trim();
+    const recipientPubKey = env.recipient_pub_key?.trim();
+    const msgId = env.msg_id || record.msgId;
+    if (!senderPubKey || !recipientPubKey || !msgId) {
+      return true;
+    }
+
+    const isForMe = recipientPubKey === myPublicKey;
+    const isFromMe = senderPubKey === myPublicKey;
+    if (!isForMe && !isFromMe) {
+      return true;
+    }
+    if (senderPubKey === recipientPubKey) {
+      return true;
+    }
+
+    const peerPubKey = isFromMe ? recipientPubKey : senderPubKey;
+    if (env.type === 'edit') {
+      return this.applyDirectHistoryEdit(env, peerPubKey, isFromMe);
+    }
+    if (env.type === 'delete') {
+      await this.applyDirectHistoryDelete(env, senderPubKey);
+      return true;
+    }
+    if (env.type === 'reaction') {
+      await this.applyDirectHistoryReaction(env, senderPubKey);
+      return true;
+    }
+    if (env.type === 'pin' || env.type === 'unpin') {
+      await this.handleDirectPinEnvelope(env, myPublicKey);
+      return true;
+    }
+    if (env.type !== 'message' && env.type !== 'offline_message') {
+      return true;
+    }
+
+    const status = this.historyStatusFor(record, isFromMe);
+    const existingMsg = await db.messages.where('msgId').equals(msgId).first();
+    if (existingMsg?.id) {
+      if (messageStatusRank[status] > messageStatusRank[existingMsg.status]) {
+        await updateMessageAndSync(existingMsg.id, { status });
+      }
+      return true;
+    }
+
+    if (isFromMe || !env.data) {
+      return true;
+    }
+
+    const plaintext = await this.decryptInSession(peerPubKey, env.data, parseEnvelopeX3DH(env.data));
+    if (!plaintext) {
+      console.warn(`History message ${msgId} from ${senderPubKey.substring(0, 10)}... could not be decrypted yet.`);
+      return false;
+    }
+
+    const serverTimestamp = Date.parse(record.serverReceivedAt);
+    const timestamp = Number.isFinite(serverTimestamp) ? serverTimestamp : Date.now();
+    await addMessageAndSync({
+      msgId,
+      peerPublicKey: peerPubKey,
+      senderPublicKey: senderPubKey,
+      text: plaintext,
+      timestamp,
+      status,
+      reactions: {}
+    });
+    await this.upsertDirectContact(peerPubKey, timestamp, { unarchive: true });
+    void this.refreshContactProfile(peerPubKey);
+
+    if (this.canSendImmediately()) {
+      try {
+        this.sendEnvelope({
+          type: 'delivery_receipt',
+          recipient_pub_key: senderPubKey,
+          sender_pub_key: myPublicKey,
+          msg_id: msgId,
+        });
+      } catch (error) {
+        console.warn('Failed to send delivery receipt for recovered history message', error);
+      }
+    }
+    return true;
+  }
+
+  private async applyDirectHistoryEdit(env: IncomingEnvelope, peerPubKey: string, isFromMe: boolean) {
+    const targetMsgId = env.target_msg_id || env.msg_id;
+    if (!targetMsgId || !env.data) {
+      return true;
+    }
+    if (isFromMe) {
+      return true;
+    }
+
+    const existingMsg = await db.messages.where('msgId').equals(targetMsgId).first();
+    if (!existingMsg?.id || existingMsg.editedAt) {
+      return true;
+    }
+
+    const plaintext = await this.decryptInSession(peerPubKey, env.data);
+    if (!plaintext) {
+      console.warn(`History edit for ${targetMsgId} could not be decrypted yet.`);
+      return false;
+    }
+    await markMessageEdited(targetMsgId, plaintext, env.sender_pub_key);
+    return true;
+  }
+
+  private async applyDirectHistoryDelete(env: IncomingEnvelope, actorPubKey: string) {
+    const targetMsgId = env.target_msg_id || env.msg_id;
+    if (!targetMsgId) {
+      return;
+    }
+    await markMessageDeleted(targetMsgId, actorPubKey);
+  }
+
+  private async applyDirectHistoryReaction(env: IncomingEnvelope, actorPubKey: string) {
+    const targetMsgId = env.target_msg_id || env.msg_id;
+    if (!targetMsgId) {
+      return;
+    }
+    await applyMessageReaction(targetMsgId, actorPubKey, env.reaction ?? null);
+  }
+
+  private async handleDirectPinEnvelope(env: IncomingEnvelope, myPublicKey: string) {
+    const senderPubKey = env.sender_pub_key?.trim();
+    const recipientPubKey = env.recipient_pub_key?.trim();
+    if (!senderPubKey || !recipientPubKey) {
+      return;
+    }
+    const peerPubKey = senderPubKey === myPublicKey ? recipientPubKey : senderPubKey;
+    if (!peerPubKey || peerPubKey === myPublicKey) {
+      return;
+    }
+    const targetMsgId = env.target_msg_id || (env.type === 'pin' ? env.msg_id : null);
+    const existingContact = await db.contacts.get(peerPubKey);
+    if (!existingContact) {
+      return;
+    }
+    await db.contacts.update(peerPubKey, {
+      pinnedMsgId: env.type === 'pin' ? targetMsgId || null : null,
+    });
   }
 
   private async encryptWithSenderKey(senderKeyBase64: string, plaintext: string): Promise<string> {
@@ -2233,9 +2517,11 @@ export class SocketManager {
     const ratchetMsg = await RatchetManager.encrypt(session, plaintext);
     await db.sessions.put(session);
 
+    const eventId = crypto.randomUUID();
     this.ws.send(JSON.stringify({
       type: 'edit',
-      msg_id: msgId,
+      msg_id: eventId,
+      target_msg_id: msgId,
       recipient_pub_key: recipientPubKey,
       sender_pub_key: myPublicKey,
       data: JSON.stringify(ratchetMsg)
@@ -2258,9 +2544,11 @@ export class SocketManager {
     const { myPublicKey } = useAppStore.getState();
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.authenticated || !myPublicKey) return;
 
+    const eventId = crypto.randomUUID();
     this.ws.send(JSON.stringify({
       type: 'delete',
-      msg_id: msgId,
+      msg_id: eventId,
+      target_msg_id: msgId,
       recipient_pub_key: recipientPubKey,
       sender_pub_key: myPublicKey
     }));
@@ -2281,9 +2569,11 @@ export class SocketManager {
     const { myPublicKey } = useAppStore.getState();
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.authenticated || !myPublicKey) return;
 
+    const eventId = crypto.randomUUID();
     this.ws.send(JSON.stringify({
       type: 'reaction',
-      msg_id: msgId,
+      msg_id: eventId,
+      target_msg_id: msgId,
       recipient_pub_key: recipientPubKey,
       sender_pub_key: myPublicKey,
       reaction: reaction ?? ''
@@ -2299,6 +2589,21 @@ export class SocketManager {
         reaction,
       });
     }
+  }
+
+  async sendDirectPin(recipientPubKey: string, targetMsgId: string | null) {
+    const { myPublicKey } = useAppStore.getState();
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.authenticated || !myPublicKey) {
+      throw new Error('Secure channel is not ready yet');
+    }
+
+    this.ws.send(JSON.stringify({
+      type: targetMsgId ? 'pin' : 'unpin',
+      msg_id: crypto.randomUUID(),
+      target_msg_id: targetMsgId ?? '',
+      recipient_pub_key: recipientPubKey,
+      sender_pub_key: myPublicKey,
+    }));
   }
 
   sendSignal(recipientPubKey: string, type: 'call_offer' | 'call_answer' | 'call_reject' | 'call_end' | 'ice_candidate', signalData: unknown) {

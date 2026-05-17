@@ -395,6 +395,13 @@ export const Chat: React.FC = () => {
   }, [activePeerKey]);
 
   useEffect(() => {
+    if (!activePeerKey || !myPublicKey || !mySecretKey) {
+      return;
+    }
+    void socketManager.syncDirectHistory(activePeerKey);
+  }, [activePeerKey, myPublicKey, mySecretKey]);
+
+  useEffect(() => {
     if (!isRoomSettingsOpen) {
       return;
     }
@@ -1383,6 +1390,11 @@ export const Chat: React.FC = () => {
     if (!activePeerKey || msg.deletedAt) return;
     const nextPinnedMsgId = activeContact?.pinnedMsgId === msg.msgId ? null : msg.msgId;
     await db.contacts.update(activePeerKey, { pinnedMsgId: nextPinnedMsgId });
+    try {
+      await socketManager.sendDirectPin(activePeerKey, nextPinnedMsgId);
+    } catch {
+      toast('Pinned locally. It will sync when the secure channel is live.');
+    }
     toast.success(nextPinnedMsgId ? 'Message pinned.' : 'Pinned message cleared.');
   };
 

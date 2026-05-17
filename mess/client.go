@@ -57,6 +57,11 @@ var routedEnvelopeTypes = map[string]bool{
 	"edit":             true,
 	"delete":           true,
 	"reaction":         true,
+	"reply":            true,
+	"pin":              true,
+	"unpin":            true,
+	"attachment":       true,
+	"forward":          true,
 	"call_offer":       true,
 	"call_answer":      true,
 	"call_reject":      true,
@@ -170,6 +175,9 @@ func (c *Client) readPump() {
 						defer cancel()
 						if _, err := c.hub.db.DeleteOfflineMessage(ctx, c.PubKey, msgID); err != nil {
 							log.Printf("Failed to delete acknowledged offline message %s for %s: %v", msgID, c.PubKey, err)
+						}
+						if err := c.hub.db.MarkMessageHistoryDeliveredByRecipient(ctx, c.PubKey, msgID); err != nil {
+							log.Printf("Failed to mark acknowledged history message %s for %s: %v", msgID, c.PubKey, err)
 						}
 					}(env.MsgID)
 				}
@@ -403,7 +411,7 @@ func floodPolicyForEvent(eventType string) (category string, limit int, window t
 		return "message", 80, 10 * time.Second
 	case "session_reset", "session_repair":
 		return "control", 24, 10 * time.Second
-	case "edit", "delete", "reaction", "group_edit", "group_delete", "group_reaction", "channel_edit", "channel_delete", "channel_reaction", "channel_pin":
+	case "edit", "delete", "reaction", "reply", "pin", "unpin", "attachment", "forward", "group_edit", "group_delete", "group_reaction", "channel_edit", "channel_delete", "channel_reaction", "channel_pin":
 		return "interaction", 60, 10 * time.Second
 	default:
 		return "default", 50, 10 * time.Second
@@ -500,6 +508,12 @@ func normalizeRoutedEnvelope(env Envelope, authenticatedPubKey string) ([]byte, 
 	if requiresMessageID(env.Type) && !isValidMessageID(env.MsgID) {
 		return nil, false
 	}
+	if requiresTargetMessageID(env.Type) && !isValidMessageID(env.TargetMsgID) {
+		return nil, false
+	}
+	if requiresEncryptedData(env.Type) && len(env.Data) == 0 {
+		return nil, false
+	}
 	if len(env.Data) > maxMessageSize {
 		return nil, false
 	}
@@ -514,7 +528,25 @@ func normalizeRoutedEnvelope(env Envelope, authenticatedPubKey string) ([]byte, 
 
 func requiresMessageID(messageType string) bool {
 	switch messageType {
-	case "message", "session_repair", "group_message", "group_edit", "group_delete", "group_reaction", "group_sender_key", "channel_message", "channel_edit", "channel_delete", "channel_reaction", "channel_pin", "delivery_receipt", "read_receipt", "edit", "delete", "reaction":
+	case "message", "session_repair", "group_message", "group_edit", "group_delete", "group_reaction", "group_sender_key", "channel_message", "channel_edit", "channel_delete", "channel_reaction", "channel_pin", "delivery_receipt", "read_receipt", "edit", "delete", "reaction", "reply", "pin", "unpin", "attachment", "forward":
+		return true
+	default:
+		return false
+	}
+}
+
+func requiresTargetMessageID(messageType string) bool {
+	switch messageType {
+	case "edit", "delete", "reaction", "reply", "pin", "unpin", "group_edit", "group_delete", "group_reaction", "channel_edit", "channel_delete", "channel_reaction":
+		return true
+	default:
+		return false
+	}
+}
+
+func requiresEncryptedData(messageType string) bool {
+	switch messageType {
+	case "message", "edit", "reply", "attachment", "forward", "session_repair", "group_message", "group_edit", "group_sender_key", "channel_message", "channel_edit":
 		return true
 	default:
 		return false
@@ -632,10 +664,11 @@ func (c *Client) writePump() {
 }
 
 func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request, globalCtx context.Context) {
+	remoteAddr := clientIPFromRequest(r)
 	if !isAllowedWebSocketOrigin(r.Header.Get("Origin")) {
 		logEvent("ws_origin_rejected", map[string]any{
 			"origin": r.Header.Get("Origin"),
-			"remote": r.RemoteAddr,
+			"remote": remoteAddr,
 		})
 		http.Error(w, "Forbidden origin", http.StatusForbidden)
 		return
@@ -644,20 +677,20 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request, globalCtx context
 	// Р вЂќР В»РЎРЏ Web3/Auth Р СРЎвЂ№ Р С•Р В¶Р С‘Р Т‘Р В°Р ВµР С Р С—РЎС“Р В±Р В»Р С‘РЎвЂЎР Р…РЎвЂ№Р в„– Р С”Р В»РЎР‹РЎвЂЎ.
 	pubKey := r.URL.Query().Get("pub")
 	if pubKey == "" {
-		logEvent("ws_missing_pubkey", map[string]any{"remote": r.RemoteAddr})
+		logEvent("ws_missing_pubkey", map[string]any{"remote": remoteAddr})
 		http.Error(w, "Missing public key", http.StatusUnauthorized)
 		return
 	}
 
 	if !isValidPublicKey(pubKey) {
-		logEvent("ws_invalid_pubkey", map[string]any{"remote": r.RemoteAddr})
+		logEvent("ws_invalid_pubkey", map[string]any{"remote": remoteAddr})
 		http.Error(w, "Invalid public key", http.StatusUnauthorized)
 		return
 	}
 	if r.URL.Query().Get("state") != requiredClientStateVersion {
 		logEvent("ws_stale_client_rejected", map[string]any{
 			"pub_key": pubKey,
-			"remote":  r.RemoteAddr,
+			"remote":  remoteAddr,
 			"state":   r.URL.Query().Get("state"),
 		})
 		http.Error(w, "Client update required", http.StatusUpgradeRequired)
@@ -731,7 +764,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request, globalCtx context
 		return
 	}
 	sessionToken := base64.StdEncoding.EncodeToString(sessionTokenBytes)
-	hub.StoreSessionToken(sessionToken, pubKey, r.UserAgent(), r.RemoteAddr)
+	hub.StoreSessionToken(sessionToken, pubKey, r.UserAgent(), remoteAddr)
 
 	if err := conn.WriteJSON(map[string]string{
 		"type":          "auth_success",

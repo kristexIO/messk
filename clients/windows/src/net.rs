@@ -1,13 +1,19 @@
 use crate::{
     config,
-    crypto::{Identity, decrypt_box_payload},
+    crypto::{Identity, decrypt_box_payload, decrypt_file_secretbox, encrypt_file_secretbox},
+    media,
     protocol::Envelope,
     ratchet,
     storage::{LocalStore, MessageDirection, StoredChatMessage, now_ms},
 };
 use anyhow::{Context, Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
+use messk_core::payload::{EncryptedFilePayload, VoiceMessagePayload};
+use messk_core::profile::UserProfile;
+use messk_core::protocol as core_protocol;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::UnboundedSender;
@@ -35,6 +41,96 @@ pub struct DirectSendResult {
 }
 
 #[derive(Debug, Clone)]
+pub struct DirectoryResolveResult {
+    pub username: String,
+    pub pub_key: String,
+    pub nickname: String,
+    pub avatar: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteProfile {
+    pub pub_key: String,
+    pub nickname: String,
+    pub avatar: String,
+    pub username: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DirectoryResolveResponse {
+    #[serde(default)]
+    username: String,
+    #[serde(rename = "pubKey")]
+    pub_key: String,
+    #[serde(default)]
+    nickname: String,
+    #[serde(default)]
+    avatar: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteProfileResponse {
+    #[serde(rename = "pubKey")]
+    pub_key: String,
+    #[serde(default)]
+    nickname: String,
+    #[serde(default)]
+    avatar: String,
+    #[serde(default)]
+    username: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SaveProfileRequest<'a> {
+    nickname: &'a str,
+    avatar: &'a str,
+    username: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DirectHistoryResponse {
+    #[serde(default)]
+    messages: Vec<DirectHistoryRecord>,
+    #[serde(rename = "nextCursor")]
+    next_cursor: i64,
+    limit: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct DirectHistoryRecord {
+    id: i64,
+    #[serde(rename = "msgId")]
+    msg_id: String,
+    #[serde(rename = "envelopeType")]
+    envelope_type: String,
+    #[serde(rename = "senderPubKey")]
+    sender_public_key: String,
+    #[serde(rename = "recipientPubKey", default)]
+    recipient_public_key: String,
+    #[serde(rename = "ciphertextPayload")]
+    ciphertext_payload: Envelope,
+    #[serde(rename = "deliveryState", default)]
+    delivery_state: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DirectFileUpload {
+    pub payload: EncryptedFilePayload,
+    pub plaintext_json: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DirectVoiceUpload {
+    pub payload: VoiceMessagePayload,
+    pub plaintext_json: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UploadResponse {
+    url: String,
+}
+
+#[derive(Debug, Clone)]
 pub enum RealtimeEvent {
     Authenticated(RealtimeSession),
     Info(String),
@@ -43,10 +139,36 @@ pub enum RealtimeEvent {
         peer_public_key: String,
         sender_public_key: String,
         plaintext: String,
+        recovered: bool,
     },
     MessageStatus {
         msg_id: String,
         status: String,
+    },
+    DirectEdited {
+        msg_id: String,
+        peer_public_key: String,
+        plaintext: String,
+    },
+    DirectDeleted {
+        msg_id: String,
+        peer_public_key: String,
+    },
+    DirectReaction {
+        msg_id: String,
+        peer_public_key: String,
+        actor_public_key: String,
+        reaction: Option<String>,
+    },
+    DirectPinUpdated {
+        msg_id: String,
+        peer_public_key: String,
+        pinned: bool,
+    },
+    CallSignal {
+        kind: String,
+        sender_public_key: String,
+        data: String,
     },
     DirectDecryptFailed {
         msg_id: String,
@@ -78,6 +200,246 @@ pub async fn fetch_health(origin: String) -> Result<HealthStatus> {
     Ok(HealthStatus { status, raw })
 }
 
+pub async fn resolve_username(
+    origin: String,
+    identity: Identity,
+    username: String,
+) -> Result<DirectoryResolveResult> {
+    let username = username.trim().trim_start_matches('@').to_ascii_lowercase();
+    if username.is_empty() {
+        return Err(anyhow!("username is empty"));
+    }
+
+    let (_socket, session_token) = connect_authenticated(origin.clone(), &identity).await?;
+    if session_token.trim().is_empty() {
+        return Err(anyhow!("server did not return a session token"));
+    }
+
+    let url = config::directory_resolve_url(&origin, &username);
+    let response = reqwest::Client::new()
+        .get(&url)
+        .header("X-Session-Token", session_token)
+        .send()
+        .await
+        .with_context(|| format!("failed to resolve @{username}"))?;
+    let status_code = response.status();
+    let raw = response.text().await.unwrap_or_default();
+    if status_code == reqwest::StatusCode::NOT_FOUND {
+        return Err(anyhow!("@{username} was not found"));
+    }
+    if !status_code.is_success() {
+        return Err(anyhow!("directory returned {status_code}: {raw}"));
+    }
+
+    let body: DirectoryResolveResponse =
+        serde_json::from_str(&raw).context("directory response JSON is invalid")?;
+    if body.pub_key.trim().is_empty() {
+        return Err(anyhow!("directory response is missing public key"));
+    }
+
+    Ok(DirectoryResolveResult {
+        username: if body.username.trim().is_empty() {
+            username
+        } else {
+            body.username
+        },
+        pub_key: body.pub_key,
+        nickname: body.nickname,
+        avatar: body.avatar,
+    })
+}
+
+pub async fn fetch_profile(
+    origin: String,
+    identity: Identity,
+    public_key: String,
+) -> Result<RemoteProfile> {
+    let (_socket, session_token) = connect_authenticated(origin.clone(), &identity).await?;
+    if session_token.trim().is_empty() {
+        return Err(anyhow!("server did not return a session token"));
+    }
+    let response = reqwest::Client::new()
+        .get(config::profile_get_url(&origin, &public_key))
+        .header("X-Session-Token", session_token)
+        .send()
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load profile {}",
+                public_key.chars().take(8).collect::<String>()
+            )
+        })?;
+    let status_code = response.status();
+    let raw = response.text().await.unwrap_or_default();
+    if status_code == reqwest::StatusCode::NOT_FOUND {
+        return Err(anyhow!("profile was not found"));
+    }
+    if !status_code.is_success() {
+        return Err(anyhow!("profile returned {status_code}: {raw}"));
+    }
+    let body: RemoteProfileResponse =
+        serde_json::from_str(&raw).context("profile response JSON is invalid")?;
+    Ok(RemoteProfile {
+        pub_key: body.pub_key,
+        nickname: body.nickname,
+        avatar: body.avatar,
+        username: if body.username.trim().is_empty() {
+            None
+        } else {
+            Some(body.username.trim().to_string())
+        },
+    })
+}
+
+pub async fn save_profile(origin: String, identity: Identity, profile: UserProfile) -> Result<()> {
+    let (_socket, session_token) = connect_authenticated(origin.clone(), &identity).await?;
+    if session_token.trim().is_empty() {
+        return Err(anyhow!("server did not return a session token"));
+    }
+    let request = SaveProfileRequest {
+        nickname: &profile.nickname,
+        avatar: &profile.avatar,
+        username: profile.username.as_deref(),
+    };
+    let response = reqwest::Client::new()
+        .post(config::profile_url(&origin))
+        .header("X-Session-Token", session_token)
+        .json(&request)
+        .send()
+        .await
+        .context("failed to save profile")?;
+    let status_code = response.status();
+    let raw = response.text().await.unwrap_or_default();
+    if status_code == reqwest::StatusCode::CONFLICT {
+        return Err(anyhow!("username is already taken"));
+    }
+    if !status_code.is_success() {
+        return Err(anyhow!("profile save returned {status_code}: {raw}"));
+    }
+    Ok(())
+}
+
+pub async fn upload_direct_file(
+    origin: String,
+    identity: Identity,
+    recipient_public_key: String,
+    path: PathBuf,
+) -> Result<DirectFileUpload> {
+    let (_socket, session_token) = connect_authenticated(origin.clone(), &identity).await?;
+    if session_token.trim().is_empty() {
+        return Err(anyhow!("server did not return a session token"));
+    }
+    if recipient_public_key.trim().is_empty() {
+        return Err(anyhow!("recipient public key is empty"));
+    }
+
+    let original =
+        std::fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    if original.is_empty() {
+        return Err(anyhow!("file is empty"));
+    }
+    let original_size = original.len() as u64;
+    if original_size > media::MAX_ATTACHMENT_SIZE_BYTES {
+        return Err(anyhow!("file is larger than 75 MB"));
+    }
+    let (encrypted, key) =
+        encrypt_file_secretbox(&original).context("failed to encrypt attachment")?;
+    let file_name = safe_file_name(&path);
+    let mime_type = guess_mime_from_path(&path).to_string();
+
+    let upload_name = format!("{file_name}.bin");
+    let part = reqwest::multipart::Part::bytes(encrypted)
+        .file_name(upload_name)
+        .mime_str("application/octet-stream")?;
+    let form = reqwest::multipart::Form::new()
+        .part("file", part)
+        .text("recipient_pub_key", recipient_public_key);
+
+    let response = reqwest::Client::new()
+        .post(config::upload_url(&origin))
+        .header("X-Session-Token", session_token)
+        .multipart(form)
+        .send()
+        .await
+        .context("failed to upload attachment")?;
+    let status_code = response.status();
+    let raw = response.text().await.unwrap_or_default();
+    if !status_code.is_success() {
+        return Err(anyhow!("upload returned {status_code}: {raw}"));
+    }
+    let body: UploadResponse =
+        serde_json::from_str(&raw).context("upload response JSON invalid")?;
+    if body.url.trim().is_empty() {
+        return Err(anyhow!("upload response is missing download URL"));
+    }
+
+    let payload = EncryptedFilePayload {
+        url: absolute_url(&origin, &body.url),
+        key,
+        name: file_name,
+        size: original_size,
+        mime_type,
+    };
+    let plaintext_json = payload.to_plaintext_json();
+
+    Ok(DirectFileUpload {
+        payload,
+        plaintext_json,
+    })
+}
+
+pub async fn upload_direct_voice(
+    origin: String,
+    identity: Identity,
+    recipient_public_key: String,
+    path: PathBuf,
+    duration_seconds: u64,
+) -> Result<DirectVoiceUpload> {
+    let upload = upload_direct_file(origin, identity, recipient_public_key, path).await?;
+    let payload = VoiceMessagePayload {
+        url: upload.payload.url,
+        key: upload.payload.key,
+        duration_seconds,
+        mime_type: media::normalized_voice_mime(&upload.payload.mime_type),
+        size: upload.payload.size,
+    };
+    Ok(DirectVoiceUpload {
+        plaintext_json: payload.to_plaintext_json(),
+        payload,
+    })
+}
+
+pub async fn download_encrypted_file(
+    origin: String,
+    identity: Identity,
+    payload: EncryptedFilePayload,
+    output_path: PathBuf,
+) -> Result<()> {
+    let (_socket, session_token) = connect_authenticated(origin.clone(), &identity).await?;
+    if session_token.trim().is_empty() {
+        return Err(anyhow!("server did not return a session token"));
+    }
+    let response = reqwest::Client::new()
+        .get(absolute_url(&origin, &payload.url))
+        .header("X-Session-Token", session_token)
+        .send()
+        .await
+        .context("failed to download attachment")?;
+    let status_code = response.status();
+    let bytes = response.bytes().await.unwrap_or_default();
+    if !status_code.is_success() {
+        return Err(anyhow!(
+            "download returned {status_code}: {}",
+            String::from_utf8_lossy(&bytes)
+        ));
+    }
+    let plaintext = decrypt_file_secretbox(&bytes, &payload.key)
+        .context("failed to decrypt downloaded attachment")?;
+    std::fs::write(&output_path, plaintext)
+        .with_context(|| format!("failed to save {}", output_path.display()))?;
+    Ok(())
+}
+
 pub async fn run_realtime(
     origin: String,
     identity: Identity,
@@ -87,7 +449,9 @@ pub async fn run_realtime(
     let (mut socket, session_token) = connect_authenticated(origin.clone(), &identity).await?;
     send_realtime_event(
         &events,
-        RealtimeEvent::Authenticated(RealtimeSession { session_token }),
+        RealtimeEvent::Authenticated(RealtimeSession {
+            session_token: session_token.clone(),
+        }),
     );
     send_realtime_event(
         &events,
@@ -99,6 +463,16 @@ pub async fn run_realtime(
     let mut flush_interval = tokio::time::interval(Duration::from_secs(12));
     flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     flush_outbox(&origin, &identity, &store, &events).await;
+    sync_known_direct_history(
+        &origin,
+        &session_token,
+        &mut socket,
+        &identity,
+        &store,
+        &mut sessions,
+        &events,
+    )
+    .await;
 
     loop {
         tokio::select! {
@@ -184,6 +558,124 @@ pub async fn send_direct_message_once(
     }
 }
 
+pub async fn send_direct_edit_once(
+    origin: String,
+    identity: Identity,
+    store: LocalStore,
+    recipient_public_key: String,
+    target_msg_id: String,
+    plaintext: String,
+) -> Result<DirectSendResult> {
+    if target_msg_id.trim().is_empty() {
+        return Err(anyhow!("target message id is empty"));
+    }
+    let event_id = Uuid::new_v4().to_string();
+    let mut session = store
+        .load_session(&identity.public_key, &recipient_public_key)?
+        .ok_or_else(|| anyhow!("secure session is not ready for edit"))?;
+    let data = ratchet::encrypt_existing_direct_payload(&mut session, &plaintext)
+        .context("failed to encrypt edit payload")?;
+    store.save_session(&identity.public_key, &recipient_public_key, &session)?;
+    let envelope = Envelope::direct_edit(
+        event_id.clone(),
+        target_msg_id,
+        identity.public_key.clone(),
+        recipient_public_key,
+        data,
+    );
+    send_direct_control_network(origin, &identity, envelope, event_id).await
+}
+
+pub async fn send_direct_delete_once(
+    origin: String,
+    identity: Identity,
+    recipient_public_key: String,
+    target_msg_id: String,
+) -> Result<DirectSendResult> {
+    send_direct_plain_control_once(
+        origin,
+        identity,
+        recipient_public_key,
+        target_msg_id,
+        "delete",
+        None,
+    )
+    .await
+}
+
+pub async fn send_direct_reaction_once(
+    origin: String,
+    identity: Identity,
+    recipient_public_key: String,
+    target_msg_id: String,
+    reaction: Option<String>,
+) -> Result<DirectSendResult> {
+    send_direct_plain_control_once(
+        origin,
+        identity,
+        recipient_public_key,
+        target_msg_id,
+        "reaction",
+        reaction,
+    )
+    .await
+}
+
+pub async fn send_direct_pin_once(
+    origin: String,
+    identity: Identity,
+    recipient_public_key: String,
+    target_msg_id: String,
+    pinned: bool,
+) -> Result<DirectSendResult> {
+    let kind = if pinned { "pin" } else { "unpin" };
+    send_direct_plain_control_once(
+        origin,
+        identity,
+        recipient_public_key,
+        target_msg_id,
+        kind,
+        None,
+    )
+    .await
+}
+
+pub async fn send_call_signal_once(
+    origin: String,
+    identity: Identity,
+    recipient_public_key: String,
+    kind: String,
+    data: String,
+) -> Result<DirectSendResult> {
+    if recipient_public_key.trim().is_empty() {
+        return Err(anyhow!("recipient public key is empty"));
+    }
+    if !core_protocol::is_call_signal(&kind) {
+        return Err(anyhow!("unsupported call signal type {kind}"));
+    }
+
+    let event_id = Uuid::new_v4().to_string();
+    let envelope = Envelope {
+        kind,
+        msg_id: Some(event_id.clone()),
+        target_msg_id: None,
+        recipient_pub_key: Some(recipient_public_key),
+        sender_pub_key: Some(identity.public_key.clone()),
+        data: Some(data),
+        reaction: None,
+        challenge: None,
+        ephemeral: None,
+        session_token: None,
+        prekeys: None,
+        prekey: None,
+        signed_prekey: None,
+        signed_prekey_sig: None,
+        ack_type: None,
+        message: None,
+    };
+    send_direct_control_network(origin, &identity, envelope, event_id).await
+}
+
 pub async fn flush_outbox_once(
     origin: String,
     identity: Identity,
@@ -249,6 +741,70 @@ async fn send_direct_message_network(
     })
 }
 
+async fn send_direct_plain_control_once(
+    origin: String,
+    identity: Identity,
+    recipient_public_key: String,
+    target_msg_id: String,
+    kind: &str,
+    reaction: Option<String>,
+) -> Result<DirectSendResult> {
+    if target_msg_id.trim().is_empty() {
+        return Err(anyhow!("target message id is empty"));
+    }
+    let event_id = Uuid::new_v4().to_string();
+    let envelope = match kind {
+        "delete" => Envelope::direct_delete(
+            event_id.clone(),
+            target_msg_id,
+            identity.public_key.clone(),
+            recipient_public_key,
+        ),
+        "reaction" => Envelope::direct_reaction(
+            event_id.clone(),
+            target_msg_id,
+            identity.public_key.clone(),
+            recipient_public_key,
+            reaction,
+        ),
+        "pin" => Envelope::direct_pin(
+            event_id.clone(),
+            target_msg_id,
+            identity.public_key.clone(),
+            recipient_public_key,
+        ),
+        "unpin" => Envelope::direct_unpin(
+            event_id.clone(),
+            target_msg_id,
+            identity.public_key.clone(),
+            recipient_public_key,
+        ),
+        other => return Err(anyhow!("unsupported direct control type {other}")),
+    };
+    send_direct_control_network(origin, &identity, envelope, event_id).await
+}
+
+async fn send_direct_control_network(
+    origin: String,
+    identity: &Identity,
+    envelope: Envelope,
+    event_id: String,
+) -> Result<DirectSendResult> {
+    let (mut socket, _) = connect_authenticated(origin, identity).await?;
+    socket
+        .send(Message::Text(serde_json::to_string(&envelope)?.into()))
+        .await
+        .context("failed to send direct control event")?;
+    let acknowledged = wait_for_server_ack(&mut socket, &event_id)
+        .await
+        .unwrap_or(false);
+    Ok(DirectSendResult {
+        msg_id: event_id,
+        used_prekey: false,
+        acknowledged,
+    })
+}
+
 async fn handle_realtime_envelope(
     socket: &mut WsStream,
     identity: &Identity,
@@ -278,7 +834,22 @@ async fn handle_realtime_envelope(
             Ok(())
         }
         "message" | "offline_message" => {
-            handle_direct_envelope(socket, identity, store, sessions, events, envelope).await
+            handle_direct_envelope(socket, identity, store, sessions, events, envelope, false).await
+        }
+        "edit" | "delete" | "reaction" | "pin" | "unpin" => {
+            handle_direct_control_envelope(socket, identity, store, sessions, events, envelope)
+                .await
+        }
+        kind if core_protocol::is_call_signal(kind) => {
+            send_realtime_event(
+                events,
+                RealtimeEvent::CallSignal {
+                    kind: envelope.kind,
+                    sender_public_key: envelope.sender_pub_key.unwrap_or_default(),
+                    data: envelope.data.unwrap_or_default(),
+                },
+            );
+            Ok(())
         }
         "rate_limited" => {
             send_realtime_event(
@@ -308,6 +879,7 @@ async fn handle_direct_envelope(
     sessions: &mut HashMap<String, ratchet::Session>,
     events: &UnboundedSender<RealtimeEvent>,
     envelope: Envelope,
+    recovered: bool,
 ) -> Result<()> {
     let is_offline_message = envelope.kind == "offline_message";
     let my_public_key = identity.public_key.trim();
@@ -347,14 +919,29 @@ async fn handle_direct_envelope(
     } else {
         sender_public_key.clone()
     };
+    if store.message_exists(&identity.public_key, &msg_id)? {
+        if sender_public_key != my_public_key {
+            let receipt = Envelope::delivery_receipt(
+                msg_id.clone(),
+                identity.public_key.clone(),
+                sender_public_key.clone(),
+            );
+            send_envelope(socket, &receipt).await?;
+            acknowledge_offline(socket, &msg_id).await?;
+        } else if is_offline_message {
+            acknowledge_offline(socket, &msg_id).await?;
+        }
+        return Ok(());
+    }
     let Some(data) = envelope.data.as_deref() else {
         if is_offline_message {
             acknowledge_offline(socket, &msg_id).await?;
         }
         return Ok(());
     };
-    let payload: ratchet::RatchetPayload = match serde_json::from_str(data) {
-        Ok(value) => value,
+    let plaintext = match decrypt_direct_payload(identity, store, sessions, &peer_public_key, data)
+    {
+        Ok(plaintext) => plaintext,
         Err(error) => {
             send_realtime_event(
                 events,
@@ -366,59 +953,6 @@ async fn handle_direct_envelope(
             return Ok(());
         }
     };
-    let message = ratchet::RatchetMessage {
-        header: payload.header.clone(),
-        ciphertext: payload.ciphertext.clone(),
-    };
-
-    let mut plaintext = if let Some(session) = sessions.get_mut(&peer_public_key) {
-        let plaintext = ratchet::decrypt(session, &message).ok().flatten();
-        if plaintext.is_some() {
-            store.save_session(&identity.public_key, &peer_public_key, session)?;
-        }
-        plaintext
-    } else if let Some(mut session) = store.load_session(&identity.public_key, &peer_public_key)? {
-        let plaintext = ratchet::decrypt(&mut session, &message).ok().flatten();
-        if plaintext.is_some() {
-            store.save_session(&identity.public_key, &peer_public_key, &session)?;
-            sessions.insert(peer_public_key.clone(), session);
-        }
-        plaintext
-    } else {
-        None
-    };
-
-    if plaintext.is_none()
-        && let Some(x3dh) = &payload.x3dh
-    {
-        let prekey_secret = if let Some(prekey_public) = &x3dh.pre_key_public_key {
-            store
-                .load_prekey(&identity.public_key, prekey_public)?
-                .map(|prekey| prekey.secret_key)
-        } else {
-            None
-        };
-        let shared_secret = crate::crypto::x3dh_respond(
-            identity.secret_key.expose(),
-            prekey_secret.as_deref(),
-            &peer_public_key,
-            &x3dh.ephemeral_public_key,
-        )
-        .context("failed to create responder X3DH session")?;
-        let mut fresh_session = ratchet::Session::new_responder(
-            peer_public_key.clone(),
-            shared_secret,
-            payload.header.ratchet_pub_key.clone(),
-        )?;
-        plaintext = ratchet::decrypt(&mut fresh_session, &message)?;
-        if plaintext.is_some() {
-            store.save_session(&identity.public_key, &peer_public_key, &fresh_session)?;
-            if let Some(prekey_public) = &x3dh.pre_key_public_key {
-                store.delete_prekey(&identity.public_key, prekey_public)?;
-            }
-            sessions.insert(peer_public_key.clone(), fresh_session);
-        }
-    }
 
     if let Some(plaintext) = plaintext {
         let stored_plaintext = plaintext.clone();
@@ -429,6 +963,7 @@ async fn handle_direct_envelope(
                 peer_public_key: peer_public_key.clone(),
                 sender_public_key: sender_public_key.clone(),
                 plaintext,
+                recovered,
             },
         );
         store.upsert_message(
@@ -463,10 +998,412 @@ async fn handle_direct_envelope(
         );
     }
 
-    if is_offline_message {
+    if sender_public_key != my_public_key || is_offline_message {
         acknowledge_offline(socket, &msg_id).await?;
     }
     Ok(())
+}
+
+async fn handle_direct_control_envelope(
+    socket: &mut WsStream,
+    identity: &Identity,
+    store: &LocalStore,
+    sessions: &mut HashMap<String, ratchet::Session>,
+    events: &UnboundedSender<RealtimeEvent>,
+    envelope: Envelope,
+) -> Result<()> {
+    let my_public_key = identity.public_key.trim();
+    let sender_public_key = envelope.sender_pub_key.clone().unwrap_or_default();
+    let recipient_public_key = envelope.recipient_pub_key.clone().unwrap_or_default();
+    let event_id = envelope
+        .msg_id
+        .clone()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let target_msg_id = envelope
+        .target_msg_id
+        .clone()
+        .or_else(|| envelope.msg_id.clone())
+        .unwrap_or_default();
+
+    if sender_public_key.is_empty() || recipient_public_key.is_empty() {
+        return Ok(());
+    }
+
+    let is_for_me = recipient_public_key == my_public_key;
+    let is_from_me = sender_public_key == my_public_key;
+    if !is_for_me && !is_from_me {
+        return Ok(());
+    }
+
+    let peer_public_key = if is_from_me {
+        recipient_public_key.clone()
+    } else {
+        sender_public_key.clone()
+    };
+    if peer_public_key.trim().is_empty() || target_msg_id.trim().is_empty() {
+        if !is_from_me {
+            acknowledge_offline(socket, &event_id).await?;
+        }
+        return Ok(());
+    }
+
+    match envelope.kind.as_str() {
+        "edit" => {
+            let Some(data) = envelope.data.as_deref() else {
+                if !is_from_me {
+                    acknowledge_offline(socket, &event_id).await?;
+                }
+                return Ok(());
+            };
+            match decrypt_direct_payload(identity, store, sessions, &peer_public_key, data) {
+                Ok(Some(plaintext)) => {
+                    store.update_message_text(&identity.public_key, &target_msg_id, &plaintext)?;
+                    send_realtime_event(
+                        events,
+                        RealtimeEvent::DirectEdited {
+                            msg_id: target_msg_id.clone(),
+                            peer_public_key: peer_public_key.clone(),
+                            plaintext,
+                        },
+                    );
+                }
+                Ok(None) => {
+                    send_realtime_event(
+                        events,
+                        RealtimeEvent::DirectDecryptFailed {
+                            msg_id: target_msg_id.clone(),
+                            sender_public_key: sender_public_key.clone(),
+                        },
+                    );
+                }
+                Err(error) => send_realtime_event(
+                    events,
+                    RealtimeEvent::Info(format!("invalid edit payload {event_id}: {error}")),
+                ),
+            }
+        }
+        "delete" => {
+            store.soft_delete_message(&identity.public_key, &target_msg_id)?;
+            send_realtime_event(
+                events,
+                RealtimeEvent::DirectDeleted {
+                    msg_id: target_msg_id.clone(),
+                    peer_public_key: peer_public_key.clone(),
+                },
+            );
+        }
+        "reaction" => {
+            let reaction = envelope
+                .reaction
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            store.set_message_reaction(
+                &identity.public_key,
+                &target_msg_id,
+                &sender_public_key,
+                reaction.as_deref(),
+            )?;
+            send_realtime_event(
+                events,
+                RealtimeEvent::DirectReaction {
+                    msg_id: target_msg_id.clone(),
+                    peer_public_key: peer_public_key.clone(),
+                    actor_public_key: sender_public_key.clone(),
+                    reaction,
+                },
+            );
+        }
+        "pin" => {
+            store.pin_message(&identity.public_key, &target_msg_id)?;
+            send_realtime_event(
+                events,
+                RealtimeEvent::DirectPinUpdated {
+                    msg_id: target_msg_id.clone(),
+                    peer_public_key: peer_public_key.clone(),
+                    pinned: true,
+                },
+            );
+        }
+        "unpin" => {
+            store.unpin_message(&identity.public_key, &target_msg_id)?;
+            send_realtime_event(
+                events,
+                RealtimeEvent::DirectPinUpdated {
+                    msg_id: target_msg_id.clone(),
+                    peer_public_key: peer_public_key.clone(),
+                    pinned: false,
+                },
+            );
+        }
+        _ => {}
+    }
+
+    if !is_from_me {
+        acknowledge_offline(socket, &event_id).await?;
+    }
+    Ok(())
+}
+
+fn decrypt_direct_payload(
+    identity: &Identity,
+    store: &LocalStore,
+    sessions: &mut HashMap<String, ratchet::Session>,
+    peer_public_key: &str,
+    data: &str,
+) -> Result<Option<String>> {
+    let payload: ratchet::RatchetPayload =
+        serde_json::from_str(data).context("ratchet payload JSON is invalid")?;
+    let message = ratchet::RatchetMessage {
+        header: payload.header.clone(),
+        ciphertext: payload.ciphertext.clone(),
+    };
+
+    let mut plaintext = if let Some(session) = sessions.get_mut(peer_public_key) {
+        let plaintext = ratchet::decrypt(session, &message).ok().flatten();
+        if plaintext.is_some() {
+            store.save_session(&identity.public_key, peer_public_key, session)?;
+        }
+        plaintext
+    } else if let Some(mut session) = store.load_session(&identity.public_key, peer_public_key)? {
+        let plaintext = ratchet::decrypt(&mut session, &message).ok().flatten();
+        if plaintext.is_some() {
+            store.save_session(&identity.public_key, peer_public_key, &session)?;
+            sessions.insert(peer_public_key.to_string(), session);
+        }
+        plaintext
+    } else {
+        None
+    };
+
+    if plaintext.is_none()
+        && let Some(x3dh) = &payload.x3dh
+    {
+        let prekey_secret = if let Some(prekey_public) = &x3dh.pre_key_public_key {
+            store
+                .load_prekey(&identity.public_key, prekey_public)?
+                .map(|prekey| prekey.secret_key)
+        } else {
+            None
+        };
+        let shared_secret = crate::crypto::x3dh_respond(
+            identity.secret_key.expose(),
+            prekey_secret.as_deref(),
+            peer_public_key,
+            &x3dh.ephemeral_public_key,
+        )
+        .context("failed to create responder X3DH session")?;
+        let mut fresh_session = ratchet::Session::new_responder(
+            peer_public_key.to_string(),
+            shared_secret,
+            payload.header.ratchet_pub_key.clone(),
+        )?;
+        plaintext = ratchet::decrypt(&mut fresh_session, &message)?;
+        if plaintext.is_some() {
+            store.save_session(&identity.public_key, peer_public_key, &fresh_session)?;
+            if let Some(prekey_public) = &x3dh.pre_key_public_key {
+                store.delete_prekey(&identity.public_key, prekey_public)?;
+            }
+            sessions.insert(peer_public_key.to_string(), fresh_session);
+        }
+    }
+
+    Ok(plaintext)
+}
+
+async fn sync_known_direct_history(
+    origin: &str,
+    session_token: &str,
+    socket: &mut WsStream,
+    identity: &Identity,
+    store: &LocalStore,
+    sessions: &mut HashMap<String, ratchet::Session>,
+    events: &UnboundedSender<RealtimeEvent>,
+) {
+    if session_token.trim().is_empty() {
+        return;
+    }
+
+    let contacts = match store.list_contacts(&identity.public_key) {
+        Ok(contacts) => contacts,
+        Err(error) => {
+            send_realtime_event(
+                events,
+                RealtimeEvent::Info(format!("history contact list failed: {error}")),
+            );
+            return;
+        }
+    };
+    if contacts.is_empty() {
+        return;
+    }
+
+    let mut recovered = 0usize;
+    for contact in contacts.into_iter().take(20) {
+        match sync_direct_history_for_peer(
+            origin,
+            session_token,
+            socket,
+            identity,
+            store,
+            sessions,
+            events,
+            &contact.peer_public_key,
+        )
+        .await
+        {
+            Ok(count) => recovered += count,
+            Err(error) => send_realtime_event(
+                events,
+                RealtimeEvent::Info(format!(
+                    "history sync failed for {}: {error}",
+                    short_key(&contact.peer_public_key)
+                )),
+            ),
+        }
+    }
+
+    if recovered > 0 {
+        send_realtime_event(
+            events,
+            RealtimeEvent::Info(format!("recovered {recovered} direct history messages")),
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn sync_direct_history_for_peer(
+    origin: &str,
+    session_token: &str,
+    socket: &mut WsStream,
+    identity: &Identity,
+    store: &LocalStore,
+    sessions: &mut HashMap<String, ratchet::Session>,
+    events: &UnboundedSender<RealtimeEvent>,
+    peer_public_key: &str,
+) -> Result<usize> {
+    let peer_public_key = peer_public_key.trim();
+    if peer_public_key.is_empty() || peer_public_key == identity.public_key {
+        return Ok(0);
+    }
+
+    let mut cursor = 0i64;
+    let mut recovered = 0usize;
+    for _ in 0..5 {
+        let page =
+            fetch_direct_history_page(origin, session_token, peer_public_key, cursor, 100).await?;
+        if page.messages.is_empty() {
+            break;
+        }
+        let page_len = page.messages.len();
+        let page_limit = page.limit;
+        let next_cursor = page.next_cursor;
+
+        for record in page.messages {
+            if record.id > cursor {
+                cursor = record.id;
+            }
+            if record.sender_public_key == identity.public_key {
+                if matches!(record.envelope_type.as_str(), "message" | "offline_message") {
+                    let status = history_delivery_status(&record.delivery_state);
+                    store.update_message_status(&identity.public_key, &record.msg_id, status)?;
+                }
+                continue;
+            }
+
+            let mut envelope = record.ciphertext_payload;
+            if envelope.kind.is_empty() {
+                envelope.kind = record.envelope_type.clone();
+            }
+            if envelope.msg_id.is_none() {
+                envelope.msg_id = Some(record.msg_id.clone());
+            }
+            if envelope.sender_pub_key.is_none() && !record.sender_public_key.is_empty() {
+                envelope.sender_pub_key = Some(record.sender_public_key.clone());
+            }
+            if envelope.recipient_pub_key.is_none() && !record.recipient_public_key.is_empty() {
+                envelope.recipient_pub_key = Some(record.recipient_public_key.clone());
+            }
+
+            match envelope.kind.as_str() {
+                "message" | "offline_message" => {
+                    envelope.kind = "message".to_string();
+                    let msg_id = envelope
+                        .msg_id
+                        .clone()
+                        .unwrap_or_else(|| record.msg_id.clone());
+                    let existed_before = store.message_exists(&identity.public_key, &msg_id)?;
+                    handle_direct_envelope(
+                        socket, identity, store, sessions, events, envelope, true,
+                    )
+                    .await?;
+                    if !existed_before && store.message_exists(&identity.public_key, &msg_id)? {
+                        recovered += 1;
+                    }
+                }
+                "edit" | "delete" | "reaction" | "pin" | "unpin" => {
+                    handle_direct_control_envelope(
+                        socket, identity, store, sessions, events, envelope,
+                    )
+                    .await?;
+                }
+                _ => {}
+            }
+        }
+
+        if next_cursor <= cursor {
+            break;
+        }
+        cursor = next_cursor;
+        if page_len < page_limit {
+            break;
+        }
+    }
+
+    Ok(recovered)
+}
+
+async fn fetch_direct_history_page(
+    origin: &str,
+    session_token: &str,
+    peer_public_key: &str,
+    cursor: i64,
+    limit: usize,
+) -> Result<DirectHistoryResponse> {
+    let url = config::direct_history_url(origin, peer_public_key, cursor, limit);
+    let response = reqwest::Client::new()
+        .get(&url)
+        .header("X-Session-Token", session_token)
+        .send()
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load direct history {}",
+                short_key(peer_public_key)
+            )
+        })?;
+    let status_code = response.status();
+    let raw = response.text().await.unwrap_or_default();
+    if !status_code.is_success() {
+        return Err(anyhow!("history returned {status_code}: {raw}"));
+    }
+    serde_json::from_str(&raw).context("direct history response JSON is invalid")
+}
+
+fn history_delivery_status(delivery_state: &str) -> &'static str {
+    match delivery_state {
+        "delivered" => "delivered",
+        "read" => "read",
+        _ => "sent",
+    }
+}
+
+fn short_key(value: &str) -> String {
+    if value.len() <= 16 {
+        return value.to_string();
+    }
+    format!("{}...{}", &value[..10], &value[value.len() - 6..])
 }
 
 async fn ensure_prekeys_uploaded(
@@ -717,6 +1654,57 @@ async fn connect_authenticated(origin: String, identity: &Identity) -> Result<(W
     }
 
     Ok((socket, success.session_token.unwrap_or_default()))
+}
+
+fn absolute_url(origin: &str, value: &str) -> String {
+    let value = value.trim();
+    if value.starts_with("https://") || value.starts_with("http://") {
+        return value.to_string();
+    }
+    format!(
+        "{}/{}",
+        origin.trim().trim_end_matches('/'),
+        value.trim_start_matches('/')
+    )
+}
+
+fn safe_file_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("attachment.bin")
+        .chars()
+        .map(|character| match character {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            other => other,
+        })
+        .collect()
+}
+
+fn guess_mime_from_path(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "apng" | "png" => "image/png",
+        "avif" => "image/avif",
+        "gif" => "image/gif",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "mp3" => "audio/mpeg",
+        "ogg" => "audio/ogg",
+        "wav" => "audio/wav",
+        "webm" => "audio/webm",
+        "mp4" => "video/mp4",
+        "pdf" => "application/pdf",
+        "txt" => "text/plain",
+        "json" => "application/json",
+        _ => "application/octet-stream",
+    }
 }
 
 async fn request_prekey(

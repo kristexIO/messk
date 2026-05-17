@@ -76,7 +76,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $remoteDeployTemplate = @'
 #!/usr/bin/env bash
-set -euxo pipefail
+set -euo pipefail
 
 RELEASE_ID=\$(date -u +%Y%m%dT%H%M%SZ)
 APP_ROOT=/opt/messan
@@ -85,6 +85,7 @@ RELEASE_DIR=\$RELEASES_DIR/\$RELEASE_ID
 CURRENT_LINK=\$APP_ROOT/current
 SHARED_DIR=\$APP_ROOT/shared
 BACKUP_DIR=\$APP_ROOT/backups
+PREVIOUS_RELEASE=""
 UPLOAD_DIR=/var/lib/messan/uploads
 DB_PATH=/var/lib/messan/messenger.db
 DOMAIN='__DOMAIN__'
@@ -93,8 +94,15 @@ TURN_USERNAME='__TURN_USERNAME__'
 TURN_PASSWORD='__TURN_PASSWORD__'
 KEEP_RELEASES=__KEEP_RELEASES__
 
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+trap 'rm -f __REMOTE_ARCHIVE__ __REMOTE_SCRIPT__' EXIT
+
 mkdir -p \$RELEASES_DIR \$SHARED_DIR \$BACKUP_DIR \$UPLOAD_DIR \$APP_ROOT/bin
 touch \$DB_PATH
+if [ -L "\$CURRENT_LINK" ]; then
+  PREVIOUS_RELEASE=\$(readlink -f "\$CURRENT_LINK" || true)
+fi
 
 if [ -z "\$TURN_HOST" ]; then
   if [ -n "\$DOMAIN" ]; then
@@ -105,13 +113,32 @@ if [ -z "\$TURN_HOST" ]; then
 fi
 
 cat > /etc/sysctl.d/99-messan.conf <<'EOF'
-fs.file-max = 100000
-net.core.somaxconn = 4096
+fs.file-max = 200000
+net.core.somaxconn = 8192
+net.core.netdev_max_backlog = 16384
+net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_synack_retries = 3
+net.ipv4.tcp_max_tw_buckets = 2000000
 net.ipv4.tcp_fin_timeout = 15
 net.ipv4.tcp_keepalive_time = 600
 net.ipv4.tcp_tw_reuse = 1
+net.ipv4.ip_local_port_range = 10240 65535
+vm.swappiness = 10
 EOF
 sysctl --system || true
+
+if ! swapon --show=NAME | grep -qx /swapfile; then
+  if [ ! -f /swapfile ]; then
+    fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+    chmod 600 /swapfile
+    mkswap /swapfile
+  fi
+  swapon /swapfile || true
+fi
+if ! grep -q '^/swapfile ' /etc/fstab; then
+  echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
 
 if [ ! -f \$SHARED_DIR/backend.env ]; then
   if [ -f \$APP_ROOT/app/mess/.env ]; then
@@ -121,6 +148,7 @@ if [ ! -f \$SHARED_DIR/backend.env ]; then
   else
     cat > \$SHARED_DIR/backend.env <<'EOF'
 PORT=8080
+BIND_ADDR=127.0.0.1
 ALLOWED_ORIGINS=http://__HOST__
 DB_PATH=/var/lib/messan/messenger.db
 UPLOAD_DIR=/var/lib/messan/uploads
@@ -171,6 +199,43 @@ path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
 fi
 
+python3 - <<'PY'
+from pathlib import Path
+
+path = Path("/opt/messan/shared/backend.env")
+updates = {
+    "PORT": "8080",
+    "BIND_ADDR": "127.0.0.1",
+    "DB_PATH": "/var/lib/messan/messenger.db",
+    "UPLOAD_DIR": "/var/lib/messan/uploads",
+    "MAX_UPLOAD_MB": "80",
+    "ALLOWED_UPLOAD_MIME_TYPES": "application/octet-stream",
+    "FILE_TOKEN_TTL_MINUTES": "60",
+    "SESSION_TOKEN_TTL_MINUTES": "1440",
+    "RATE_LIMIT_PER_MINUTE": "200",
+    "REDIS_ADDR": "127.0.0.1:6379",
+    "ENABLE_METADATA_PROXY": "false",
+}
+lines = path.read_text(encoding="utf-8").splitlines()
+seen = set()
+out = []
+for line in lines:
+    if "=" not in line or line.lstrip().startswith("#"):
+        out.append(line)
+        continue
+    key, _ = line.split("=", 1)
+    key = key.strip()
+    if key in updates:
+        out.append(f"{key}={updates[key]}")
+        seen.add(key)
+    else:
+        out.append(line)
+for key, value in updates.items():
+    if key not in seen:
+        out.append(f"{key}={value}")
+path.write_text("\n".join(out) + "\n", encoding="utf-8")
+PY
+
 if [ ! -f \$SHARED_DIR/turn.env ]; then
   if [ -z "\$TURN_USERNAME" ]; then
     TURN_USERNAME="messkturn"
@@ -211,7 +276,7 @@ VITE_TURN_CREDENTIAL=\${TURN_PASSWORD}
 EOF
 
 apt-get update
-apt-get install -y curl ca-certificates build-essential rsync nginx redis-server certbot python3-certbot-nginx coturn sqlite3
+apt-get install -y curl ca-certificates build-essential rsync nginx redis-server certbot python3-certbot-nginx coturn sqlite3 ufw fail2ban
 
 if [ -s "\$DB_PATH" ]; then
   sqlite3 "\$DB_PATH" ".backup '\$BACKUP_DIR/messenger-\$RELEASE_ID.db'" || cp "\$DB_PATH" "\$BACKUP_DIR/messenger-\$RELEASE_ID.db"
@@ -240,6 +305,21 @@ fi
 cat > /etc/default/coturn <<'EOF'
 TURNSERVER_ENABLED=1
 EOF
+
+mkdir -p /etc/ssh/sshd_config.d
+cat > /etc/ssh/sshd_config.d/99-messan-hardening.conf <<'EOF'
+LoginGraceTime 20
+MaxAuthTries 3
+MaxSessions 4
+MaxStartups 10:30:60
+ClientAliveInterval 300
+ClientAliveCountMax 2
+X11Forwarding no
+AllowTcpForwarding no
+AllowAgentForwarding no
+EOF
+sshd -t
+systemctl reload ssh || systemctl reload sshd || true
 
 render_turn_config() {
   cat > /etc/turnserver.conf <<EOF
@@ -297,9 +377,105 @@ ExecStart=/opt/messan/bin/messenger-server
 Restart=always
 RestartSec=3
 LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/messan /opt/messan
 
 [Install]
 WantedBy=multi-user.target
+EOF
+
+cat > /etc/cron.d/messan-backup <<'EOF'
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+17 3 * * * root mkdir -p /opt/messan/backups && sqlite3 /var/lib/messan/messenger.db ".backup '/opt/messan/backups/messenger-$(date -u +\%Y\%m\%dT\%H\%M\%SZ).db'" && find /opt/messan/backups -name 'messenger-*.db' -mtime +14 -delete
+EOF
+
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+path = Path("/etc/nginx/nginx.conf")
+content = path.read_text(encoding="utf-8")
+content = re.sub(r"worker_processes\s+[^;]+;", "worker_processes auto;", content, count=1)
+if "worker_rlimit_nofile" not in content:
+    content = content.replace("worker_processes auto;\n", "worker_processes auto;\nworker_rlimit_nofile 200000;\n", 1)
+content = re.sub(
+    r"events\s*\{[^}]*\}",
+    "events {\n    worker_connections 8192;\n    multi_accept on;\n}",
+    content,
+    count=1,
+    flags=re.S,
+)
+path.write_text(content, encoding="utf-8")
+PY
+
+cat > /etc/nginx/conf.d/messan-limits.conf <<'EOF'
+server_tokens off;
+client_body_timeout 30s;
+client_header_timeout 10s;
+keepalive_timeout 20s;
+keepalive_requests 1000;
+send_timeout 30s;
+reset_timedout_connection on;
+
+limit_req_status 429;
+limit_conn_status 429;
+limit_req_log_level error;
+limit_conn_log_level error;
+
+limit_conn_zone $binary_remote_addr zone=messan_conn:20m;
+limit_req_zone $binary_remote_addr zone=messan_static:20m rate=60r/s;
+limit_req_zone $binary_remote_addr zone=messan_api:20m rate=12r/s;
+limit_req_zone $binary_remote_addr zone=messan_upload:10m rate=2r/s;
+limit_req_zone $binary_remote_addr zone=messan_ws:10m rate=3r/s;
+
+upstream messan_backend {
+    server 127.0.0.1:8080 max_fails=3 fail_timeout=10s;
+    keepalive 64;
+}
+EOF
+
+cat > /etc/nginx/snippets/messan-proxy.conf <<'EOF'
+proxy_pass http://messan_backend;
+proxy_http_version 1.1;
+proxy_set_header Connection "";
+proxy_set_header Host $host;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $remote_addr;
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header X-Forwarded-Host $host;
+proxy_connect_timeout 5s;
+proxy_send_timeout 60s;
+proxy_read_timeout 60s;
+proxy_buffering on;
+proxy_buffers 32 16k;
+proxy_busy_buffers_size 64k;
+EOF
+
+cat > /etc/nginx/snippets/messan-websocket-proxy.conf <<'EOF'
+proxy_pass http://messan_backend;
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+proxy_set_header Host $host;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $remote_addr;
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header X-Forwarded-Host $host;
+proxy_connect_timeout 5s;
+proxy_read_timeout 600s;
+proxy_send_timeout 600s;
+proxy_buffering off;
 EOF
 
 cat > /etc/nginx/sites-available/messan <<'EOF'
@@ -311,9 +487,7 @@ server {
     root /opt/messan/current/messk/dist;
     index index.html;
     client_max_body_size 80M;
-    keepalive_timeout 65;
-    client_body_timeout 120s;
-    send_timeout 120s;
+    limit_conn messan_conn 60;
 
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "DENY" always;
@@ -337,10 +511,64 @@ server {
 
     etag on;
 
-    location /assets/ {
+    location = /ws {
+        limit_conn messan_conn 20;
+        limit_req zone=messan_ws burst=12 nodelay;
+        include /etc/nginx/snippets/messan-websocket-proxy.conf;
+    }
+
+    location ^~ /ws/ {
+        return 444;
+    }
+
+    location ^~ /upload {
+        limit_req zone=messan_upload burst=8 nodelay;
+        client_max_body_size 80M;
+        client_body_timeout 60s;
+        proxy_request_buffering on;
+        include /etc/nginx/snippets/messan-proxy.conf;
+    }
+
+    location ^~ /download {
+        limit_req zone=messan_api burst=80 nodelay;
+        include /etc/nginx/snippets/messan-proxy.conf;
+    }
+
+    location = /health {
+        limit_req zone=messan_api burst=30 nodelay;
+        include /etc/nginx/snippets/messan-proxy.conf;
+    }
+
+    location = /version {
+        limit_req zone=messan_api burst=30 nodelay;
+        include /etc/nginx/snippets/messan-proxy.conf;
+    }
+
+    location ^~ /admin/ {
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
+        include /etc/nginx/snippets/messan-proxy.conf;
+    }
+
+    location ~ ^/(profile|sessions|resolve|directory|history|groups|channels|group-invite-links|channel-invite-links|invite-links)(/|$) {
+        limit_req zone=messan_api burst=80 nodelay;
+        include /etc/nginx/snippets/messan-proxy.conf;
+    }
+
+    location ~* (^|/)(\.git|\.env|vendor/phpunit|wp-admin|wp-login\.php|xmlrpc\.php|setup\.php) {
+        return 444;
+    }
+
+    location ~* \.(php|asp|aspx|jsp|cgi|pl|env|bak|old|orig|sql|ini|log|conf)$ {
+        return 444;
+    }
+
+    location ^~ /assets/ {
+        limit_req zone=messan_static burst=120 nodelay;
         expires 30d;
         add_header Cache-Control "public, immutable";
-        try_files \$uri =404;
+        try_files $uri =404;
     }
 
     location = /index.html {
@@ -349,123 +577,16 @@ server {
     }
 
     location / {
-        try_files \$uri \$uri/ /index.html;
-    }
-
-    location /ws {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_buffering off;
-        proxy_read_timeout 600s;
-        proxy_send_timeout 600s;
-    }
-
-    location /upload {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        client_max_body_size 80M;
-        proxy_request_buffering off;
-        proxy_read_timeout 120s;
-        proxy_send_timeout 120s;
-    }
-
-    location /download {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-
-    location /profile {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-
-    location /sessions {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-
-    location /resolve {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-
-    location /groups {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-
-    location /channels {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-
-    location /group-invite-links {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-
-    location /channel-invite-links {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-
-    location /invite-links {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-
-    location /health {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-
-    location /version {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        limit_req zone=messan_static burst=120 nodelay;
+        try_files $uri $uri/ /index.html;
     }
 }
+EOF
+
+mkdir -p /etc/systemd/system/nginx.service.d
+cat > /etc/systemd/system/nginx.service.d/99-messan-limits.conf <<'EOF'
+[Service]
+LimitNOFILE=200000
 EOF
 
 if [ -n "\$DOMAIN" ] && [ -f "/etc/letsencrypt/live/\$DOMAIN/fullchain.pem" ]; then
@@ -512,21 +633,74 @@ if [ -n "\$DOMAIN" ] && [ -f "/etc/letsencrypt/live/\$DOMAIN/fullchain.pem" ]; t
 fi
 
 if command -v ufw >/dev/null 2>&1; then
-  status=\$(ufw status | head -n 1 || true)
-  if echo "\$status" | grep -qi "active"; then
-    ufw allow 3478/tcp || true
-    ufw allow 3478/udp || true
-    ufw allow 5349/tcp || true
-    ufw allow 49160:49200/tcp || true
-    ufw allow 49160:49200/udp || true
-  fi
+  ufw default deny incoming || true
+  ufw default allow outgoing || true
+  ufw allow OpenSSH || true
+  ufw allow 'Nginx Full' || true
+  ufw allow 3478/tcp || true
+  ufw allow 3478/udp || true
+  ufw allow 5349/tcp || true
+  ufw allow 49160:49200/tcp || true
+  ufw allow 49160:49200/udp || true
+  ufw deny 8080/tcp || true
+  ufw --force enable || true
+  ufw reload || true
 fi
+
+cat > /etc/fail2ban/filter.d/messan-nginx-limit.conf <<'EOF'
+[Definition]
+failregex = limiting requests, excess: .* by zone "messan_[^"]+", client: <HOST>,
+            limiting connections by zone "messan_[^"]+", client: <HOST>,
+ignoreregex =
+EOF
+
+cat > /etc/fail2ban/jail.d/messan.conf <<'EOF'
+[sshd]
+enabled = true
+backend = systemd
+maxretry = 5
+findtime = 10m
+bantime = 1h
+
+[messan-nginx-limit]
+enabled = true
+filter = messan-nginx-limit
+port = http,https
+logpath = /var/log/nginx/error.log
+maxretry = 30
+findtime = 60
+bantime = 1h
+
+[recidive]
+enabled = true
+logpath = /var/log/fail2ban.log
+maxretry = 5
+findtime = 1d
+bantime = 1w
+EOF
+
+systemctl enable fail2ban || true
+systemctl restart fail2ban || systemctl start fail2ban || true
 
 cd \$RELEASES_DIR
 ls -1dt */ | tail -n +\$((KEEP_RELEASES + 1)) | xargs -r rm -rf
 
-curl -fsS http://127.0.0.1:8080/health
-curl -fsS http://127.0.0.1:8080/version
+if ! curl -fsS http://127.0.0.1:8080/health; then
+  if [ -n "\$PREVIOUS_RELEASE" ] && [ -d "\$PREVIOUS_RELEASE" ]; then
+    ln -sfn "\$PREVIOUS_RELEASE" "\$CURRENT_LINK"
+    systemctl restart messan || true
+    systemctl restart nginx || true
+  fi
+  exit 1
+fi
+if ! curl -fsS http://127.0.0.1:8080/version; then
+  if [ -n "\$PREVIOUS_RELEASE" ] && [ -d "\$PREVIOUS_RELEASE" ]; then
+    ln -sfn "\$PREVIOUS_RELEASE" "\$CURRENT_LINK"
+    systemctl restart messan || true
+    systemctl restart nginx || true
+  fi
+  exit 1
+fi
 systemctl is-active coturn
 '@
 
@@ -539,6 +713,7 @@ $remoteDeployScript = (
   Replace("__COMMIT_SHA__", $commitSHA).
   Replace("__KEEP_RELEASES__", [string]$KeepReleases).
   Replace("__REMOTE_ARCHIVE__", $remoteArchivePath).
+  Replace("__REMOTE_SCRIPT__", $remoteScriptPath).
   Replace("\$", "$")
 
 $remoteDeployScriptBase64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($remoteDeployScript))

@@ -188,6 +188,73 @@ func TestRouteToLocalStoresOfflineMessageForUndeliveredRecipient(t *testing.T) {
 	t.Fatal("expected offline message to be stored")
 }
 
+func TestRouteToLocalPersistsDirectHistoryForRecovery(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "messenger-test.db")
+	db := InitDB(ctx, dbPath)
+	defer db.Close()
+
+	if err := db.SaveUserIfNotExists(ctx, "sender"); err != nil {
+		t.Fatalf("save sender user: %v", err)
+	}
+	if err := db.SaveUserIfNotExists(ctx, "recipient"); err != nil {
+		t.Fatalf("save recipient user: %v", err)
+	}
+
+	hub := NewHub(db, InitCache(), nil)
+	msg := &Message{
+		Type:            "message",
+		SenderPubKey:    "sender",
+		RecipientPubKey: "recipient",
+		Payload:         []byte(`{"type":"message","msg_id":"history-1","sender_pub_key":"sender","recipient_pub_key":"recipient","data":"ciphertext"}`),
+	}
+
+	if !hub.routeToLocal(msg, true) {
+		t.Fatal("expected direct message to be accepted")
+	}
+	if !hub.routeToLocal(msg, true) {
+		t.Fatal("expected duplicate retry to be accepted")
+	}
+
+	records, nextCursor, err := db.ListDirectMessageHistory(ctx, "sender", "recipient", 0, 10)
+	if err != nil {
+		t.Fatalf("list direct history: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected one deduplicated history record, got %d", len(records))
+	}
+	if nextCursor != records[0].ID {
+		t.Fatalf("expected next cursor to match record id, got %d vs %d", nextCursor, records[0].ID)
+	}
+	if records[0].MsgID != "history-1" || records[0].EnvelopeType != "message" {
+		t.Fatalf("unexpected history record: %#v", records[0])
+	}
+	if records[0].DeliveryState != "waiting_delivery" {
+		t.Fatalf("expected waiting_delivery state, got %q", records[0].DeliveryState)
+	}
+	if string(records[0].CiphertextPayload) != string(msg.Payload) {
+		t.Fatalf("history payload mismatch: %s", string(records[0].CiphertextPayload))
+	}
+	if err := db.MarkMessageHistoryDeliveredByRecipient(ctx, "recipient", "history-1"); err != nil {
+		t.Fatalf("mark delivered: %v", err)
+	}
+	deliveredRecords, _, err := db.ListDirectMessageHistory(ctx, "sender", "recipient", 0, 10)
+	if err != nil {
+		t.Fatalf("list delivered direct history: %v", err)
+	}
+	if deliveredRecords[0].DeliveryState != "delivered" {
+		t.Fatalf("expected delivered state after ack, got %q", deliveredRecords[0].DeliveryState)
+	}
+
+	stats, err := db.Stats(ctx)
+	if err != nil {
+		t.Fatalf("stats failed: %v", err)
+	}
+	if stats.MessageHistory != 1 {
+		t.Fatalf("expected one history row, got %d", stats.MessageHistory)
+	}
+}
+
 func TestRouteToLocalDoesNotStoreOfflineTypingEvents(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "messenger-test.db")

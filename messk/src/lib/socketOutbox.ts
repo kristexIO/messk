@@ -1,29 +1,11 @@
 import { db, type OutgoingDirectMessage, type OutgoingGroupEvent } from './db';
+import { SERVER_ACK_TYPES } from './protocolContract';
 
 export type SelfSyncEnvelopePayload = {
   msgId: string;
   data: string;
   myPublicKey: string;
 };
-
-const SERVER_ACK_TYPES = new Set([
-  'message',
-  'group_message',
-  'group_edit',
-  'group_delete',
-  'group_reaction',
-  'group_sender_key',
-  'channel_message',
-  'channel_edit',
-  'channel_delete',
-  'channel_reaction',
-  'channel_pin',
-  'delivery_receipt',
-  'read_receipt',
-  'edit',
-  'delete',
-  'reaction',
-]);
 
 export function shouldHandleServerAck(ackType?: string | null) {
   if (!ackType) {

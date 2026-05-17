@@ -14,6 +14,7 @@ type FilePayload = {
   key: string;
   name: string;
   size: number;
+  mimeType?: string;
 };
 
 type VoicePayload = {
@@ -29,27 +30,72 @@ type ParsedMessageContent =
 
 const QUICK_REACTIONS = ['\u{1F44D}', '\u2764\uFE0F', '\u{1F525}'];
 
+function parseJsonObject(text: string): Record<string, unknown> | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('{')) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeFilePayload(value: Record<string, unknown>): FilePayload | null {
+  const url = typeof value.url === 'string' ? value.url : '';
+  const key = typeof value.key === 'string' ? value.key : '';
+  if (!url || !key) return null;
+  const name =
+    typeof value.name === 'string' && value.name.trim()
+      ? value.name
+      : typeof value.filename === 'string' && value.filename.trim()
+        ? value.filename
+        : 'attachment.bin';
+  const size = typeof value.size === 'number' && Number.isFinite(value.size) ? Math.max(0, value.size) : 0;
+  const mimeType =
+    typeof value.mimeType === 'string'
+      ? value.mimeType
+      : typeof value.mime_type === 'string'
+        ? value.mime_type
+        : typeof value.mime === 'string'
+          ? value.mime
+          : undefined;
+  return { url, key, name, size, mimeType };
+}
+
+function normalizeVoicePayload(value: Record<string, unknown>): VoicePayload | null {
+  const url = typeof value.url === 'string' ? value.url : '';
+  const key = typeof value.key === 'string' ? value.key : '';
+  if (!url || !key) return null;
+  const duration = typeof value.duration === 'number' && Number.isFinite(value.duration) ? value.duration : undefined;
+  return { url, key, duration };
+}
+
 function parseMessageContent(text: string): ParsedMessageContent {
-  if (text.startsWith('{"type":"file"')) {
-    try {
+  const json = parseJsonObject(text);
+  const payloadType = typeof json?.type === 'string' ? json.type.toLowerCase() : '';
+  if (json && ['file', 'attachment', 'image', 'video', 'document'].includes(payloadType)) {
+    const payload = normalizeFilePayload(json);
+    if (payload) {
       return {
         kind: 'file',
-        payload: JSON.parse(text) as FilePayload,
+        payload,
       };
-    } catch {
-      return { kind: 'text', text, mentions: [] };
     }
+    return { kind: 'text', text, mentions: [] };
   }
 
-  if (text.startsWith('{"type":"voice"')) {
-    try {
+  if (json && ['voice', 'audio', 'voice_message'].includes(payloadType)) {
+    const payload = normalizeVoicePayload(json);
+    if (payload) {
       return {
         kind: 'voice',
-        payload: JSON.parse(text) as VoicePayload,
+        payload,
       };
-    } catch {
-      return { kind: 'text', text, mentions: [] };
     }
+    return { kind: 'text', text, mentions: [] };
   }
 
   const parsedRichText = parseRichTextMessage(text);
@@ -81,6 +127,13 @@ function LinkPreview({ text }: { text: string }) {
       <div className="mt-1 truncate text-sm font-medium text-white/90">{url.pathname === '/' ? url.origin : `${url.origin}${url.pathname}`}</div>
     </a>
   );
+}
+
+function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '';
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
 }
 
 function renderTextWithMentions(text: string, mentions: MessageMention[], onMentionClick?: (pubKey: string) => void) {
@@ -356,7 +409,9 @@ export const MessageBubble = React.memo(({
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium truncate">{parsedContent.payload.name}</p>
-                  <p className="text-[10px] opacity-60">{(parsedContent.payload.size / 1024).toFixed(1)} KB</p>
+                  <p className="text-[10px] opacity-60">
+                    {[parsedContent.payload.mimeType, formatFileSize(parsedContent.payload.size)].filter(Boolean).join(' - ')}
+                  </p>
                 </div>
                 <Download className="w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity" />
               </div>

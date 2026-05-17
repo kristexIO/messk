@@ -62,12 +62,20 @@ jobs:
   windows-client:
     name: Native Windows Client
     runs-on: windows-latest
-    defaults:
-      run:
-        working-directory: clients/windows
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo fmt --check
-      - run: cargo test
-      - run: cargo build
+      - name: Core fmt
+        run: cargo fmt --manifest-path clients/core/Cargo.toml --check
+      - name: Core tests
+        run: cargo test --manifest-path clients/core/Cargo.toml
+      - name: Core clippy
+        run: cargo clippy --manifest-path clients/core/Cargo.toml -- -D warnings
+      - name: Windows fmt
+        run: cargo fmt --manifest-path clients/windows/Cargo.toml --check
+      - name: Windows tests
+        run: cargo test --manifest-path clients/windows/Cargo.toml
+      - name: Windows clippy
+        run: cargo clippy --manifest-path clients/windows/Cargo.toml -- -D warnings
+      - name: Windows build
+        run: cargo build --manifest-path clients/windows/Cargo.toml

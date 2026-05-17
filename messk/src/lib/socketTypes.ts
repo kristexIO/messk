@@ -10,7 +10,7 @@ export type IncomingEnvelope = {
   msg_id?: string;
   ack_type?: string;
   prekey?: string | null;
-  reaction?: string;
+  reaction?: string | null;
   challenge?: string;
   ephemeral?: string;
   session_token?: string;
@@ -18,6 +18,7 @@ export type IncomingEnvelope = {
   signed_prekey_sig?: string | null;
   message?: string;
   retry_after_sec?: number;
+  server_time?: string;
 };
 
 export type IncomingEnvelopeLike = IncomingEnvelope;

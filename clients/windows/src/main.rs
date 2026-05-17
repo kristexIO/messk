@@ -3,11 +3,16 @@
 mod app;
 mod config;
 mod crypto;
+mod media;
 mod net;
+mod notifier;
+mod playback;
 mod protocol;
 mod ratchet;
 mod storage;
+mod ui;
 mod vault;
+mod voice;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {

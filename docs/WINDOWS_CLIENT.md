@@ -14,6 +14,7 @@ Repository layout:
 
 - `mess/` - Go backend, kept as the server source of truth.
 - `messk/` - web client kept temporarily as protocol/UI reference.
+- `clients/core/` - shared Rust core for protocol constants, retry decisions, history cursor rules, and future crypto/session extraction.
 - `clients/windows/` - new native Rust Windows client.
 
 Removed legacy clients:
@@ -33,11 +34,12 @@ The first working milestone now includes native authentication and first-pass di
 8. DPAPI-protected identity seed/session/prekey persistence for the current Windows user;
 9. persisted `upload_prekeys` with backend `clear_prekeys` cleanup for stale server one-time prekeys;
 10. retry backoff and local panic reset for native client state.
+11. encrypted file upload/download through the backend upload routes;
+12. drag-and-drop file send for the active direct chat.
 
-Next implementation order:
+Current productionization track:
 
-1. contact list and chat routing by username;
-2. richer delivery history and message status UI;
-3. media/files and notifications;
-4. tray, auto-start, and installer;
-5. shared Rust core extraction for future mobile clients.
+1. keep `clients/core/` free of egui, Windows APIs, and filesystem assumptions;
+2. move identity, ratchet, protocol serialization, outbox retry, and history sync into `clients/core/` only after the matching tests are green;
+3. keep `clients/windows/` as the egui shell over the core plus platform features such as DPAPI, notifications, tray, installer, and app paths;
+4. keep every new message action represented in backend tests, web protocol tests, and Rust core tests before expanding UI.

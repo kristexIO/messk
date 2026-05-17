@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,6 +76,39 @@ func NewHub(db *DB, cache *Cache, rdb *redis.Client) *Hub {
 		db:           db,
 		cache:        cache,
 		rdb:          rdb,
+	}
+}
+
+func (h *Hub) Stats() map[string]int {
+	if h == nil {
+		return map[string]int{}
+	}
+	h.mu.RLock()
+	onlineUsers := len(h.clients)
+	activeSockets := 0
+	for _, sessions := range h.clients {
+		activeSockets += len(sessions)
+	}
+	h.mu.RUnlock()
+
+	sessionTokens := 0
+	h.sessionTokens.Range(func(_, _ any) bool {
+		sessionTokens++
+		return true
+	})
+	fileTokens := 0
+	h.fileTokens.Range(func(_, _ any) bool {
+		fileTokens++
+		return true
+	})
+
+	return map[string]int{
+		"onlineUsers":   onlineUsers,
+		"activeSockets": activeSockets,
+		"sessionTokens": sessionTokens,
+		"fileTokens":    fileTokens,
+		"routeQueue":    len(h.routeMessage),
+		"redisQueue":    len(h.redisMessage),
 	}
 }
 
@@ -266,16 +300,37 @@ func (h *Hub) routeToLocal(msg *Message, allowPublish bool) bool {
 		return h.routeChannelMessage(msg, allowPublish)
 	}
 
+	historyTracked := false
+	if allowPublish && h.db != nil && shouldStoreDirectHistory(msg.Type) {
+		if err := h.saveDirectMessageHistory(msg); err != nil {
+			log.Printf("Failed to save direct history for %s: %v", msg.RecipientPubKey, err)
+			return false
+		}
+		historyTracked = true
+	}
+
 	if allowPublish && h.rdb != nil {
 		h.publishRoute(msg)
 	}
 
 	delivered := h.deliverToPubKey(msg.RecipientPubKey, msg.Payload, "slow recipient")
 	shouldPersist := shouldPersistOfflineMessage(msg)
-	if !delivered && allowPublish && shouldPersist {
-		return h.saveOfflineMessage(msg) == nil
+	if delivered {
+		if historyTracked {
+			h.updateDirectHistoryState(msg, "delivered")
+		}
+		return true
 	}
-	return delivered || !shouldPersist
+	if allowPublish && shouldPersist {
+		if err := h.saveOfflineMessage(msg); err != nil {
+			return false
+		}
+		if historyTracked {
+			h.updateDirectHistoryState(msg, "waiting_delivery")
+		}
+		return true
+	}
+	return !shouldPersist
 }
 
 func (h *Hub) routeChannelMessage(msg *Message, allowPublish bool) bool {
@@ -357,6 +412,88 @@ func shouldPersistOfflineMessage(msg *Message) bool {
 		return false
 	}
 	return isValidMessageID(env.MsgID)
+}
+
+func shouldStoreDirectHistory(messageType string) bool {
+	switch messageType {
+	case "message", "offline_message", "edit", "delete", "reaction", "reply", "pin", "unpin", "attachment", "forward":
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *Hub) saveDirectMessageHistory(msg *Message) error {
+	if h == nil || h.db == nil || msg == nil || len(msg.Payload) == 0 {
+		return nil
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(msg.Payload, &env); err != nil {
+		return err
+	}
+	senderPubKey := strings.TrimSpace(env.SenderPubKey)
+	if senderPubKey == "" {
+		senderPubKey = strings.TrimSpace(msg.SenderPubKey)
+	}
+	recipientPubKey := strings.TrimSpace(env.RecipientPubKey)
+	if recipientPubKey == "" {
+		recipientPubKey = strings.TrimSpace(msg.RecipientPubKey)
+	}
+	msgID := strings.TrimSpace(env.MsgID)
+	if msgID == "" {
+		msgID = extractMessageID(msg.Payload)
+	}
+	envelopeType := strings.TrimSpace(env.Type)
+	if envelopeType == "" {
+		envelopeType = strings.TrimSpace(msg.Type)
+	}
+	if senderPubKey == "" || recipientPubKey == "" || msgID == "" || envelopeType == "" {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return h.db.SaveMessageHistory(ctx, MessageHistoryRecord{
+		ThreadType:        "direct",
+		ThreadID:          DirectThreadID(senderPubKey, recipientPubKey),
+		MsgID:             msgID,
+		EnvelopeType:      envelopeType,
+		SenderPubKey:      senderPubKey,
+		RecipientPubKey:   recipientPubKey,
+		CiphertextPayload: json.RawMessage(append([]byte(nil), msg.Payload...)),
+		DeliveryState:     "accepted",
+	})
+}
+
+func (h *Hub) updateDirectHistoryState(msg *Message, state string) {
+	if h == nil || h.db == nil || msg == nil {
+		return
+	}
+	var env Envelope
+	if err := json.Unmarshal(msg.Payload, &env); err != nil {
+		return
+	}
+	senderPubKey := strings.TrimSpace(env.SenderPubKey)
+	if senderPubKey == "" {
+		senderPubKey = strings.TrimSpace(msg.SenderPubKey)
+	}
+	recipientPubKey := strings.TrimSpace(env.RecipientPubKey)
+	if recipientPubKey == "" {
+		recipientPubKey = strings.TrimSpace(msg.RecipientPubKey)
+	}
+	msgID := strings.TrimSpace(env.MsgID)
+	if msgID == "" {
+		msgID = extractMessageID(msg.Payload)
+	}
+	if senderPubKey == "" || recipientPubKey == "" || msgID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.db.UpdateDirectMessageHistoryState(ctx, senderPubKey, recipientPubKey, msgID, state); err != nil {
+		log.Printf("Failed to update direct history state for %s: %v", msgID, err)
+	}
 }
 
 func (h *Hub) routeGroupMessage(msg *Message, allowPublish bool) bool {

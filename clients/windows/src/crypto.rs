@@ -4,6 +4,10 @@ use crypto_box::{
     Nonce, PublicKey, SalsaBox, SecretKey,
     aead::{Aead, Error as AeadError},
 };
+use crypto_secretbox::{
+    Key as SecretboxKey, Nonce as SecretboxNonce, XSalsa20Poly1305,
+    aead::KeyInit as SecretboxKeyInit,
+};
 use curve25519_dalek::MontgomeryPoint;
 use hkdf::Hkdf;
 use salsa20::{
@@ -68,6 +72,8 @@ pub enum CryptoError {
     KeyDeriveFailed,
     #[error("box decrypt failed")]
     DecryptFailed,
+    #[error("file encrypt failed")]
+    EncryptFailed,
     #[error("plaintext is not valid UTF-8")]
     Utf8(#[from] std::string::FromUtf8Error),
 }
@@ -133,6 +139,46 @@ pub fn decrypt_box_payload(
         .map_err(|_| CryptoError::PayloadTooShort)?;
     let plaintext = cipher.decrypt(nonce, &payload[24..])?;
     Ok(String::from_utf8(plaintext)?)
+}
+
+pub fn encrypt_file_secretbox(plaintext: &[u8]) -> Result<(Vec<u8>, String), CryptoError> {
+    let mut key = [0u8; 32];
+    let mut nonce = [0u8; 24];
+    getrandom::fill(&mut key).map_err(|_| CryptoError::RandomFailed)?;
+    getrandom::fill(&mut nonce).map_err(|_| CryptoError::RandomFailed)?;
+
+    let secretbox_key =
+        SecretboxKey::try_from(&key[..]).map_err(|_| CryptoError::InvalidKeyLength)?;
+    let secretbox_nonce =
+        SecretboxNonce::try_from(&nonce[..]).map_err(|_| CryptoError::PayloadTooShort)?;
+    let cipher = XSalsa20Poly1305::new(&secretbox_key);
+    let ciphertext = cipher
+        .encrypt(&secretbox_nonce, plaintext)
+        .map_err(|_| CryptoError::EncryptFailed)?;
+
+    let mut packed = Vec::with_capacity(nonce.len() + ciphertext.len());
+    packed.extend_from_slice(&nonce);
+    packed.extend_from_slice(&ciphertext);
+    let key_b64 = STANDARD.encode(key);
+    key.zeroize();
+    nonce.zeroize();
+    Ok((packed, key_b64))
+}
+
+pub fn decrypt_file_secretbox(payload: &[u8], key_b64: &str) -> Result<Vec<u8>, CryptoError> {
+    if payload.len() <= 24 {
+        return Err(CryptoError::PayloadTooShort);
+    }
+    let key = STANDARD.decode(key_b64)?;
+    let key: [u8; 32] = key.try_into().map_err(|_| CryptoError::InvalidKeyLength)?;
+    let secretbox_key =
+        SecretboxKey::try_from(&key[..]).map_err(|_| CryptoError::InvalidKeyLength)?;
+    let secretbox_nonce =
+        SecretboxNonce::try_from(&payload[..24]).map_err(|_| CryptoError::PayloadTooShort)?;
+    let cipher = XSalsa20Poly1305::new(&secretbox_key);
+    cipher
+        .decrypt(&secretbox_nonce, &payload[24..])
+        .map_err(|_| CryptoError::DecryptFailed)
 }
 
 pub fn x3dh_initiate(
@@ -239,6 +285,15 @@ mod tests {
 
         assert_eq!(first.public_key, second.public_key);
         assert_eq!(first.secret_key.expose(), second.secret_key.expose());
+    }
+
+    #[test]
+    fn file_secretbox_round_trips_web_compatible_shape() {
+        let plaintext = b"encrypted attachment body";
+        let (payload, key) = encrypt_file_secretbox(plaintext).unwrap();
+        assert!(payload.len() > 24);
+        let decrypted = decrypt_file_secretbox(&payload, &key).unwrap();
+        assert_eq!(decrypted, plaintext);
     }
 
     #[test]

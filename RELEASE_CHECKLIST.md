@@ -10,7 +10,9 @@
 - Run `powershell -ExecutionPolicy Bypass -File scripts/smoke-check.ps1` from the workspace root before tagging a release.
 - Run `powershell -ExecutionPolicy Bypass -File scripts/backend-health-smoke.ps1` when validating a backend-only deploy.
 - Run `powershell -ExecutionPolicy Bypass -File scripts/docker-check.ps1` before shipping a containerized backend.
+- Confirm `clients/core` tests pass through `scripts/check-all.ps1`; native client protocol changes must not live only in the Windows UI shell.
 - Confirm `/health` returns `status: ok` or an explicitly accepted `status: degraded`.
+- Confirm `/admin/health` is reachable only from loopback or with the configured `ADMIN_TOKEN`.
 - Confirm `/version` reports the expected release version, commit, and build timestamp.
 - Test login, reconnect, message send, offline delivery, file upload, backup export/import, and logout wipe on the release build.
 
@@ -20,6 +22,7 @@
 - Confirm local logout clears IndexedDB and in-memory keys.
 - Confirm backup export does not contain secret keys or ratchet session secrets.
 - Confirm rate limiting and proxy restrictions are enabled in the deployed backend config.
+- Confirm direct `edit`, `delete`, `reaction`, `reply`, `pin`, and `unpin` envelopes include `target_msg_id` and never plaintext.
 
 ## UX Checks
 - Confirm chat list search, message search, drafts, pins, reactions, edit/delete, and read receipts all behave correctly.
@@ -30,3 +33,4 @@
 - Monitor backend logs for `request_start`, `request_end`, auth failures, and offline message saves during staging smoke tests.
 - Verify Redis is either healthy or intentionally absent with acceptable degraded behavior.
 - Keep a tested rollback artifact for backend, web, and native Windows packages.
+- Verify the VPS deploy script created a fresh SQLite backup before switching `/opt/messan/current`.

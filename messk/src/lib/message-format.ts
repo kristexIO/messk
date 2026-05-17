@@ -1,3 +1,5 @@
+import { displayMessageText } from './protocolContract';
+
 export type MessageMention = {
   pubKey: string;
   handle: string;
@@ -106,15 +108,7 @@ export function extractMentions(text: string, handleDirectory: Record<string, st
 }
 
 export function getMessageNotificationPreview(rawMessage: string): string {
-  if (rawMessage.startsWith('{"type":"file"')) {
-    return 'Attachment';
-  }
-  if (rawMessage.startsWith('{"type":"voice"')) {
-    return 'Voice message';
-  }
-
-  const parsed = parseRichTextMessage(rawMessage);
-  return parsed.text.slice(0, 80) || 'New message';
+  return displayMessageText(rawMessage).slice(0, 80) || 'New message';
 }
 
 export function isMentioningPubKey(rawMessage: string, pubKey: string): boolean {

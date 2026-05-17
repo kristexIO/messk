@@ -1,3 +1,4 @@
+use messk_core::protocol as core_protocol;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7,11 +8,15 @@ pub struct Envelope {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub msg_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_msg_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub recipient_pub_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sender_pub_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reaction: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub challenge: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -33,14 +38,16 @@ pub struct Envelope {
 }
 
 impl Envelope {
-    pub fn auth_response(challenge: String) -> Self {
+    fn new(kind: &str) -> Self {
         Self {
-            kind: "auth_response".to_string(),
+            kind: kind.to_string(),
             msg_id: None,
+            target_msg_id: None,
             recipient_pub_key: None,
             sender_pub_key: None,
             data: None,
-            challenge: Some(challenge),
+            reaction: None,
+            challenge: None,
             ephemeral: None,
             session_token: None,
             prekeys: None,
@@ -49,45 +56,25 @@ impl Envelope {
             signed_prekey_sig: None,
             ack_type: None,
             message: None,
+        }
+    }
+
+    pub fn auth_response(challenge: String) -> Self {
+        Self {
+            challenge: Some(challenge),
+            ..Self::new(core_protocol::WIRE_AUTH_RESPONSE)
         }
     }
 
     pub fn get_prekey(recipient_public_key: String) -> Self {
         Self {
-            kind: "get_prekey".to_string(),
-            msg_id: None,
             recipient_pub_key: Some(recipient_public_key),
-            sender_pub_key: None,
-            data: None,
-            challenge: None,
-            ephemeral: None,
-            session_token: None,
-            prekeys: None,
-            prekey: None,
-            signed_prekey: None,
-            signed_prekey_sig: None,
-            ack_type: None,
-            message: None,
+            ..Self::new(core_protocol::WIRE_GET_PREKEY)
         }
     }
 
     pub fn clear_prekeys() -> Self {
-        Self {
-            kind: "clear_prekeys".to_string(),
-            msg_id: None,
-            recipient_pub_key: None,
-            sender_pub_key: None,
-            data: None,
-            challenge: None,
-            ephemeral: None,
-            session_token: None,
-            prekeys: None,
-            prekey: None,
-            signed_prekey: None,
-            signed_prekey_sig: None,
-            ack_type: None,
-            message: None,
-        }
+        Self::new(core_protocol::WIRE_CLEAR_PREKEYS)
     }
 
     pub fn upload_prekeys(
@@ -97,20 +84,11 @@ impl Envelope {
         signed_prekey_sig: String,
     ) -> Self {
         Self {
-            kind: "upload_prekeys".to_string(),
-            msg_id: None,
-            recipient_pub_key: None,
             sender_pub_key: Some(sender_public_key),
-            data: None,
-            challenge: None,
-            ephemeral: None,
-            session_token: None,
             prekeys: Some(prekeys),
-            prekey: None,
             signed_prekey: Some(signed_prekey),
             signed_prekey_sig: Some(signed_prekey_sig),
-            ack_type: None,
-            message: None,
+            ..Self::new(core_protocol::WIRE_UPLOAD_PREKEYS)
         }
     }
 
@@ -121,20 +99,90 @@ impl Envelope {
         data: String,
     ) -> Self {
         Self {
-            kind: "message".to_string(),
             msg_id: Some(msg_id),
             recipient_pub_key: Some(recipient_public_key),
             sender_pub_key: Some(sender_public_key),
             data: Some(data),
-            challenge: None,
-            ephemeral: None,
-            session_token: None,
-            prekeys: None,
-            prekey: None,
-            signed_prekey: None,
-            signed_prekey_sig: None,
-            ack_type: None,
-            message: None,
+            ..Self::new(core_protocol::WIRE_MESSAGE)
+        }
+    }
+
+    pub fn direct_edit(
+        event_id: String,
+        target_msg_id: String,
+        sender_public_key: String,
+        recipient_public_key: String,
+        data: String,
+    ) -> Self {
+        Self {
+            msg_id: Some(event_id),
+            target_msg_id: Some(target_msg_id),
+            recipient_pub_key: Some(recipient_public_key),
+            sender_pub_key: Some(sender_public_key),
+            data: Some(data),
+            ..Self::new(core_protocol::WIRE_EDIT)
+        }
+    }
+
+    pub fn direct_delete(
+        event_id: String,
+        target_msg_id: String,
+        sender_public_key: String,
+        recipient_public_key: String,
+    ) -> Self {
+        Self {
+            msg_id: Some(event_id),
+            target_msg_id: Some(target_msg_id),
+            recipient_pub_key: Some(recipient_public_key),
+            sender_pub_key: Some(sender_public_key),
+            ..Self::new(core_protocol::WIRE_DELETE)
+        }
+    }
+
+    pub fn direct_reaction(
+        event_id: String,
+        target_msg_id: String,
+        sender_public_key: String,
+        recipient_public_key: String,
+        reaction: Option<String>,
+    ) -> Self {
+        Self {
+            msg_id: Some(event_id),
+            target_msg_id: Some(target_msg_id),
+            recipient_pub_key: Some(recipient_public_key),
+            sender_pub_key: Some(sender_public_key),
+            reaction,
+            ..Self::new(core_protocol::WIRE_REACTION)
+        }
+    }
+
+    pub fn direct_pin(
+        event_id: String,
+        target_msg_id: String,
+        sender_public_key: String,
+        recipient_public_key: String,
+    ) -> Self {
+        Self {
+            msg_id: Some(event_id),
+            target_msg_id: Some(target_msg_id),
+            recipient_pub_key: Some(recipient_public_key),
+            sender_pub_key: Some(sender_public_key),
+            ..Self::new(core_protocol::WIRE_PIN)
+        }
+    }
+
+    pub fn direct_unpin(
+        event_id: String,
+        target_msg_id: String,
+        sender_public_key: String,
+        recipient_public_key: String,
+    ) -> Self {
+        Self {
+            msg_id: Some(event_id),
+            target_msg_id: Some(target_msg_id),
+            recipient_pub_key: Some(recipient_public_key),
+            sender_pub_key: Some(sender_public_key),
+            ..Self::new(core_protocol::WIRE_UNPIN)
         }
     }
 
@@ -144,39 +192,17 @@ impl Envelope {
         recipient_public_key: String,
     ) -> Self {
         Self {
-            kind: "delivery_receipt".to_string(),
             msg_id: Some(msg_id),
             recipient_pub_key: Some(recipient_public_key),
             sender_pub_key: Some(sender_public_key),
-            data: None,
-            challenge: None,
-            ephemeral: None,
-            session_token: None,
-            prekeys: None,
-            prekey: None,
-            signed_prekey: None,
-            signed_prekey_sig: None,
-            ack_type: None,
-            message: None,
+            ..Self::new(core_protocol::WIRE_DELIVERY_RECEIPT)
         }
     }
 
     pub fn offline_ack(msg_id: String) -> Self {
         Self {
-            kind: "offline_ack".to_string(),
             msg_id: Some(msg_id),
-            recipient_pub_key: None,
-            sender_pub_key: None,
-            data: None,
-            challenge: None,
-            ephemeral: None,
-            session_token: None,
-            prekeys: None,
-            prekey: None,
-            signed_prekey: None,
-            signed_prekey_sig: None,
-            ack_type: None,
-            message: None,
+            ..Self::new(core_protocol::WIRE_OFFLINE_ACK)
         }
     }
 }

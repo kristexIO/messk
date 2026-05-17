@@ -20,7 +20,7 @@ func registerSessionRoutes(mux *http.ServeMux, hub *Hub) {
 			logEvent("sessions_listed", map[string]any{
 				"pub_key": pubKey,
 				"count":   len(sessions),
-				"remote":  r.RemoteAddr,
+				"remote":  clientIPFromRequest(r),
 			})
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -34,7 +34,7 @@ func registerSessionRoutes(mux *http.ServeMux, hub *Hub) {
 				logEvent("sessions_revoked_all", map[string]any{
 					"pub_key":  pubKey,
 					"revoked":  revoked,
-					"remote":   r.RemoteAddr,
+					"remote":   clientIPFromRequest(r),
 					"has_self": currentToken != "",
 				})
 				w.Header().Set("Content-Type", "application/json")
@@ -47,7 +47,7 @@ func registerSessionRoutes(mux *http.ServeMux, hub *Hub) {
 			}
 			logEvent("session_revoked", map[string]any{
 				"pub_key": pubKey,
-				"remote":  r.RemoteAddr,
+				"remote":  clientIPFromRequest(r),
 			})
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -63,7 +63,7 @@ func authorizeSession(hub *Hub, w http.ResponseWriter, r *http.Request) (string,
 	if !ok {
 		logEvent("session_auth_failed", map[string]any{
 			"path":   r.URL.Path,
-			"remote": r.RemoteAddr,
+			"remote": clientIPFromRequest(r),
 		})
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return "", false
@@ -83,7 +83,7 @@ func authorizeDownload(hub *Hub, w http.ResponseWriter, r *http.Request, filenam
 
 	logEvent("download_auth_failed", map[string]any{
 		"filename": filename,
-		"remote":   r.RemoteAddr,
+		"remote":   clientIPFromRequest(r),
 	})
 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
 	return false

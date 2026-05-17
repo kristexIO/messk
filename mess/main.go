@@ -92,47 +92,13 @@ func main() {
 		serveWs(hub, w, r, ctx)
 	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		healthCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-
-		dbStatus := "ok"
-		if err := db.Ping(healthCtx); err != nil {
-			dbStatus = "error"
-		}
-
-		redisStatus := "disabled"
-		if rdb != nil {
-			if err := rdb.Ping(healthCtx).Err(); err != nil {
-				redisStatus = "error"
-			} else {
-				redisStatus = "ok"
-			}
-		}
-
-		overallStatus := "ok"
-		statusCode := http.StatusOK
-		if dbStatus != "ok" {
-			overallStatus = "error"
-			statusCode = http.StatusServiceUnavailable
-		} else if redisStatus == "error" {
-			overallStatus = "degraded"
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(statusCode)
-		json.NewEncoder(w).Encode(map[string]any{
-			"status": overallStatus,
-			"services": map[string]string{
-				"database": dbStatus,
-				"cache":    "ok",
-				"redis":    redisStatus,
-			},
-			"time": time.Now().UTC().Format(time.RFC3339),
-		})
+		writeHealthReport(w, r, db, hub, rdb)
 	})
 	mux.HandleFunc("/version", versionHandler)
 	registerSessionRoutes(mux, hub)
 	registerProfileRoutes(mux, hub, db)
+	registerHistoryRoutes(mux, hub, db)
+	registerAdminRoutes(mux, db, hub, rdb)
 	mux.HandleFunc("/groups", rateLimit(func(w http.ResponseWriter, r *http.Request) {
 		pubKey, ok := authorizeSession(hub, w, r)
 		if !ok {
@@ -1104,13 +1070,10 @@ func main() {
 	registerFileRoutes(mux, hub, db)
 	registerProxyRoutes(mux)
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
+	listenAddr := getListenAddr()
 
 	server := &http.Server{
-		Addr:              ":" + port,
+		Addr:              listenAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       2 * time.Minute,
@@ -1139,7 +1102,7 @@ func main() {
 		}
 	}()
 
-	log.Printf("E2EE Messenger server started on :%s\n", port)
+	log.Printf("E2EE Messenger server started on %s\n", listenAddr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("HTTP server ListenAndServe: %v", err)
 	}
@@ -1151,7 +1114,7 @@ func requestLoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := fmt.Sprintf("%d", time.Now().UnixNano())
 		startedAt := time.Now()
-		remoteAddr := r.RemoteAddr
+		remoteAddr := clientIPFromRequest(r)
 		recorder := &statusRecorder{
 			ResponseWriter: w,
 			statusCode:     http.StatusOK,
@@ -1411,12 +1374,122 @@ func getDBPath() string {
 	return raw
 }
 
+func getListenAddr() string {
+	if listenAddr := strings.TrimSpace(os.Getenv("LISTEN_ADDR")); listenAddr != "" {
+		return listenAddr
+	}
+
+	port := strings.TrimSpace(os.Getenv("PORT"))
+	if port == "" {
+		port = "8080"
+	}
+
+	bindAddr := strings.TrimSpace(os.Getenv("BIND_ADDR"))
+	if bindAddr == "" {
+		return ":" + port
+	}
+	return net.JoinHostPort(bindAddr, port)
+}
+
+func clientIPFromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+
+	remoteIP := hostFromAddress(r.RemoteAddr)
+	if isTrustedProxy(remoteIP) {
+		if ip := validHeaderIP(r.Header.Get("X-Real-IP")); ip != "" {
+			return ip
+		}
+		if ip := validForwardedForIP(r.Header.Get("X-Forwarded-For")); ip != "" {
+			return ip
+		}
+	}
+	if remoteIP != "" {
+		return remoteIP
+	}
+	return strings.TrimSpace(r.RemoteAddr)
+}
+
+func hostFromAddress(address string) string {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(address)
+	if err == nil {
+		return strings.TrimSpace(host)
+	}
+	return address
+}
+
+func isTrustedProxy(host string) bool {
+	ip := net.ParseIP(strings.TrimSpace(host))
+	return ip != nil && ip.IsLoopback()
+}
+
+func validHeaderIP(value string) string {
+	ip := net.ParseIP(strings.TrimSpace(value))
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
+}
+
+func validForwardedForIP(value string) string {
+	parts := strings.Split(value, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		if ip := validHeaderIP(parts[i]); ip != "" {
+			return ip
+		}
+	}
+	return ""
+}
+
 func getUploadDir() string {
 	raw := strings.TrimSpace(os.Getenv("UPLOAD_DIR"))
 	if raw == "" {
 		return "uploads"
 	}
 	return raw
+}
+
+func collectUploadStats(uploadDir string) map[string]any {
+	stats := map[string]any{
+		"dir":   uploadDir,
+		"files": int64(0),
+		"bytes": int64(0),
+	}
+	entries, err := os.ReadDir(uploadDir)
+	if err != nil {
+		stats["status"] = "missing"
+		stats["error"] = err.Error()
+		return stats
+	}
+	var files int64
+	var bytes int64
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		files++
+		bytes += info.Size()
+	}
+	stats["status"] = "ok"
+	stats["files"] = files
+	stats["bytes"] = bytes
+	return stats
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func newUploadFilename(originalName string) (string, error) {
@@ -1666,10 +1739,11 @@ func (l *ipRateLimiter) allow(remoteAddr string) (bool, time.Duration) {
 
 func rateLimit(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if allowed, retryAfter := defaultRateLimiter.allow(r.RemoteAddr); !allowed {
+		remoteAddr := clientIPFromRequest(r)
+		if allowed, retryAfter := defaultRateLimiter.allow(remoteAddr); !allowed {
 			logEvent("rate_limit_exceeded", map[string]any{
 				"path":        r.URL.Path,
-				"remote":      r.RemoteAddr,
+				"remote":      remoteAddr,
 				"retry_after": int64(retryAfter.Seconds()) + 1,
 			})
 			w.Header().Set("Retry-After", strconv.FormatInt(int64(retryAfter.Seconds())+1, 10))

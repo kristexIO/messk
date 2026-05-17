@@ -93,6 +93,29 @@ type FileTokenRecord struct {
 	ExpiresAt time.Time
 }
 
+type DBStats struct {
+	Users                         int64 `json:"users"`
+	OfflineMessages               int64 `json:"offlineMessages"`
+	MessageHistory                int64 `json:"messageHistory"`
+	MessageHistoryAccepted        int64 `json:"messageHistoryAccepted"`
+	MessageHistoryWaitingDelivery int64 `json:"messageHistoryWaitingDelivery"`
+	MessageHistoryDelivered       int64 `json:"messageHistoryDelivered"`
+}
+
+type MessageHistoryRecord struct {
+	ID                int64           `json:"id"`
+	ThreadType        string          `json:"threadType"`
+	ThreadID          string          `json:"threadId"`
+	MsgID             string          `json:"msgId"`
+	EnvelopeType      string          `json:"envelopeType"`
+	SenderPubKey      string          `json:"senderPubKey"`
+	RecipientPubKey   string          `json:"recipientPubKey,omitempty"`
+	CiphertextPayload json.RawMessage `json:"ciphertextPayload"`
+	ClientCreatedAt   string          `json:"clientCreatedAt,omitempty"`
+	ServerReceivedAt  time.Time       `json:"serverReceivedAt"`
+	DeliveryState     string          `json:"deliveryState"`
+}
+
 var (
 	ErrInviteNotFound         = sql.ErrNoRows
 	ErrInviteRevoked          = errors.New("invite revoked")
@@ -148,6 +171,23 @@ func InitDB(ctx context.Context, dataSourceName string) *DB {
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (sender_pub_key) REFERENCES users(pub_key) ON DELETE CASCADE,
 			FOREIGN KEY (recipient_pub_key) REFERENCES users(pub_key) ON DELETE CASCADE
+		);
+
+		CREATE TABLE IF NOT EXISTS message_history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			thread_type TEXT NOT NULL,
+			thread_id TEXT NOT NULL,
+			msg_id TEXT NOT NULL,
+			envelope_type TEXT NOT NULL,
+			sender_pub_key TEXT NOT NULL,
+			recipient_pub_key TEXT,
+			group_id TEXT,
+			channel_id TEXT,
+			ciphertext_payload BLOB NOT NULL,
+			client_created_at TEXT,
+			server_received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			delivery_state TEXT NOT NULL DEFAULT 'accepted',
+			UNIQUE(thread_type, thread_id, msg_id)
 		);
 
 		CREATE TABLE IF NOT EXISTS prekeys (
@@ -252,6 +292,9 @@ func InitDB(ctx context.Context, dataSourceName string) *DB {
 		-- Performance Indexes
 		CREATE INDEX IF NOT EXISTS idx_offline_recipient ON offline_messages(recipient_pub_key);
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_offline_recipient_msg_id ON offline_messages(recipient_pub_key, msg_id) WHERE msg_id IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_message_history_thread ON message_history(thread_type, thread_id, id);
+		CREATE INDEX IF NOT EXISTS idx_message_history_sender ON message_history(sender_pub_key, id);
+		CREATE INDEX IF NOT EXISTS idx_message_history_recipient ON message_history(recipient_pub_key, id);
 		CREATE INDEX IF NOT EXISTS idx_prekeys_user ON prekeys(user_pub_key);
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_prekeys_user_prekey ON prekeys(user_pub_key, prekey_pub_key);
 		CREATE INDEX IF NOT EXISTS idx_group_members_member ON group_members(member_pub_key);
@@ -336,6 +379,27 @@ func (db *DB) Close() {
 
 func (db *DB) Ping(ctx context.Context) error {
 	return db.db.PingContext(ctx)
+}
+
+func (db *DB) Stats(ctx context.Context) (DBStats, error) {
+	var stats DBStats
+	queries := []struct {
+		target *int64
+		query  string
+	}{
+		{&stats.Users, `SELECT COUNT(*) FROM users`},
+		{&stats.OfflineMessages, `SELECT COUNT(*) FROM offline_messages`},
+		{&stats.MessageHistory, `SELECT COUNT(*) FROM message_history`},
+		{&stats.MessageHistoryAccepted, `SELECT COUNT(*) FROM message_history WHERE delivery_state = 'accepted'`},
+		{&stats.MessageHistoryWaitingDelivery, `SELECT COUNT(*) FROM message_history WHERE delivery_state = 'waiting_delivery'`},
+		{&stats.MessageHistoryDelivered, `SELECT COUNT(*) FROM message_history WHERE delivery_state = 'delivered'`},
+	}
+	for _, item := range queries {
+		if err := db.db.QueryRowContext(ctx, item.query).Scan(item.target); err != nil {
+			return stats, err
+		}
+	}
+	return stats, nil
 }
 
 // SaveUserIfNotExists безопасно сохраняет пользователя, избегая ошибки уникальности.
@@ -434,6 +498,173 @@ func (db *DB) ResolveUsername(ctx context.Context, username string) (string, str
 	}
 
 	return pubKey.String, nickname.String, avatar.String, nil
+}
+
+func DirectThreadID(a, b string) string {
+	left := strings.TrimSpace(a)
+	right := strings.TrimSpace(b)
+	if right < left {
+		left, right = right, left
+	}
+	sum := sha256.Sum256([]byte("direct:" + left + ":" + right))
+	return "direct_" + hex.EncodeToString(sum[:])
+}
+
+func (db *DB) SaveMessageHistory(ctx context.Context, record MessageHistoryRecord) error {
+	record.ThreadType = strings.TrimSpace(record.ThreadType)
+	record.ThreadID = strings.TrimSpace(record.ThreadID)
+	record.MsgID = strings.TrimSpace(record.MsgID)
+	record.EnvelopeType = strings.TrimSpace(record.EnvelopeType)
+	record.SenderPubKey = strings.TrimSpace(record.SenderPubKey)
+	record.RecipientPubKey = strings.TrimSpace(record.RecipientPubKey)
+	record.ClientCreatedAt = strings.TrimSpace(record.ClientCreatedAt)
+	if record.ThreadType == "" || record.ThreadID == "" || record.MsgID == "" || record.EnvelopeType == "" || record.SenderPubKey == "" || len(record.CiphertextPayload) == 0 {
+		return fmt.Errorf("missing message history fields")
+	}
+
+	_, err := db.db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO message_history (
+			thread_type,
+			thread_id,
+			msg_id,
+			envelope_type,
+			sender_pub_key,
+			recipient_pub_key,
+			ciphertext_payload,
+			client_created_at,
+			delivery_state
+		)
+		VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), ?);
+	`,
+		record.ThreadType,
+		record.ThreadID,
+		record.MsgID,
+		record.EnvelopeType,
+		record.SenderPubKey,
+		record.RecipientPubKey,
+		[]byte(record.CiphertextPayload),
+		record.ClientCreatedAt,
+		defaultDeliveryState(record.DeliveryState),
+	)
+	return err
+}
+
+func (db *DB) UpdateDirectMessageHistoryState(ctx context.Context, senderPubKey, recipientPubKey, msgID, state string) error {
+	senderPubKey = strings.TrimSpace(senderPubKey)
+	recipientPubKey = strings.TrimSpace(recipientPubKey)
+	msgID = strings.TrimSpace(msgID)
+	state = defaultDeliveryState(state)
+	if senderPubKey == "" || recipientPubKey == "" || msgID == "" {
+		return nil
+	}
+	_, err := db.db.ExecContext(ctx, `
+		UPDATE message_history
+		SET delivery_state = ?
+		WHERE thread_type = 'direct'
+		  AND thread_id = ?
+		  AND msg_id = ?
+		  AND sender_pub_key = ?
+		  AND recipient_pub_key = ?;
+	`, state, DirectThreadID(senderPubKey, recipientPubKey), msgID, senderPubKey, recipientPubKey)
+	return err
+}
+
+func (db *DB) MarkMessageHistoryDeliveredByRecipient(ctx context.Context, recipientPubKey, msgID string) error {
+	recipientPubKey = strings.TrimSpace(recipientPubKey)
+	msgID = strings.TrimSpace(msgID)
+	if recipientPubKey == "" || msgID == "" {
+		return nil
+	}
+	_, err := db.db.ExecContext(ctx, `
+		UPDATE message_history
+		SET delivery_state = 'delivered'
+		WHERE thread_type = 'direct'
+		  AND recipient_pub_key = ?
+		  AND msg_id = ?;
+	`, recipientPubKey, msgID)
+	return err
+}
+
+func (db *DB) ListDirectMessageHistory(ctx context.Context, accountPubKey, peerPubKey string, cursor int64, limit int) ([]MessageHistoryRecord, int64, error) {
+	accountPubKey = strings.TrimSpace(accountPubKey)
+	peerPubKey = strings.TrimSpace(peerPubKey)
+	if accountPubKey == "" || peerPubKey == "" {
+		return nil, cursor, fmt.Errorf("missing direct history participants")
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+
+	threadID := DirectThreadID(accountPubKey, peerPubKey)
+	rows, err := db.db.QueryContext(ctx, `
+		SELECT
+			id,
+			thread_type,
+			thread_id,
+			msg_id,
+			envelope_type,
+			sender_pub_key,
+			recipient_pub_key,
+			ciphertext_payload,
+			COALESCE(client_created_at, ''),
+			server_received_at,
+			delivery_state
+		FROM message_history
+		WHERE thread_type = 'direct'
+		  AND thread_id = ?
+		  AND id > ?
+		  AND (sender_pub_key = ? OR recipient_pub_key = ?)
+		ORDER BY id ASC
+		LIMIT ?;
+	`, threadID, cursor, accountPubKey, accountPubKey, limit)
+	if err != nil {
+		return nil, cursor, err
+	}
+	defer rows.Close()
+
+	records := make([]MessageHistoryRecord, 0, limit)
+	nextCursor := cursor
+	for rows.Next() {
+		var record MessageHistoryRecord
+		var recipient sql.NullString
+		var payload []byte
+		if err := rows.Scan(
+			&record.ID,
+			&record.ThreadType,
+			&record.ThreadID,
+			&record.MsgID,
+			&record.EnvelopeType,
+			&record.SenderPubKey,
+			&recipient,
+			&payload,
+			&record.ClientCreatedAt,
+			&record.ServerReceivedAt,
+			&record.DeliveryState,
+		); err != nil {
+			return nil, cursor, err
+		}
+		record.RecipientPubKey = recipient.String
+		record.CiphertextPayload = json.RawMessage(payload)
+		if record.ID > nextCursor {
+			nextCursor = record.ID
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, cursor, err
+	}
+	return records, nextCursor, nil
+}
+
+func defaultDeliveryState(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "accepted"
+	}
+	return value
 }
 
 func (db *DB) CreateGroup(ctx context.Context, id, title, avatar, ownerPubKey string, members []string) error {

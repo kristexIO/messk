@@ -93,6 +93,7 @@ export const CallOverlay: React.FC = () => {
   const [peerConnectionState, setPeerConnectionState] = useState<RTCPeerConnectionState>('new');
   const [iceConnectionState, setIceConnectionState] = useState<RTCIceConnectionState>('new');
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [signalOnlyCall, setSignalOnlyCall] = useState(false);
   const [lastRetryTarget, setLastRetryTarget] = useState<{ peerPubKey: string; video: boolean } | null>(null);
   const [callDirection, setCallDirection] = useState<'incoming' | 'outgoing'>('outgoing');
   const [callMedia, setCallMedia] = useState<'audio' | 'video'>('audio');
@@ -217,6 +218,7 @@ export const CallOverlay: React.FC = () => {
     setPeerConnectionState('new');
     setIceConnectionState('new');
     setShowDiagnostics(false);
+    setSignalOnlyCall(false);
     setCallDirection('outgoing');
     setCallMedia('audio');
     callPeerRef.current = null;
@@ -344,7 +346,21 @@ export const CallOverlay: React.FC = () => {
   };
 
   const handleAccept = async () => {
-    if (!callerPubKey || !incomingSDP) return;
+    if (!callerPubKey) return;
+    if (!incomingSDP) {
+      socketManager.sendSignal(callerPubKey, 'call_answer', {
+        accepted: true,
+        nativeClient: false,
+        supportsMedia: false,
+        reason: 'media_negotiation_unavailable',
+      });
+      logTerminalOutcome('failed');
+      resetCallState('Call signaling accepted. Media is not available for this client pair yet.', {
+        tone: 'warning',
+        autoResetStatus: false,
+      });
+      return;
+    }
     if (!socketManager.isRealtimeReady()) {
       presentStatus('Reconnecting secure signaling...', 'warning', false);
     }
@@ -415,10 +431,13 @@ export const CallOverlay: React.FC = () => {
   const onSignal = useEffectEvent(async (event: Event) => {
     const e = event as CustomEvent<WebRTCSignalDetail>;
     const { type, sender_pub_key, data } = e.detail;
-    const parsedData = JSON.parse(data) as RTCIceCandidateInit & {
+    const parsedData = JSON.parse(data || '{}') as RTCIceCandidateInit & {
       isVideo?: boolean;
       sdp?: RTCSessionDescriptionInit;
       reason?: string;
+      accepted?: boolean;
+      nativeClient?: boolean;
+      supportsMedia?: boolean;
     };
 
     if (type === 'call_offer') {
@@ -430,7 +449,14 @@ export const CallOverlay: React.FC = () => {
       clearCallTimeout();
       setCallState('incoming');
       setIncomingSDP(parsedData.sdp ?? null);
-      presentStatus(`Incoming ${parsedData.isVideo ? 'video' : 'audio'} call`, 'success', false);
+      setSignalOnlyCall(!parsedData.sdp || parsedData.supportsMedia === false);
+      presentStatus(
+        !parsedData.sdp || parsedData.supportsMedia === false
+          ? `Incoming ${parsedData.isVideo ? 'video' : 'audio'} call request`
+          : `Incoming ${parsedData.isVideo ? 'video' : 'audio'} call`,
+        'success',
+        false
+      );
       void logCallEvent({
         peerPubKey: sender_pub_key,
         direction: 'incoming',
@@ -442,6 +468,16 @@ export const CallOverlay: React.FC = () => {
         logTerminalOutcome('missed');
         resetCallState('Missed call', { tone: 'warning', autoResetStatus: false });
       }, CALL_TIMEOUT_MS);
+    } else if (type === 'call_answer' && !parsedData.sdp && parsedData.accepted) {
+      if (callPeerRef.current !== sender_pub_key) {
+        return;
+      }
+      logTerminalOutcome('failed');
+      resetCallState('Peer answered, but native media negotiation is not available yet.', {
+        tone: 'warning',
+        allowRetry: true,
+        autoResetStatus: false,
+      });
     } else if (type === 'call_answer' && parsedData.sdp) {
       if (callState !== 'outgoing' || !rtcManagerRef.current || callPeerRef.current !== sender_pub_key) {
         return;
@@ -463,6 +499,8 @@ export const CallOverlay: React.FC = () => {
           ? 'Call missed'
           : parsedData.reason === 'connect_timeout'
             ? 'Connection timeout'
+            : parsedData.reason === 'native_media_unavailable'
+              ? 'Native client cannot start media yet'
           : 'Call declined';
       logTerminalOutcome(parsedData.reason === 'missed' ? 'missed' : 'declined');
       resetCallState(reason, {
@@ -700,7 +738,11 @@ export const CallOverlay: React.FC = () => {
            </div>
            <h2 className="text-3xl font-bold mb-2">Incoming {isVideo ? 'Video' : 'Audio'} Call</h2>
            <p className="text-slate-400 mb-12">{displayName}</p>
-           <p className="mb-8 text-xs text-slate-500">If you do not answer within 30 seconds, the call will be marked as missed.</p>
+           <p className="mb-8 max-w-md text-center text-xs text-slate-500">
+             {signalOnlyCall
+               ? 'This client can exchange call signaling, but full native media negotiation is not available yet.'
+               : 'If you do not answer within 30 seconds, the call will be marked as missed.'}
+           </p>
            <div className="flex gap-8">
               <button onClick={handleRejectCall} className="w-20 h-20 bg-red-600 rounded-full flex items-center justify-center"><PhoneOff className="w-8 h-8 text-white" /></button>
               <button onClick={handleAccept} className="w-20 h-20 bg-green-600 rounded-full flex items-center justify-center animate-bounce"><Phone className="w-8 h-8 text-white" /></button>

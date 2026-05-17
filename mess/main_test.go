@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -391,7 +392,8 @@ func TestNormalizeRoutedEnvelopePreservesReaction(t *testing.T) {
 
 	payload, ok := normalizeRoutedEnvelope(Envelope{
 		Type:            "reaction",
-		MsgID:           "msg-1",
+		MsgID:           "evt-1",
+		TargetMsgID:     "msg-1",
 		RecipientPubKey: recipient,
 		Reaction:        "👍",
 	}, sender)
@@ -407,8 +409,74 @@ func TestNormalizeRoutedEnvelopePreservesReaction(t *testing.T) {
 	if normalized.Reaction != "👍" {
 		t.Fatalf("expected reaction to be preserved, got %q", normalized.Reaction)
 	}
+	if normalized.MsgID != "evt-1" {
+		t.Fatalf("expected event msg id to be preserved, got %q", normalized.MsgID)
+	}
+	if normalized.TargetMsgID != "msg-1" {
+		t.Fatalf("expected target msg id to be preserved, got %q", normalized.TargetMsgID)
+	}
 	if normalized.SenderPubKey != sender {
 		t.Fatalf("expected sender to be overwritten, got %q", normalized.SenderPubKey)
+	}
+}
+
+func TestNormalizeRoutedEnvelopeRequiresTargetForMessageActions(t *testing.T) {
+	sender := base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012"))
+	recipient := base64.StdEncoding.EncodeToString([]byte("abcdefghijklmnopqrstuvwxyz123456"))
+
+	for _, messageType := range []string{"edit", "delete", "reaction", "reply", "pin", "unpin"} {
+		env := Envelope{
+			Type:            messageType,
+			MsgID:           "evt-1",
+			RecipientPubKey: recipient,
+			Data:            json.RawMessage(`"ciphertext"`),
+		}
+		if messageType == "delete" || messageType == "reaction" || messageType == "pin" || messageType == "unpin" {
+			env.Data = nil
+		}
+		if _, ok := normalizeRoutedEnvelope(env, sender); ok {
+			t.Fatalf("expected %s without target_msg_id to be rejected", messageType)
+		}
+
+		env.TargetMsgID = "msg-1"
+		if _, ok := normalizeRoutedEnvelope(env, sender); !ok {
+			t.Fatalf("expected %s with target_msg_id to be accepted", messageType)
+		}
+	}
+}
+
+func TestNormalizeRoutedEnvelopeAllowsChannelPinClear(t *testing.T) {
+	sender := base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012"))
+
+	if _, ok := normalizeRoutedEnvelope(Envelope{
+		Type:    "channel_pin",
+		MsgID:   "evt-1",
+		GroupID: "channel-1",
+		Data:    json.RawMessage(`""`),
+	}, sender); !ok {
+		t.Fatal("expected channel pin clear without target_msg_id to be accepted")
+	}
+}
+
+func TestNormalizeRoutedEnvelopeRequiresEncryptedDataForBodies(t *testing.T) {
+	sender := base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012"))
+	recipient := base64.StdEncoding.EncodeToString([]byte("abcdefghijklmnopqrstuvwxyz123456"))
+
+	if _, ok := normalizeRoutedEnvelope(Envelope{
+		Type:            "message",
+		MsgID:           "msg-1",
+		RecipientPubKey: recipient,
+	}, sender); ok {
+		t.Fatal("expected message without encrypted data to be rejected")
+	}
+
+	if _, ok := normalizeRoutedEnvelope(Envelope{
+		Type:            "delete",
+		MsgID:           "evt-1",
+		TargetMsgID:     "msg-1",
+		RecipientPubKey: recipient,
+	}, sender); !ok {
+		t.Fatal("expected delete without encrypted data to be accepted")
 	}
 }
 
@@ -542,6 +610,27 @@ func TestIPRateLimiterCleansExpiredBuckets(t *testing.T) {
 	}
 }
 
+func TestClientIPFromRequestTrustsLoopbackProxyHeaders(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/limited", nil)
+	req.RemoteAddr = "127.0.0.1:1000"
+	req.Header.Set("X-Real-IP", "198.51.100.20")
+	req.Header.Set("X-Forwarded-For", "203.0.113.99")
+
+	if got := clientIPFromRequest(req); got != "198.51.100.20" {
+		t.Fatalf("expected X-Real-IP from trusted proxy, got %q", got)
+	}
+}
+
+func TestClientIPFromRequestIgnoresSpoofedHeadersFromRemoteClients(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/limited", nil)
+	req.RemoteAddr = "203.0.113.10:1000"
+	req.Header.Set("X-Real-IP", "198.51.100.20")
+
+	if got := clientIPFromRequest(req); got != "203.0.113.10" {
+		t.Fatalf("expected remote address to win for untrusted clients, got %q", got)
+	}
+}
+
 func TestRateLimitMiddlewareReturnsRetryAfter(t *testing.T) {
 	originalLimiter := defaultRateLimiter
 	t.Cleanup(func() {
@@ -568,31 +657,69 @@ func TestRateLimitMiddlewareReturnsRetryAfter(t *testing.T) {
 	}
 }
 
+func TestRateLimitMiddlewareUsesForwardedClientIPFromTrustedProxy(t *testing.T) {
+	originalLimiter := defaultRateLimiter
+	t.Cleanup(func() {
+		defaultRateLimiter = originalLimiter
+	})
+
+	now := time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
+	defaultRateLimiter = newIPRateLimiter(func() int { return 1 }, time.Minute)
+	defaultRateLimiter.now = func() time.Time { return now }
+
+	handler := rateLimit(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	first := httptest.NewRequest(http.MethodGet, "/limited", nil)
+	first.RemoteAddr = "127.0.0.1:1000"
+	first.Header.Set("X-Real-IP", "198.51.100.20")
+	firstRec := httptest.NewRecorder()
+	handler(firstRec, first)
+	if firstRec.Code != http.StatusNoContent {
+		t.Fatalf("expected first request to pass, got %d", firstRec.Code)
+	}
+
+	second := httptest.NewRequest(http.MethodGet, "/limited", nil)
+	second.RemoteAddr = "127.0.0.1:1001"
+	second.Header.Set("X-Real-IP", "198.51.100.20")
+	secondRec := httptest.NewRecorder()
+	handler(secondRec, second)
+	if secondRec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected second forwarded request to be limited, got %d", secondRec.Code)
+	}
+}
+
+func TestGetListenAddrUsesBindAddress(t *testing.T) {
+	t.Setenv("LISTEN_ADDR", "")
+	t.Setenv("BIND_ADDR", "127.0.0.1")
+	t.Setenv("PORT", "18080")
+
+	if got := getListenAddr(); got != "127.0.0.1:18080" {
+		t.Fatalf("unexpected listen addr: %q", got)
+	}
+}
+
+func TestGetListenAddrAllowsExplicitOverride(t *testing.T) {
+	t.Setenv("LISTEN_ADDR", "127.0.0.1:19090")
+	t.Setenv("BIND_ADDR", "")
+	t.Setenv("PORT", "18080")
+
+	if got := getListenAddr(); got != "127.0.0.1:19090" {
+		t.Fatalf("unexpected listen addr: %q", got)
+	}
+}
+
 func TestHealthEndpointReportsServiceStatus(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "health.db")
 	db := InitDB(ctx, dbPath)
 	defer db.Close()
+	hub := NewHub(db, nil, nil)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		healthCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-
-		dbStatus := "ok"
-		if err := db.Ping(healthCtx); err != nil {
-			dbStatus = "error"
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status": "ok",
-			"services": map[string]string{
-				"database": dbStatus,
-				"cache":    "ok",
-				"redis":    "disabled",
-			},
-		})
+		writeHealthReport(w, r, db, hub, nil)
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -615,6 +742,161 @@ func TestHealthEndpointReportsServiceStatus(t *testing.T) {
 	}
 	if body.Services["database"] != "ok" {
 		t.Fatalf("unexpected database status: %s", body.Services["database"])
+	}
+}
+
+func TestAdminHealthRequiresTokenForRemoteRequests(t *testing.T) {
+	t.Setenv("ADMIN_TOKEN", "secret-token")
+	mux := http.NewServeMux()
+	registerAdminRoutes(mux, nil, NewHub(nil, nil, nil), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/health", nil)
+	req.RemoteAddr = "203.0.113.10:2222"
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without token, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin/health", nil)
+	req.RemoteAddr = "203.0.113.10:2222"
+	req.Header.Set("X-Admin-Token", "secret-token")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with token, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminHealthAllowsLoopbackWhenTokenNotConfigured(t *testing.T) {
+	t.Setenv("ADMIN_TOKEN", "")
+	mux := http.NewServeMux()
+	registerAdminRoutes(mux, nil, NewHub(nil, nil, nil), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/health", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected loopback admin health to pass, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDirectoryResolveRequiresSessionAndReturnsProfile(t *testing.T) {
+	ctx := context.Background()
+	db := InitDB(ctx, filepath.Join(t.TempDir(), "directory.db"))
+	defer db.Close()
+
+	username := "alice_01"
+	if err := db.SaveUserProfile(ctx, "alice-pub", "Alice", "", &username); err != nil {
+		t.Fatalf("save profile: %v", err)
+	}
+
+	hub := NewHub(db, nil, nil)
+	hub.StoreSessionToken("token-123", "requester-pub", "test-agent", "127.0.0.1")
+	mux := http.NewServeMux()
+	registerProfileRoutes(mux, hub, db)
+
+	req := httptest.NewRequest(http.MethodGet, "/directory/resolve?username=@Alice_01", nil)
+	req.Header.Set("X-Session-Token", "token-123")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["pubKey"] != "alice-pub" || body["username"] != "alice_01" {
+		t.Fatalf("unexpected directory response: %#v", body)
+	}
+}
+
+func TestHistoryDirectEndpointReturnsCiphertextRecords(t *testing.T) {
+	ctx := context.Background()
+	db := InitDB(ctx, filepath.Join(t.TempDir(), "history.db"))
+	defer db.Close()
+
+	account := base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012"))
+	peer := base64.StdEncoding.EncodeToString([]byte("abcdefghijklmnopqrstuvwxyz123456"))
+	payload := json.RawMessage(`{"type":"message","msg_id":"m1","sender_pub_key":"` + peer + `","recipient_pub_key":"` + account + `","data":"cipher"}`)
+	if err := db.SaveMessageHistory(ctx, MessageHistoryRecord{
+		ThreadType:        "direct",
+		ThreadID:          DirectThreadID(account, peer),
+		MsgID:             "m1",
+		EnvelopeType:      "message",
+		SenderPubKey:      peer,
+		RecipientPubKey:   account,
+		CiphertextPayload: payload,
+	}); err != nil {
+		t.Fatalf("save history: %v", err)
+	}
+
+	hub := NewHub(db, nil, nil)
+	hub.StoreSessionToken("token-123", account, "test-agent", "127.0.0.1")
+	mux := http.NewServeMux()
+	registerHistoryRoutes(mux, hub, db)
+
+	req := httptest.NewRequest(http.MethodGet, "/history/direct?peer="+url.QueryEscape(peer), nil)
+	req.Header.Set("X-Session-Token", "token-123")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Messages   []MessageHistoryRecord `json:"messages"`
+		NextCursor int64                  `json:"nextCursor"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Messages) != 1 {
+		t.Fatalf("expected one history record, got %d", len(body.Messages))
+	}
+	if body.Messages[0].MsgID != "m1" || string(body.Messages[0].CiphertextPayload) != string(payload) {
+		t.Fatalf("unexpected history response: %#v", body.Messages[0])
+	}
+	if body.NextCursor != body.Messages[0].ID {
+		t.Fatalf("unexpected next cursor: %d", body.NextCursor)
+	}
+}
+
+func TestDBStatsReportsHistoryDeliveryStates(t *testing.T) {
+	ctx := context.Background()
+	db := InitDB(ctx, filepath.Join(t.TempDir(), "stats.db"))
+	defer db.Close()
+
+	account := base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012"))
+	peer := base64.StdEncoding.EncodeToString([]byte("abcdefghijklmnopqrstuvwxyz123456"))
+	for _, state := range []string{"accepted", "waiting_delivery", "delivered"} {
+		if err := db.SaveMessageHistory(ctx, MessageHistoryRecord{
+			ThreadType:        "direct",
+			ThreadID:          DirectThreadID(account, peer),
+			MsgID:             "msg-" + state,
+			EnvelopeType:      "message",
+			SenderPubKey:      peer,
+			RecipientPubKey:   account,
+			CiphertextPayload: json.RawMessage(`{"type":"message","data":"cipher"}`),
+			DeliveryState:     state,
+		}); err != nil {
+			t.Fatalf("save history state %s: %v", state, err)
+		}
+	}
+
+	stats, err := db.Stats(ctx)
+	if err != nil {
+		t.Fatalf("load stats: %v", err)
+	}
+	if stats.MessageHistory != 3 {
+		t.Fatalf("expected 3 history records, got %d", stats.MessageHistory)
+	}
+	if stats.MessageHistoryAccepted != 1 || stats.MessageHistoryWaitingDelivery != 1 || stats.MessageHistoryDelivered != 1 {
+		t.Fatalf("unexpected delivery state stats: %#v", stats)
 	}
 }
 

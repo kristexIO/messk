@@ -2,6 +2,8 @@ import { useAppStore } from '../store';
 import { appConfig } from './config';
 import { db } from './db';
 import { fetchWithTimeout } from './http';
+import { clampHistoryLimit } from './protocolContract';
+import type { IncomingEnvelope } from './socketTypes';
 
 export type SessionListResponse = {
   sessions: Array<{
@@ -19,6 +21,26 @@ export type ResolvedUserProfile = {
   pubKey: string;
   nickname?: string;
   avatar?: string;
+};
+
+export type DirectHistoryRecord = {
+  id: number;
+  threadType: 'direct' | string;
+  threadId: string;
+  msgId: string;
+  envelopeType: string;
+  senderPubKey: string;
+  recipientPubKey?: string;
+  ciphertextPayload: IncomingEnvelope | string;
+  clientCreatedAt?: string;
+  serverReceivedAt: string;
+  deliveryState: string;
+};
+
+export type DirectHistoryResponse = {
+  messages: DirectHistoryRecord[];
+  nextCursor: number;
+  limit: number;
 };
 
 export class SocketApiClient {
@@ -196,7 +218,7 @@ export class SocketApiClient {
       return null;
     }
 
-    const candidates = ['/profile/resolve', '/resolve'];
+    const candidates = ['/directory/resolve', '/profile/resolve', '/resolve'];
     for (const path of candidates) {
       try {
         const url = new URL(appConfig.backendOrigin);
@@ -225,6 +247,27 @@ export class SocketApiClient {
     }
 
     return null;
+  }
+
+  async fetchDirectHistory(peerPubKey: string, cursor = 0, limit = 100): Promise<DirectHistoryResponse> {
+    const peer = peerPubKey.trim();
+    if (!peer) {
+      return { messages: [], nextCursor: cursor, limit };
+    }
+
+    const url = new URL(appConfig.backendOrigin);
+    url.pathname = '/history/direct';
+    url.searchParams.set('peer', peer);
+    url.searchParams.set('cursor', String(Math.max(0, cursor)));
+    url.searchParams.set('limit', String(clampHistoryLimit(limit)));
+
+    const response = await fetchWithTimeout(url.toString(), {
+      headers: this.getSessionHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error('Failed to load direct history');
+    }
+    return response.json() as Promise<DirectHistoryResponse>;
   }
 
   async refreshKnownProfiles(force = false) {
