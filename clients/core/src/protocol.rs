@@ -4,6 +4,7 @@ pub const WIRE_AUTH_RESPONSE: &str = "auth_response";
 pub const WIRE_CLEAR_PREKEYS: &str = "clear_prekeys";
 pub const WIRE_DELIVERY_RECEIPT: &str = "delivery_receipt";
 pub const WIRE_DELETE: &str = "delete";
+pub const WIRE_DUMMY: &str = "dummy";
 pub const WIRE_EDIT: &str = "edit";
 pub const WIRE_FORWARD: &str = "forward";
 pub const WIRE_GET_PREKEY: &str = "get_prekey";
@@ -87,6 +88,7 @@ pub fn carries_encrypted_data(kind: &str) -> bool {
     matches!(
         kind,
         WIRE_MESSAGE
+            | WIRE_DUMMY
             | WIRE_EDIT
             | WIRE_REPLY
             | WIRE_ATTACHMENT
@@ -153,6 +155,13 @@ mod tests {
         assert_eq!(clamp_history_limit(0), DIRECT_HISTORY_DEFAULT_LIMIT);
         assert_eq!(clamp_history_limit(42), 42);
         assert_eq!(clamp_history_limit(501), DIRECT_HISTORY_DEFAULT_LIMIT);
+    }
+
+    #[test]
+    fn dummy_is_encrypted_but_not_history() {
+        assert!(requires_message_id(WIRE_DUMMY));
+        assert!(carries_encrypted_data(WIRE_DUMMY));
+        assert!(!is_direct_history_event(WIRE_DUMMY));
     }
 
     #[test]

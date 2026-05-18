@@ -39,6 +39,9 @@ type Hub struct {
 	sessionTokens sync.Map
 	fileTokens    sync.Map
 	fileAccess    sync.Map
+
+	relayMu sync.RWMutex
+	relays  map[string]RelayRecord
 }
 
 type fileAccessEntry struct {
@@ -76,6 +79,7 @@ func NewHub(db *DB, cache *Cache, rdb *redis.Client) *Hub {
 		db:           db,
 		cache:        cache,
 		rdb:          rdb,
+		relays:       make(map[string]RelayRecord),
 	}
 }
 
@@ -109,6 +113,79 @@ func (h *Hub) Stats() map[string]int {
 		"fileTokens":    fileTokens,
 		"routeQueue":    len(h.routeMessage),
 		"redisQueue":    len(h.redisMessage),
+	}
+}
+
+func (h *Hub) UpsertRelayCapability(capability RelayCapability, remoteAddr string, revocationEpoch int) RelayRecord {
+	now := time.Now().UTC()
+	record := RelayRecord{
+		Capability:      capability,
+		FirstSeen:       now,
+		LastSeen:        now,
+		RemoteAddr:      remoteAddr,
+		RevocationEpoch: revocationEpoch,
+	}
+	if h == nil {
+		return record
+	}
+
+	h.relayMu.Lock()
+	defer h.relayMu.Unlock()
+	h.pruneExpiredRelaysLocked(now)
+	if existing, ok := h.relays[capability.NodeID]; ok {
+		record.FirstSeen = existing.FirstSeen
+	}
+	h.relays[capability.NodeID] = record
+	return record
+}
+
+func (h *Hub) ListRelayCapabilities(now time.Time) []RelayCapability {
+	if h == nil {
+		return nil
+	}
+	now = now.UTC()
+	h.relayMu.Lock()
+	defer h.relayMu.Unlock()
+	h.pruneExpiredRelaysLocked(now)
+
+	peers := make([]RelayCapability, 0, len(h.relays))
+	for _, record := range h.relays {
+		peers = append(peers, record.Capability)
+	}
+	return peers
+}
+
+func (h *Hub) RelayStats(now time.Time) map[string]any {
+	if h == nil {
+		return map[string]any{"activeRelays": 0}
+	}
+	now = now.UTC()
+	h.relayMu.Lock()
+	defer h.relayMu.Unlock()
+	h.pruneExpiredRelaysLocked(now)
+
+	transportCounts := map[string]int{}
+	for _, record := range h.relays {
+		for _, transport := range record.Capability.Transports {
+			transportCounts[transport]++
+		}
+	}
+
+	return map[string]any{
+		"activeRelays":    len(h.relays),
+		"transportCounts": transportCounts,
+		"maxRelays":       getRelayMaxNodes(),
+	}
+}
+
+func (h *Hub) pruneExpiredRelaysLocked(now time.Time) {
+	if h == nil {
+		return
+	}
+	for nodeID, record := range h.relays {
+		if !record.Capability.ExpiresAt.After(now) {
+			delete(h.relays, nodeID)
+		}
 	}
 }
 
@@ -392,7 +469,7 @@ func (h *Hub) NotifyUser(msg *Message) {
 
 func shouldPersistOffline(messageType string) bool {
 	switch messageType {
-	case "typing", "delivery_receipt", "read_receipt", "call_offer", "call_answer", "call_reject", "call_end", "ice_candidate", "session_reset":
+	case "typing", "dummy", "delivery_receipt", "read_receipt", "call_offer", "call_answer", "call_reject", "call_end", "ice_candidate", "session_reset":
 		return false
 	default:
 		return true

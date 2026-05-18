@@ -6,6 +6,10 @@ pub fn health_url(origin: &str) -> String {
     format!("{}/health", trim_origin(origin))
 }
 
+pub fn bootstrap_url(origin: &str) -> String {
+    format!("{}/bootstrap", trim_origin(origin))
+}
+
 pub fn directory_resolve_url(origin: &str, username: &str) -> String {
     format!(
         "{}/directory/resolve?username={}",

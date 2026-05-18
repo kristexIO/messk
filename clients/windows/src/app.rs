@@ -9,7 +9,7 @@ use messk_core::payload::{
     display_message_text, encrypted_file_payload, is_deleted_message_payload,
     message_payload_preview, voice_message_payload,
 };
-use messk_core::{call, profile};
+use messk_core::{call, profile, transport};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -163,6 +163,7 @@ pub struct MesskApp {
     show_settings: bool,
     settings: storage::StoredAppSettings,
     settings_draft: storage::StoredAppSettings,
+    settings_fallback_origins_text: String,
     show_contact_profile: bool,
     profile_public_key: String,
     profile_display_name: String,
@@ -232,7 +233,8 @@ impl MesskApp {
             new_chat_status: String::new(),
             show_settings: false,
             settings: settings.clone(),
-            settings_draft: settings,
+            settings_draft: settings.clone(),
+            settings_fallback_origins_text: fallback_origins_to_text(&settings.fallback_origins),
             show_contact_profile: false,
             profile_public_key: String::new(),
             profile_display_name: String::new(),
@@ -519,10 +521,10 @@ impl MesskApp {
 
     fn check_health(&mut self) {
         self.health_status = "checking".to_string();
-        let origin = self.backend_origin.clone();
+        let origins = self.transport_origins();
         let tx = self.tx.clone();
         self.runtime.spawn(async move {
-            let event = match net::fetch_health(origin).await {
+            let event = match net::fetch_health_with_fallback(origins).await {
                 Ok(status) => UiEvent::HealthOk(status),
                 Err(error) => UiEvent::HealthErr(error.to_string()),
             };
@@ -545,7 +547,7 @@ impl MesskApp {
             return;
         };
         self.realtime_status = "connecting".to_string();
-        let origin = self.backend_origin.clone();
+        let origins = self.transport_origins();
         let tx = self.tx.clone();
         let (net_tx, mut net_rx) = tokio::sync::mpsc::unbounded_channel();
         let bridge_tx = tx.clone();
@@ -555,7 +557,9 @@ impl MesskApp {
             }
         });
         let realtime_handle = self.runtime.spawn(async move {
-            if let Err(error) = net::run_realtime(origin, identity, store, net_tx).await {
+            if let Err(error) =
+                net::run_realtime_with_fallback(origins, identity, store, net_tx).await
+            {
                 let _ = tx.send(UiEvent::RealtimeErr(error.to_string()));
             }
         });
@@ -582,7 +586,7 @@ impl MesskApp {
             "manual retry for {} queued messages",
             self.outbox_count
         ));
-        let origin = self.backend_origin.clone();
+        let origins = self.transport_origins();
         let tx_events = self.tx.clone();
         let tx_done = self.tx.clone();
         let (net_tx, mut net_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -592,7 +596,7 @@ impl MesskApp {
             }
         });
         self.runtime.spawn(async move {
-            net::flush_outbox_once(origin, identity, store, net_tx).await;
+            net::flush_outbox_once_with_fallback(origins, identity, store, net_tx).await;
             let _ = tx_done.send(UiEvent::OutboxFlushed);
         });
     }
@@ -730,14 +734,15 @@ impl MesskApp {
         if let Err(error) = store.save_own_profile(&identity.public_key, &profile) {
             self.logs.push(format!("profile cache error: {error}"));
         }
-        let origin = self.backend_origin.clone();
+        let origins = self.transport_origins();
         let tx = self.tx.clone();
         self.profile_status = "saving profile...".to_string();
         self.runtime.spawn(async move {
-            let event = match net::save_profile(origin, identity, profile.clone()).await {
-                Ok(()) => UiEvent::ProfileSaved(profile),
-                Err(error) => UiEvent::ProfileSaveErr(error.to_string()),
-            };
+            let event =
+                match net::save_profile_with_fallback(origins, identity, profile.clone()).await {
+                    Ok(()) => UiEvent::ProfileSaved(profile),
+                    Err(error) => UiEvent::ProfileSaveErr(error.to_string()),
+                };
             let _ = tx.send(event);
         });
     }
@@ -746,12 +751,13 @@ impl MesskApp {
         let Some(identity) = self.identity.clone() else {
             return;
         };
-        let origin = self.backend_origin.clone();
+        let origins = self.transport_origins();
         let public_key = identity.public_key.clone();
         let tx = self.tx.clone();
         self.profile_status = "loading remote profile...".to_string();
         self.runtime.spawn(async move {
-            let event = match net::fetch_profile(origin, identity, public_key).await {
+            let event = match net::fetch_profile_with_fallback(origins, identity, public_key).await
+            {
                 Ok(profile) => UiEvent::ProfileLoaded(profile),
                 Err(error) => UiEvent::ProfileLoadErr(error.to_string()),
             };
@@ -808,12 +814,12 @@ impl MesskApp {
         });
         self.composer_text.clear();
         self.reply_draft = None;
-        let origin = self.backend_origin.clone();
+        let origins = self.transport_origins();
         let tx = self.tx.clone();
         self.runtime.spawn(async move {
             let event_msg_id = msg_id.clone();
-            let event = match net::send_direct_message_once(
-                origin,
+            let event = match net::send_direct_message_once_with_fallback(
+                origins,
                 identity,
                 store,
                 recipient,
@@ -865,12 +871,12 @@ impl MesskApp {
         self.logs
             .push(format!("editing message {}", short_key(&target_msg_id)));
 
-        let origin = self.backend_origin.clone();
+        let origins = self.transport_origins();
         let tx = self.tx.clone();
         self.runtime.spawn(async move {
             let action = "edit".to_string();
-            let event = match net::send_direct_edit_once(
-                origin,
+            let event = match net::send_direct_edit_once_with_fallback(
+                origins,
                 identity,
                 store,
                 recipient,
@@ -1018,13 +1024,13 @@ impl MesskApp {
             return;
         }
         let msg_id = Uuid::new_v4().to_string();
-        let origin = self.backend_origin.clone();
+        let origins = self.transport_origins();
         let tx = self.tx.clone();
         self.logs
             .push(format!("uploading file: {}", path.display()));
         self.runtime.spawn(async move {
-            let event = match net::upload_direct_file(
-                origin.clone(),
+            let event = match net::upload_direct_file_with_fallback(
+                origins.clone(),
                 identity.clone(),
                 recipient.clone(),
                 path,
@@ -1033,8 +1039,8 @@ impl MesskApp {
             {
                 Ok(upload) => {
                     let plaintext = upload.plaintext_json.clone();
-                    match net::send_direct_message_once(
-                        origin,
+                    match net::send_direct_message_once_with_fallback(
+                        origins,
                         identity,
                         store,
                         recipient.clone(),
@@ -1085,14 +1091,14 @@ impl MesskApp {
             return;
         }
         let msg_id = Uuid::new_v4().to_string();
-        let origin = self.backend_origin.clone();
+        let origins = self.transport_origins();
         let tx = self.tx.clone();
         let cleanup_path = delete_after_send.then(|| path.clone());
         self.logs
             .push(format!("uploading voice message: {}", path.display()));
         self.runtime.spawn(async move {
-            let event = match net::upload_direct_voice(
-                origin.clone(),
+            let event = match net::upload_direct_voice_with_fallback(
+                origins.clone(),
                 identity.clone(),
                 recipient.clone(),
                 path,
@@ -1103,8 +1109,8 @@ impl MesskApp {
                 Ok(upload) => {
                     let plaintext = upload.plaintext_json.clone();
                     let file_name = format!("voice message ({} bytes)", upload.payload.size);
-                    match net::send_direct_message_once(
-                        origin,
+                    match net::send_direct_message_once_with_fallback(
+                        origins,
                         identity,
                         store,
                         recipient.clone(),
@@ -1159,20 +1165,24 @@ impl MesskApp {
         else {
             return;
         };
-        let origin = self.backend_origin.clone();
+        let origins = self.transport_origins();
         let tx = self.tx.clone();
         self.logs
             .push(format!("downloading file: {}", payload.name));
         self.runtime.spawn(async move {
-            let event =
-                match net::download_encrypted_file(origin, identity, payload, output_path.clone())
-                    .await
-                {
-                    Ok(()) => UiEvent::FileDownloadOk { path: output_path },
-                    Err(error) => UiEvent::FileDownloadErr {
-                        error: error.to_string(),
-                    },
-                };
+            let event = match net::download_encrypted_file_with_fallback(
+                origins,
+                identity,
+                payload,
+                output_path.clone(),
+            )
+            .await
+            {
+                Ok(()) => UiEvent::FileDownloadOk { path: output_path },
+                Err(error) => UiEvent::FileDownloadErr {
+                    error: error.to_string(),
+                },
+            };
             let _ = tx.send(event);
         });
     }
@@ -1194,14 +1204,14 @@ impl MesskApp {
         };
         let extension = media::voice_extension_from_mime(&payload.mime_type);
         let output_path = playback::temp_voice_playback_path(&msg_id, extension);
-        let origin = self.backend_origin.clone();
+        let origins = self.transport_origins();
         let tx = self.tx.clone();
         let duration_seconds = payload.duration_seconds;
         self.voice_status = "loading voice...".to_string();
         self.runtime.spawn(async move {
             let file_payload = payload.as_encrypted_file();
-            let event = match net::download_encrypted_file(
-                origin,
+            let event = match net::download_encrypted_file_with_fallback(
+                origins,
                 identity,
                 file_payload,
                 output_path.clone(),
@@ -1319,12 +1329,12 @@ impl MesskApp {
                 .push("create or import identity before call signaling".to_string());
             return;
         };
-        let origin = self.backend_origin.clone();
+        let origins = self.transport_origins();
         let tx = self.tx.clone();
         let kind = kind.to_string();
         self.runtime.spawn(async move {
-            let event = match net::send_call_signal_once(
-                origin,
+            let event = match net::send_call_signal_once_with_fallback(
+                origins,
                 identity,
                 peer_public_key.clone(),
                 kind.clone(),
@@ -1657,12 +1667,19 @@ impl MesskApp {
     fn open_settings(&mut self) {
         self.settings_draft = self.settings.clone();
         self.settings_draft.backend_origin = self.backend_origin.clone();
+        self.settings_fallback_origins_text =
+            fallback_origins_to_text(&self.settings_draft.fallback_origins);
         self.show_settings = true;
     }
 
     fn save_settings(&mut self) {
         self.settings_draft.backend_origin =
             sanitize_backend_origin(&self.settings_draft.backend_origin);
+        self.settings_draft.fallback_origins =
+            storage::sanitize_backend_origin_list(&self.settings_fallback_origins_text)
+                .into_iter()
+                .filter(|origin| origin != &self.settings_draft.backend_origin)
+                .collect();
         self.settings_draft.font_scale = self.settings_draft.font_scale.clamp(0.9, 1.2);
         if !is_valid_theme(&self.settings_draft.theme) {
             self.settings_draft.theme = "telegram".to_string();
@@ -1679,8 +1696,14 @@ impl MesskApp {
         }
         self.settings = self.settings_draft.clone();
         self.backend_origin = self.settings.backend_origin.clone();
+        self.settings_fallback_origins_text =
+            fallback_origins_to_text(&self.settings.fallback_origins);
         self.logs.push("settings saved".to_string());
         self.show_settings = false;
+    }
+
+    fn transport_origins(&self) -> Vec<String> {
+        transport::ordered_origins(&self.backend_origin, &self.settings.fallback_origins)
     }
 
     fn notify_incoming_message(&mut self, peer_public_key: &str, plaintext: &str) {
@@ -1720,10 +1743,11 @@ impl MesskApp {
         }
 
         self.new_chat_status = format!("Resolving @{username}...");
-        let origin = self.backend_origin.clone();
+        let origins = self.transport_origins();
         let tx = self.tx.clone();
         self.runtime.spawn(async move {
-            let event = match net::resolve_username(origin, identity, username).await {
+            let event = match net::resolve_username_with_fallback(origins, identity, username).await
+            {
                 Ok(result) => UiEvent::DirectoryResolved {
                     result,
                     display_name,
@@ -2234,25 +2258,29 @@ impl MesskApp {
         peer: String,
         target_msg_id: String,
     ) {
-        let origin = self.backend_origin.clone();
+        let origins = self.transport_origins();
         let tx = self.tx.clone();
         self.runtime.spawn(async move {
             let action = "delete".to_string();
-            let event =
-                match net::send_direct_delete_once(origin, identity, peer, target_msg_id.clone())
-                    .await
-                {
-                    Ok(result) => UiEvent::DirectControlOk {
-                        target_msg_id,
-                        action,
-                        acknowledged: result.acknowledged,
-                    },
-                    Err(error) => UiEvent::DirectControlErr {
-                        target_msg_id,
-                        action,
-                        error: error.to_string(),
-                    },
-                };
+            let event = match net::send_direct_delete_once_with_fallback(
+                origins,
+                identity,
+                peer,
+                target_msg_id.clone(),
+            )
+            .await
+            {
+                Ok(result) => UiEvent::DirectControlOk {
+                    target_msg_id,
+                    action,
+                    acknowledged: result.acknowledged,
+                },
+                Err(error) => UiEvent::DirectControlErr {
+                    target_msg_id,
+                    action,
+                    error: error.to_string(),
+                },
+            };
             let _ = tx.send(event);
         });
     }
@@ -2264,12 +2292,12 @@ impl MesskApp {
         target_msg_id: String,
         reaction: Option<String>,
     ) {
-        let origin = self.backend_origin.clone();
+        let origins = self.transport_origins();
         let tx = self.tx.clone();
         self.runtime.spawn(async move {
             let action = "reaction".to_string();
-            let event = match net::send_direct_reaction_once(
-                origin,
+            let event = match net::send_direct_reaction_once_with_fallback(
+                origins,
                 identity,
                 peer,
                 target_msg_id.clone(),
@@ -2299,12 +2327,12 @@ impl MesskApp {
         target_msg_id: String,
         pinned: bool,
     ) {
-        let origin = self.backend_origin.clone();
+        let origins = self.transport_origins();
         let tx = self.tx.clone();
         self.runtime.spawn(async move {
             let action = if pinned { "pin" } else { "unpin" }.to_string();
-            let event = match net::send_direct_pin_once(
-                origin,
+            let event = match net::send_direct_pin_once_with_fallback(
+                origins,
                 identity,
                 peer,
                 target_msg_id.clone(),
@@ -2648,6 +2676,18 @@ impl MesskApp {
                     [440.0, 36.0],
                     egui::TextEdit::singleline(&mut self.settings_draft.backend_origin)
                         .hint_text(config::DEFAULT_BACKEND_ORIGIN),
+                );
+                ui.add_space(10.0);
+                ui.label(
+                    egui::RichText::new("Fallback origins")
+                        .size(12.0)
+                        .color(COL_MUTED),
+                );
+                ui.add_sized(
+                    [440.0, 72.0],
+                    egui::TextEdit::multiline(&mut self.settings_fallback_origins_text)
+                        .desired_rows(3)
+                        .hint_text("https://relay-one.example\nhttps://relay-two.example"),
                 );
                 ui.add_space(18.0);
                 ui.separator();
@@ -5425,12 +5465,11 @@ fn looks_like_username_query(value: &str) -> bool {
 }
 
 fn sanitize_backend_origin(value: &str) -> String {
-    let value = value.trim().trim_end_matches('/');
-    if value.starts_with("https://") || value.starts_with("http://") {
-        value.to_string()
-    } else {
-        config::DEFAULT_BACKEND_ORIGIN.to_string()
-    }
+    transport::normalize_origin(value).unwrap_or_else(|| config::DEFAULT_BACKEND_ORIGIN.to_string())
+}
+
+fn fallback_origins_to_text(origins: &[String]) -> String {
+    origins.join("\n")
 }
 
 fn is_valid_theme(value: &str) -> bool {

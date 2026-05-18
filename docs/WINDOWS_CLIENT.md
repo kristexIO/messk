@@ -43,3 +43,24 @@ Current productionization track:
 2. move identity, ratchet, protocol serialization, outbox retry, and history sync into `clients/core/` only after the matching tests are green;
 3. keep `clients/windows/` as the egui shell over the core plus platform features such as DPAPI, notifications, tray, installer, and app paths;
 4. keep every new message action represented in backend tests, web protocol tests, and Rust core tests before expanding UI.
+
+Transport resilience:
+
+- Settings support one primary backend origin plus newline-separated fallback origins.
+- The client normalizes and dedupes origins through `clients/core::transport`.
+- Before health checks and websocket auth, the client queries `/bootstrap` on
+  configured origins and merges signed relay `endpointOrigins` that advertise
+  `central_ws` or `fallback_wss`.
+- Health checks, realtime auth, outbox retry, direct sends, uploads, downloads,
+  profile sync, and username lookup try the configured origins in order.
+- Outbox remains local and authoritative, so failed sends stay queued when every
+  configured origin is unavailable.
+
+Metadata resistance:
+
+- Direct ratchet plaintext uses the shared core padding buckets before
+  secretbox encryption, while decrypt still returns only the user-visible text.
+- Direct sends and control envelopes use the shared short batch window before
+  network send, without removing messages from the retry outbox until ack.
+- Incoming `dummy` envelopes are ignored by the Windows shell and are not shown
+  as chat events.

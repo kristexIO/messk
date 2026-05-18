@@ -10,7 +10,47 @@ export const DIRECT_EVENT_TYPES = [
   'forward',
 ] as const;
 
+export const TRANSPORT_KINDS = [
+  'central_ws',
+  'mesh_relay',
+  'direct_p2p',
+  'fallback_wss',
+  'user_proxy',
+] as const;
+
+export type TransportKind = (typeof TRANSPORT_KINDS)[number];
+
+export const DEFAULT_TRANSPORT_PRIORITY: TransportKind[] = [
+  'central_ws',
+  'mesh_relay',
+  'direct_p2p',
+  'fallback_wss',
+  'user_proxy',
+];
+
+export const PADDING_PROFILES = ['disabled', 'interactive', 'balanced', 'high_privacy'] as const;
+
+export type PaddingProfile = (typeof PADDING_PROFILES)[number];
+
+export const PADDING_BUCKETS: Record<PaddingProfile, readonly number[]> = {
+  disabled: [],
+  interactive: [256, 1024, 4096, 16 * 1024],
+  balanced: [2 * 1024, 16 * 1024, 64 * 1024],
+  high_privacy: [16 * 1024, 64 * 1024, 256 * 1024],
+};
+
+export type MetadataBatchPolicy = {
+  minBatchDelayMs: number;
+  maxBatchDelayMs: number;
+};
+
+export const DEFAULT_METADATA_BATCH_POLICY: MetadataBatchPolicy = {
+  minBatchDelayMs: 0,
+  maxBatchDelayMs: 250,
+};
+
 export const SERVER_ACK_TYPES = new Set([
+  'dummy',
   'message',
   'session_repair',
   'group_message',
@@ -39,12 +79,45 @@ export function isDirectHistoryEvent(type: string) {
   return (DIRECT_EVENT_TYPES as readonly string[]).includes(type);
 }
 
+export function isSupportedTransportKind(type: string): type is TransportKind {
+  return (TRANSPORT_KINDS as readonly string[]).includes(type);
+}
+
+export function normalizeTransportPriority(priority: string[]): TransportKind[] {
+  const seen = new Set<string>();
+  const normalized = priority.filter((kind): kind is TransportKind => {
+    if (!isSupportedTransportKind(kind) || seen.has(kind)) return false;
+    seen.add(kind);
+    return true;
+  });
+  return normalized.length ? normalized : [...DEFAULT_TRANSPORT_PRIORITY];
+}
+
+export function metadataPaddingTargetLen(profile: PaddingProfile, payloadLength: number) {
+  if (profile === 'disabled') return Math.max(0, Math.floor(payloadLength));
+  const length = Math.max(0, Math.floor(payloadLength));
+  const buckets = PADDING_BUCKETS[profile];
+  for (const bucket of buckets) {
+    if (length <= bucket) return bucket;
+  }
+  const block = buckets[buckets.length - 1] || Math.max(1, length);
+  return Math.ceil(length / block) * block;
+}
+
+export function metadataBatchDelayMs(policy: MetadataBatchPolicy, threadId: string, msgId: string) {
+  const minMs = Math.max(0, Math.floor(policy.minBatchDelayMs));
+  const maxMs = Math.max(minMs, Math.floor(policy.maxBatchDelayMs));
+  const windowMs = maxMs - minMs;
+  if (windowMs === 0) return minMs;
+  return minMs + (stableMetadataHash32([threadId, msgId]) % (windowMs + 1));
+}
+
 export function requiresTargetMessageId(type: string) {
   return ['edit', 'delete', 'reaction', 'reply', 'pin', 'unpin'].includes(type);
 }
 
 export function requiresEncryptedData(type: string) {
-  return ['message', 'edit', 'reply', 'attachment', 'forward', 'session_repair'].includes(type);
+  return ['message', 'dummy', 'edit', 'reply', 'attachment', 'forward', 'session_repair'].includes(type);
 }
 
 export function clampHistoryLimit(limit: number) {
@@ -204,4 +277,18 @@ function titleCaseFirst(value: string) {
   const trimmed = value.trim();
   if (!trimmed) return '';
   return `${trimmed[0].toUpperCase()}${trimmed.slice(1)}`;
+}
+
+function stableMetadataHash32(parts: string[]) {
+  const encoder = new TextEncoder();
+  let hash = 0x811c9dc5;
+  for (const part of parts) {
+    for (const byte of encoder.encode(part)) {
+      hash ^= byte;
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    hash ^= 0xff;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
 }

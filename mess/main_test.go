@@ -480,6 +480,41 @@ func TestNormalizeRoutedEnvelopeRequiresEncryptedDataForBodies(t *testing.T) {
 	}
 }
 
+func TestNormalizeRoutedEnvelopeAllowsOnlineOnlyDummy(t *testing.T) {
+	sender := base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012"))
+	recipient := base64.StdEncoding.EncodeToString([]byte("abcdefghijklmnopqrstuvwxyz123456"))
+
+	payload, ok := normalizeRoutedEnvelope(Envelope{
+		Type:            "dummy",
+		MsgID:           "dummy-1",
+		SenderPubKey:    "spoofed",
+		RecipientPubKey: recipient,
+		Data:            json.RawMessage(`"ciphertext"`),
+	}, sender)
+	if !ok {
+		t.Fatal("expected dummy envelope with encrypted data to be accepted")
+	}
+
+	var normalized Envelope
+	if err := json.Unmarshal(payload, &normalized); err != nil {
+		t.Fatalf("failed to decode normalized dummy: %v", err)
+	}
+	if normalized.SenderPubKey != sender {
+		t.Fatalf("expected sender overwrite, got %q", normalized.SenderPubKey)
+	}
+	if shouldPersistOffline("dummy") || shouldStoreDirectHistory("dummy") {
+		t.Fatal("dummy envelopes must not be persisted offline or in direct history")
+	}
+
+	if _, ok := normalizeRoutedEnvelope(Envelope{
+		Type:            "dummy",
+		MsgID:           "dummy-2",
+		RecipientPubKey: recipient,
+	}, sender); ok {
+		t.Fatal("expected dummy without encrypted data to be rejected")
+	}
+}
+
 func TestNormalizeRoutedEnvelopeAllowsGroupEvents(t *testing.T) {
 	sender := base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012"))
 

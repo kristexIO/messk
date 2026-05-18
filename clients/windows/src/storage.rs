@@ -2,6 +2,7 @@ use crate::{crypto, ratchet, vault};
 use anyhow::{Context, Result, anyhow};
 use messk_core::payload::{encrypted_file_payload, voice_message_payload};
 use messk_core::profile::UserProfile;
+use messk_core::transport;
 use rusqlite::{Connection, OptionalExtension, params, types::Value};
 use std::{
     collections::BTreeMap,
@@ -49,6 +50,7 @@ pub struct StoredAttachmentMetadata {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredAppSettings {
     pub backend_origin: String,
+    pub fallback_origins: Vec<String>,
     pub theme: String,
     pub density: String,
     pub font_scale: f32,
@@ -139,6 +141,9 @@ impl LocalStore {
         if let Some(value) = load_app_setting(&conn, "backend_origin")? {
             settings.backend_origin = sanitize_backend_origin(&value);
         }
+        if let Some(value) = load_app_setting(&conn, "fallback_origins")? {
+            settings.fallback_origins = sanitize_backend_origin_list(&value);
+        }
         if let Some(value) = load_app_setting(&conn, "theme")?
             && is_valid_theme(&value)
         {
@@ -180,6 +185,10 @@ impl LocalStore {
                 (
                     "backend_origin",
                     sanitize_backend_origin(&settings.backend_origin),
+                ),
+                (
+                    "fallback_origins",
+                    encode_backend_origin_list(&settings.fallback_origins),
                 ),
                 ("theme", sanitize_theme(&settings.theme)),
                 ("density", sanitize_density(&settings.density)),
@@ -1180,6 +1189,7 @@ impl Default for StoredAppSettings {
     fn default() -> Self {
         Self {
             backend_origin: "https://messk.online".to_string(),
+            fallback_origins: Vec::new(),
             theme: "telegram".to_string(),
             density: "comfortable".to_string(),
             font_scale: 1.0,
@@ -1211,12 +1221,28 @@ fn load_app_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
 }
 
 fn sanitize_backend_origin(value: &str) -> String {
-    let value = value.trim().trim_end_matches('/');
-    if value.starts_with("https://") || value.starts_with("http://") {
-        value.to_string()
-    } else {
-        StoredAppSettings::default().backend_origin
+    transport::normalize_origin(value)
+        .unwrap_or_else(|| StoredAppSettings::default().backend_origin)
+}
+
+pub fn sanitize_backend_origin_list(value: &str) -> Vec<String> {
+    if let Ok(values) = serde_json::from_str::<Vec<String>>(value) {
+        let mut origins = Vec::new();
+        for value in values {
+            if let Some(origin) = transport::normalize_origin(&value)
+                && !origins.contains(&origin)
+            {
+                origins.push(origin);
+            }
+        }
+        return origins;
     }
+    transport::parse_origin_list(value)
+}
+
+fn encode_backend_origin_list(origins: &[String]) -> String {
+    serde_json::to_string(&transport::ordered_origins("", origins))
+        .unwrap_or_else(|_| "[]".to_string())
 }
 
 fn sanitize_theme(value: &str) -> String {
@@ -1269,7 +1295,13 @@ mod tests {
         assert_eq!(store.schema_version().unwrap(), LOCAL_SCHEMA_VERSION);
         let mut settings = store.load_app_settings().unwrap();
         assert_eq!(settings.backend_origin, "https://messk.online");
+        assert!(settings.fallback_origins.is_empty());
         settings.backend_origin = "https://example.com/".to_string();
+        settings.fallback_origins = vec![
+            "https://relay.example/".to_string(),
+            "bad".to_string(),
+            "https://relay.example".to_string(),
+        ];
         settings.theme = "graphite".to_string();
         settings.density = "compact".to_string();
         settings.font_scale = 1.15;
@@ -1278,6 +1310,7 @@ mod tests {
         store.save_app_settings(&settings).unwrap();
         let settings = store.load_app_settings().unwrap();
         assert_eq!(settings.backend_origin, "https://example.com");
+        assert_eq!(settings.fallback_origins, vec!["https://relay.example"]);
         assert_eq!(settings.theme, "graphite");
         assert_eq!(settings.density, "compact");
         assert_eq!(settings.font_scale, 1.15);

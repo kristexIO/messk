@@ -38,6 +38,7 @@ var bufferPool = sync.Pool{
 
 var routedEnvelopeTypes = map[string]bool{
 	"message":          true,
+	"dummy":            true,
 	"session_reset":    true,
 	"session_repair":   true,
 	"self_sync":        true,
@@ -409,6 +410,8 @@ func floodPolicyForEvent(eventType string) (category string, limit int, window t
 		return "call", 36, 10 * time.Second
 	case "message", "group_message", "channel_message":
 		return "message", 80, 10 * time.Second
+	case "dummy":
+		return "dummy", 20, 10 * time.Second
 	case "session_reset", "session_repair":
 		return "control", 24, 10 * time.Second
 	case "edit", "delete", "reaction", "reply", "pin", "unpin", "attachment", "forward", "group_edit", "group_delete", "group_reaction", "channel_edit", "channel_delete", "channel_reaction", "channel_pin":
@@ -528,7 +531,7 @@ func normalizeRoutedEnvelope(env Envelope, authenticatedPubKey string) ([]byte, 
 
 func requiresMessageID(messageType string) bool {
 	switch messageType {
-	case "message", "session_repair", "group_message", "group_edit", "group_delete", "group_reaction", "group_sender_key", "channel_message", "channel_edit", "channel_delete", "channel_reaction", "channel_pin", "delivery_receipt", "read_receipt", "edit", "delete", "reaction", "reply", "pin", "unpin", "attachment", "forward":
+	case "message", "dummy", "session_repair", "group_message", "group_edit", "group_delete", "group_reaction", "group_sender_key", "channel_message", "channel_edit", "channel_delete", "channel_reaction", "channel_pin", "delivery_receipt", "read_receipt", "edit", "delete", "reaction", "reply", "pin", "unpin", "attachment", "forward":
 		return true
 	default:
 		return false
@@ -546,7 +549,7 @@ func requiresTargetMessageID(messageType string) bool {
 
 func requiresEncryptedData(messageType string) bool {
 	switch messageType {
-	case "message", "edit", "reply", "attachment", "forward", "session_repair", "group_message", "group_edit", "group_sender_key", "channel_message", "channel_edit":
+	case "message", "dummy", "edit", "reply", "attachment", "forward", "session_repair", "group_message", "group_edit", "group_sender_key", "channel_message", "channel_edit":
 		return true
 	default:
 		return false

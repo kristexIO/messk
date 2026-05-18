@@ -3,6 +3,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use crypto_secretbox::{KeyInit, Nonce, XSalsa20Poly1305, aead::Aead};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
+use messk_core::metadata::{PaddingProfile, pad_json_envelope_with_padding_field};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
@@ -36,6 +37,8 @@ pub enum RatchetError {
     TooManySkippedMessages,
     #[error("plaintext is not valid UTF-8")]
     Utf8(#[from] std::string::FromUtf8Error),
+    #[error("metadata padding failed")]
+    MetadataPaddingFailed,
 }
 
 impl From<crypto_secretbox::Error> for RatchetError {
@@ -187,8 +190,10 @@ pub fn encrypt(session: &mut Session, plaintext: &str) -> Result<RatchetMessage,
         "v": 1,
         "header": header,
         "plaintext": plaintext,
-    })
-    .to_string();
+    });
+    let (authenticated_plaintext, _) =
+        pad_json_envelope_with_padding_field(authenticated_plaintext, PaddingProfile::Interactive)
+            .map_err(|_| RatchetError::MetadataPaddingFailed)?;
 
     Ok(RatchetMessage {
         ciphertext: encrypt_secretbox(&message_key, authenticated_plaintext.as_bytes())?,
@@ -449,5 +454,47 @@ mod tests {
         );
         assert_eq!(parsed.header.n, 0);
         assert_eq!(parsed.header.pn, 0);
+    }
+
+    #[test]
+    fn authenticated_plaintext_is_padded_but_decrypts_to_original_text() {
+        let alice = crypto::generate_box_keypair().unwrap();
+        let bob = crypto::generate_box_keypair().unwrap();
+        let bob_prekey = crypto::generate_box_keypair().unwrap();
+
+        let initiated = crypto::x3dh_initiate(
+            alice.secret_key.expose(),
+            &bob.public_key,
+            Some(&bob_prekey.public_key),
+        )
+        .unwrap();
+        let responded = crypto::x3dh_respond(
+            bob.secret_key.expose(),
+            Some(bob_prekey.secret_key.expose()),
+            &alice.public_key,
+            &initiated.ephemeral_public_key,
+        )
+        .unwrap();
+
+        let mut sender = Session::new_sender(
+            bob.public_key.clone(),
+            initiated.shared_secret,
+            initiated.pre_key_public_key,
+        )
+        .unwrap();
+        let message = encrypt(&mut sender, "short").unwrap();
+        let packed = STANDARD.decode(&message.ciphertext).unwrap();
+        assert!(packed.len() >= 24 + 16 + 256);
+
+        let mut receiver = Session::new_responder(
+            alice.public_key,
+            responded,
+            message.header.ratchet_pub_key.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            decrypt(&mut receiver, &message).unwrap(),
+            Some("short".to_string())
+        );
     }
 }

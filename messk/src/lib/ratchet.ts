@@ -1,6 +1,9 @@
 import { box, randomBytes, secretbox } from 'tweetnacl';
 import { decodeBase64, encodeBase64, decodeUTF8, encodeUTF8 } from 'tweetnacl-util';
 import type { Session } from './db';
+import { metadataPaddingTargetLen } from './protocolContract';
+
+const MAX_PADDED_PAYLOAD_BYTES = 1024 * 1024;
 
 // HKDF Implementation using Web Crypto API
 async function hkdf(secret: Uint8Array, salt: Uint8Array, info: string, length: number): Promise<Uint8Array> {
@@ -51,6 +54,27 @@ export interface RatchetMessage {
     pn: number; // Number of messages in previous chain
   };
   ciphertext: string; // Base64
+}
+
+function buildAuthenticatedPlaintext(header: RatchetMessage['header'], plaintext: string): string {
+  const baseEnvelope = {
+    v: 1,
+    header,
+    plaintext
+  };
+  const emptyPaddingEnvelope = {
+    ...baseEnvelope,
+    padding: ''
+  };
+  const emptyPadding = JSON.stringify(emptyPaddingEnvelope);
+  const targetLength = metadataPaddingTargetLen('interactive', emptyPadding.length);
+  if (targetLength > MAX_PADDED_PAYLOAD_BYTES) {
+    throw new Error('Message is too large after metadata padding');
+  }
+  return JSON.stringify({
+    ...baseEnvelope,
+    padding: '0'.repeat(Math.max(0, targetLength - emptyPadding.length))
+  });
 }
 
 /**
@@ -238,11 +262,7 @@ export class RatchetManager {
       n: n,
       pn: session.previousSendChainLength
     };
-    const authenticatedPlaintext = JSON.stringify({
-      v: 1,
-      header,
-      plaintext
-    });
+    const authenticatedPlaintext = buildAuthenticatedPlaintext(header, plaintext);
     const nonce = randomBytes(secretbox.nonceLength);
     const ciphertext = secretbox(decodeUTF8(authenticatedPlaintext), nonce, messageKey);
     

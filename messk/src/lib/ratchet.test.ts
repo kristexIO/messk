@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { box } from 'tweetnacl';
-import { encodeBase64 } from 'tweetnacl-util';
+import { decodeBase64, encodeBase64 } from 'tweetnacl-util';
 import { RatchetManager } from './ratchet';
 import type { Session } from './db';
 
@@ -59,6 +59,17 @@ describe('RatchetManager', () => {
     expect(plaintext).toBe('hello secure world');
     expect(alice.sendChainIndex).toBe(1);
     expect(bob.recvChainIndex).toBe(1);
+  });
+
+  it('pads authenticated plaintext without changing decrypted text', async () => {
+    const { alice, bob } = createSessionPair();
+
+    const message = await RatchetManager.encrypt(alice, 'short');
+    const packed = decodeBase64(message.ciphertext);
+    const plaintextBytes = packed.length - 24 - 16;
+
+    expect(plaintextBytes).toBeGreaterThanOrEqual(256);
+    await expect(RatchetManager.decrypt(bob, message)).resolves.toBe('short');
   });
 
   it('supports multiple sequential messages on the same chain', async () => {

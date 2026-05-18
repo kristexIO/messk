@@ -99,6 +99,7 @@ func main() {
 	registerProfileRoutes(mux, hub, db)
 	registerHistoryRoutes(mux, hub, db)
 	registerAdminRoutes(mux, db, hub, rdb)
+	registerRelayRoutes(mux, hub)
 	mux.HandleFunc("/groups", rateLimit(func(w http.ResponseWriter, r *http.Request) {
 		pubKey, ok := authorizeSession(hub, w, r)
 		if !ok {

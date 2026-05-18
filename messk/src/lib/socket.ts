@@ -59,6 +59,8 @@ import {
   waitForGroupSenderKey,
 } from './socketGroups';
 import { LOCAL_STATE_VERSION } from './storage';
+import { DEFAULT_METADATA_BATCH_POLICY, metadataBatchDelayMs } from './protocolContract';
+import { resolveWebSocketUrls } from './transportDiscovery';
 
 const WS_URL = appConfig.wsUrl;
 const DIRECT_RETRY_BASE_DELAY_MS = 3_000;
@@ -330,6 +332,10 @@ export class SocketManager {
   private syncingDirectHistory = new Set<string>();
   private directHistoryCursorByPeer = new Map<string, number>();
   private outboxFlushTimer: ReturnType<typeof setInterval> | null = null;
+  private directBatchTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private transportUrls: string[] = appConfig.wsUrls;
+  private transportDiscoveryInFlight: Promise<void> | null = null;
+  private activeWsUrl = appConfig.wsUrl;
   private lastRateLimitedToastAt = 0;
   private lastSessionResetNoticeAt = new Map<string, number>();
   private api = new SocketApiClient(() => this.sessionToken);
@@ -364,10 +370,19 @@ export class SocketManager {
 
   private stopOutboxLoop() {
     if (!this.outboxFlushTimer) {
+      this.clearDirectBatchTimers();
       return;
     }
     clearInterval(this.outboxFlushTimer);
     this.outboxFlushTimer = null;
+    this.clearDirectBatchTimers();
+  }
+
+  private clearDirectBatchTimers() {
+    for (const timer of this.directBatchTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.directBatchTimers.clear();
   }
 
   private getDirectRetryDelay(attempts: number) {
@@ -389,7 +404,22 @@ export class SocketManager {
       return;
     }
     this.lastConnectionErrorLogAt = now;
-    console.warn(`WebSocket is unavailable at ${WS_URL}. Check that the backend is running on the configured host and port.`, error);
+    console.warn(`WebSocket is unavailable at ${this.activeWsUrl}. Check that the backend is running on the configured host and port.`, error);
+  }
+
+  private refreshTransportDiscovery() {
+    if (this.transportDiscoveryInFlight) {
+      return;
+    }
+    this.transportDiscoveryInFlight = resolveWebSocketUrls()
+      .then((urls) => {
+        if (urls.length > 0) {
+          this.transportUrls = urls;
+        }
+      })
+      .finally(() => {
+        this.transportDiscoveryInFlight = null;
+      });
   }
 
   connect(pubKey: string) {
@@ -405,7 +435,10 @@ export class SocketManager {
           : 'connecting'
     );
 
-    const url = `${WS_URL}?pub=${encodeURIComponent(pubKey)}&state=${encodeURIComponent(LOCAL_STATE_VERSION)}`;
+    this.refreshTransportDiscovery();
+    const wsBaseUrl = this.transportUrls[this.reconnectAttempts % this.transportUrls.length] ?? WS_URL;
+    this.activeWsUrl = wsBaseUrl;
+    const url = `${wsBaseUrl}?pub=${encodeURIComponent(pubKey)}&state=${encodeURIComponent(LOCAL_STATE_VERSION)}`;
     if (this.reconnectAttempts === 0) {
       console.info('Connecting to WS:', url);
     }
@@ -501,6 +534,9 @@ export class SocketManager {
               : '';
             toast.error(`${env.message || 'Too many actions. Please slow down.'}${retry}`);
           }
+          return;
+        }
+        if (env.type === 'dummy') {
           return;
         }
 
@@ -1699,6 +1735,23 @@ export class SocketManager {
     await enqueueOutgoingDirectMessage(message);
   }
 
+  private scheduleDirectBatchFlush(message: OutgoingDirectMessage) {
+    if (!this.canSendImmediately()) {
+      return;
+    }
+    const batchKey = `${message.senderPubKey}:${message.recipientPubKey}`;
+    if (this.directBatchTimers.has(batchKey)) {
+      return;
+    }
+
+    const delayMs = metadataBatchDelayMs(DEFAULT_METADATA_BATCH_POLICY, batchKey, message.id);
+    const timer = setTimeout(() => {
+      this.directBatchTimers.delete(batchKey);
+      void this.flushOutgoingDirectMessages();
+    }, delayMs);
+    this.directBatchTimers.set(batchKey, timer);
+  }
+
   private sendDirectEnvelope(message: OutgoingDirectMessage) {
     sendDirectEnvelope((payload) => this.sendEnvelope(payload), message);
   }
@@ -2213,14 +2266,7 @@ export class SocketManager {
     await this.enqueueOutgoingDirectMessage(queuedMessage);
 
     if (this.canSendImmediately()) {
-      try {
-        this.sendDirectEnvelope(queuedMessage);
-        this.sendSelfSyncEnvelope(queuedMessage);
-        await this.markDirectAttempt(queuedMessage);
-      } catch (error) {
-        await updateMessageByMsgID(msgId, { status: 'failed' });
-        throw error;
-      }
+      this.scheduleDirectBatchFlush(queuedMessage);
     } else {
       toast('Queued and will send when connection is back.', { icon: 'вЏі' });
     }

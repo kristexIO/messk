@@ -2,6 +2,7 @@
 
 ## Before Shipping
 - Set `VITE_BACKEND_URL`, `PORT`, `ALLOWED_ORIGINS`, `DB_PATH`, `MAX_UPLOAD_MB`, `ALLOWED_UPLOAD_MIME_TYPES`, and optional `REDIS_ADDR` for the target environment.
+- Set `VITE_FALLBACK_BACKEND_URLS` when the web release should try static relay/bootstrap origins before relying on dynamic `/bootstrap` discovery.
 - Run `powershell -ExecutionPolicy Bypass -File scripts/configure-release.ps1 -BackendOrigin https://your-production-backend.example` to sync `VITE_BACKEND_URL` with the production backend origin.
 - Keep `ENABLE_METADATA_PROXY` disabled unless there is a reviewed production use case.
 - Verify `powershell -ExecutionPolicy Bypass -File scripts/check-all.ps1` is green on the release commit.
@@ -13,6 +14,10 @@
 - Confirm `clients/core` tests pass through `scripts/check-all.ps1`; native client protocol changes must not live only in the Windows UI shell.
 - Confirm `/health` returns `status: ok` or an explicitly accepted `status: degraded`.
 - Confirm `/admin/health` is reachable only from loopback or with the configured `ADMIN_TOKEN`.
+- Confirm relay/bootstrap mode is intentional: `/relay/health` is reachable, `RELAY_ANNOUNCE_TOKEN` is configured for public announce, and `/relay/peers` contains only expected signed relay capabilities.
+- Publish staging relay capabilities with `go run ./tools/relay-announce` using a signing key file outside the repository; use `-refresh-interval` or a systemd timer so registrations refresh before TTL expiry.
+- For VPS deploys, confirm `messan-relay-announce.service` is active and `/bootstrap` plus `/relay/health` pass through nginx.
+- Confirm relay revoke controls are current: `RELAY_MIN_REVOCATION_EPOCH`, `RELAY_REVOKED_NODES`, and `RELAY_REVOKED_PUBLIC_KEYS`.
 - Confirm `/version` reports the expected release version, commit, and build timestamp.
 - Test login, reconnect, message send, offline delivery, file upload, backup export/import, and logout wipe on the release build.
 
@@ -22,7 +27,9 @@
 - Confirm local logout clears IndexedDB and in-memory keys.
 - Confirm backup export does not contain secret keys or ratchet session secrets.
 - Confirm rate limiting and proxy restrictions are enabled in the deployed backend config.
+- Confirm relay credentials, signing keys, VPS keys, and operator tokens are not committed or logged.
 - Confirm direct `edit`, `delete`, `reaction`, `reply`, `pin`, and `unpin` envelopes include `target_msg_id` and never plaintext.
+- Confirm metadata resistance remains active: direct ratchet payloads include encrypted padding, short batch windows do not break outbox retry, and `dummy` envelopes are online-only.
 
 ## UX Checks
 - Confirm chat list search, message search, drafts, pins, reactions, edit/delete, and read receipts all behave correctly.

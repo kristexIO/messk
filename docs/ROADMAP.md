@@ -62,9 +62,14 @@ Exit criteria:
 
 - Add Windows installer, app icon, version metadata, tray mode, notifications,
   and optional auto-start.
+- Grow the relay/bootstrap registry behind signed relay announcements,
+  operator-issued announce tokens, a secret-free relay announce CLI, and
+  health-visible relay metrics.
+- Keep metadata resistance enabled for direct traffic: encrypted padding,
+  short batch windows, and online-only dummy envelope support.
 - Add staging release flow before production deploy.
 - Add monitoring for websocket disconnects, failed decrypts, queue growth,
-  upload failures, and rate-limit hits.
+  upload failures, relay churn, and rate-limit hits.
 - Keep rollback and DB backup mandatory for VPS deploys.
 
 Exit criteria:

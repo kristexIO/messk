@@ -8,9 +8,11 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
+use messk_core::metadata::MetadataResistancePolicy;
 use messk_core::payload::{EncryptedFilePayload, VoiceMessagePayload};
 use messk_core::profile::UserProfile;
 use messk_core::protocol as core_protocol;
+use messk_core::transport;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,9 +20,12 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
+use url::Url;
 use uuid::Uuid;
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+const BOOTSTRAP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_BOOTSTRAP_DISCOVERY_ORIGINS: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct HealthStatus {
@@ -78,6 +83,20 @@ struct RemoteProfileResponse {
     avatar: String,
     #[serde(default)]
     username: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BootstrapResponse {
+    #[serde(default)]
+    relays: Vec<BootstrapRelayCapability>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BootstrapRelayCapability {
+    #[serde(rename = "endpointOrigins", default)]
+    endpoint_origins: Vec<String>,
+    #[serde(default)]
+    transports: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -200,8 +219,31 @@ pub async fn fetch_health(origin: String) -> Result<HealthStatus> {
     Ok(HealthStatus { status, raw })
 }
 
+pub async fn fetch_health_with_fallback(origins: Vec<String>) -> Result<HealthStatus> {
+    let mut errors = Vec::new();
+    for origin in expand_origins_via_bootstrap(origins).await {
+        match fetch_health(origin.clone()).await {
+            Ok(status) => return Ok(status),
+            Err(error) => errors.push(format!("{origin}: {error}")),
+        }
+    }
+    Err(anyhow!(
+        "all backend health checks failed: {}",
+        errors.join(" | ")
+    ))
+}
+
+#[allow(dead_code)]
 pub async fn resolve_username(
     origin: String,
+    identity: Identity,
+    username: String,
+) -> Result<DirectoryResolveResult> {
+    resolve_username_with_fallback(vec![origin], identity, username).await
+}
+
+pub async fn resolve_username_with_fallback(
+    origins: Vec<String>,
     identity: Identity,
     username: String,
 ) -> Result<DirectoryResolveResult> {
@@ -210,7 +252,8 @@ pub async fn resolve_username(
         return Err(anyhow!("username is empty"));
     }
 
-    let (_socket, session_token) = connect_authenticated(origin.clone(), &identity).await?;
+    let (_socket, session_token, origin) =
+        connect_authenticated_with_fallback(&origins, &identity).await?;
     if session_token.trim().is_empty() {
         return Err(anyhow!("server did not return a session token"));
     }
@@ -249,12 +292,22 @@ pub async fn resolve_username(
     })
 }
 
+#[allow(dead_code)]
 pub async fn fetch_profile(
     origin: String,
     identity: Identity,
     public_key: String,
 ) -> Result<RemoteProfile> {
-    let (_socket, session_token) = connect_authenticated(origin.clone(), &identity).await?;
+    fetch_profile_with_fallback(vec![origin], identity, public_key).await
+}
+
+pub async fn fetch_profile_with_fallback(
+    origins: Vec<String>,
+    identity: Identity,
+    public_key: String,
+) -> Result<RemoteProfile> {
+    let (_socket, session_token, origin) =
+        connect_authenticated_with_fallback(&origins, &identity).await?;
     if session_token.trim().is_empty() {
         return Err(anyhow!("server did not return a session token"));
     }
@@ -291,8 +344,18 @@ pub async fn fetch_profile(
     })
 }
 
+#[allow(dead_code)]
 pub async fn save_profile(origin: String, identity: Identity, profile: UserProfile) -> Result<()> {
-    let (_socket, session_token) = connect_authenticated(origin.clone(), &identity).await?;
+    save_profile_with_fallback(vec![origin], identity, profile).await
+}
+
+pub async fn save_profile_with_fallback(
+    origins: Vec<String>,
+    identity: Identity,
+    profile: UserProfile,
+) -> Result<()> {
+    let (_socket, session_token, origin) =
+        connect_authenticated_with_fallback(&origins, &identity).await?;
     if session_token.trim().is_empty() {
         return Err(anyhow!("server did not return a session token"));
     }
@@ -319,13 +382,24 @@ pub async fn save_profile(origin: String, identity: Identity, profile: UserProfi
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn upload_direct_file(
     origin: String,
     identity: Identity,
     recipient_public_key: String,
     path: PathBuf,
 ) -> Result<DirectFileUpload> {
-    let (_socket, session_token) = connect_authenticated(origin.clone(), &identity).await?;
+    upload_direct_file_with_fallback(vec![origin], identity, recipient_public_key, path).await
+}
+
+pub async fn upload_direct_file_with_fallback(
+    origins: Vec<String>,
+    identity: Identity,
+    recipient_public_key: String,
+    path: PathBuf,
+) -> Result<DirectFileUpload> {
+    let (_socket, session_token, origin) =
+        connect_authenticated_with_fallback(&origins, &identity).await?;
     if session_token.trim().is_empty() {
         return Err(anyhow!("server did not return a session token"));
     }
@@ -388,6 +462,7 @@ pub async fn upload_direct_file(
     })
 }
 
+#[allow(dead_code)]
 pub async fn upload_direct_voice(
     origin: String,
     identity: Identity,
@@ -395,7 +470,25 @@ pub async fn upload_direct_voice(
     path: PathBuf,
     duration_seconds: u64,
 ) -> Result<DirectVoiceUpload> {
-    let upload = upload_direct_file(origin, identity, recipient_public_key, path).await?;
+    upload_direct_voice_with_fallback(
+        vec![origin],
+        identity,
+        recipient_public_key,
+        path,
+        duration_seconds,
+    )
+    .await
+}
+
+pub async fn upload_direct_voice_with_fallback(
+    origins: Vec<String>,
+    identity: Identity,
+    recipient_public_key: String,
+    path: PathBuf,
+    duration_seconds: u64,
+) -> Result<DirectVoiceUpload> {
+    let upload =
+        upload_direct_file_with_fallback(origins, identity, recipient_public_key, path).await?;
     let payload = VoiceMessagePayload {
         url: upload.payload.url,
         key: upload.payload.key,
@@ -409,13 +502,24 @@ pub async fn upload_direct_voice(
     })
 }
 
+#[allow(dead_code)]
 pub async fn download_encrypted_file(
     origin: String,
     identity: Identity,
     payload: EncryptedFilePayload,
     output_path: PathBuf,
 ) -> Result<()> {
-    let (_socket, session_token) = connect_authenticated(origin.clone(), &identity).await?;
+    download_encrypted_file_with_fallback(vec![origin], identity, payload, output_path).await
+}
+
+pub async fn download_encrypted_file_with_fallback(
+    origins: Vec<String>,
+    identity: Identity,
+    payload: EncryptedFilePayload,
+    output_path: PathBuf,
+) -> Result<()> {
+    let (_socket, session_token, origin) =
+        connect_authenticated_with_fallback(&origins, &identity).await?;
     if session_token.trim().is_empty() {
         return Err(anyhow!("server did not return a session token"));
     }
@@ -440,13 +544,24 @@ pub async fn download_encrypted_file(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn run_realtime(
     origin: String,
     identity: Identity,
     store: LocalStore,
     events: UnboundedSender<RealtimeEvent>,
 ) -> Result<()> {
-    let (mut socket, session_token) = connect_authenticated(origin.clone(), &identity).await?;
+    run_realtime_with_fallback(vec![origin], identity, store, events).await
+}
+
+pub async fn run_realtime_with_fallback(
+    origins: Vec<String>,
+    identity: Identity,
+    store: LocalStore,
+    events: UnboundedSender<RealtimeEvent>,
+) -> Result<()> {
+    let (mut socket, session_token, active_origin) =
+        connect_authenticated_with_fallback(&origins, &identity).await?;
     send_realtime_event(
         &events,
         RealtimeEvent::Authenticated(RealtimeSession {
@@ -455,16 +570,18 @@ pub async fn run_realtime(
     );
     send_realtime_event(
         &events,
-        RealtimeEvent::Info("realtime connected; syncing prekeys and retry outbox".to_string()),
+        RealtimeEvent::Info(format!(
+            "realtime connected via {active_origin}; syncing prekeys and retry outbox"
+        )),
     );
     ensure_prekeys_uploaded(&mut socket, &identity, &store, &events).await;
 
     let mut sessions: HashMap<String, ratchet::Session> = HashMap::new();
     let mut flush_interval = tokio::time::interval(Duration::from_secs(12));
     flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    flush_outbox(&origin, &identity, &store, &events).await;
+    flush_outbox(&origins, &identity, &store, &events).await;
     sync_known_direct_history(
-        &origin,
+        &active_origin,
         &session_token,
         &mut socket,
         &identity,
@@ -477,7 +594,7 @@ pub async fn run_realtime(
     loop {
         tokio::select! {
             _ = flush_interval.tick() => {
-                flush_outbox(&origin, &identity, &store, &events).await;
+                flush_outbox(&origins, &identity, &store, &events).await;
             }
             message = socket.next() => {
                 let Some(message) = message else {
@@ -498,8 +615,28 @@ pub async fn run_realtime(
     }
 }
 
+#[allow(dead_code)]
 pub async fn send_direct_message_once(
     origin: String,
+    identity: Identity,
+    store: LocalStore,
+    recipient_public_key: String,
+    plaintext: String,
+    msg_id: Option<String>,
+) -> Result<DirectSendResult> {
+    send_direct_message_once_with_fallback(
+        vec![origin],
+        identity,
+        store,
+        recipient_public_key,
+        plaintext,
+        msg_id,
+    )
+    .await
+}
+
+pub async fn send_direct_message_once_with_fallback(
+    origins: Vec<String>,
     identity: Identity,
     store: LocalStore,
     recipient_public_key: String,
@@ -526,8 +663,8 @@ pub async fn send_direct_message_once(
         &plaintext,
     )?;
 
-    match send_direct_message_network(
-        origin,
+    match send_direct_message_network_to_origins(
+        &origins,
         &identity,
         &store,
         recipient_public_key,
@@ -558,8 +695,28 @@ pub async fn send_direct_message_once(
     }
 }
 
+#[allow(dead_code)]
 pub async fn send_direct_edit_once(
     origin: String,
+    identity: Identity,
+    store: LocalStore,
+    recipient_public_key: String,
+    target_msg_id: String,
+    plaintext: String,
+) -> Result<DirectSendResult> {
+    send_direct_edit_once_with_fallback(
+        vec![origin],
+        identity,
+        store,
+        recipient_public_key,
+        target_msg_id,
+        plaintext,
+    )
+    .await
+}
+
+pub async fn send_direct_edit_once_with_fallback(
+    origins: Vec<String>,
     identity: Identity,
     store: LocalStore,
     recipient_public_key: String,
@@ -583,17 +740,33 @@ pub async fn send_direct_edit_once(
         recipient_public_key,
         data,
     );
-    send_direct_control_network(origin, &identity, envelope, event_id).await
+    send_direct_control_network_to_origins(&origins, &identity, envelope, event_id).await
 }
 
+#[allow(dead_code)]
 pub async fn send_direct_delete_once(
     origin: String,
     identity: Identity,
     recipient_public_key: String,
     target_msg_id: String,
 ) -> Result<DirectSendResult> {
-    send_direct_plain_control_once(
-        origin,
+    send_direct_delete_once_with_fallback(
+        vec![origin],
+        identity,
+        recipient_public_key,
+        target_msg_id,
+    )
+    .await
+}
+
+pub async fn send_direct_delete_once_with_fallback(
+    origins: Vec<String>,
+    identity: Identity,
+    recipient_public_key: String,
+    target_msg_id: String,
+) -> Result<DirectSendResult> {
+    send_direct_plain_control_once_with_fallback(
+        origins,
         identity,
         recipient_public_key,
         target_msg_id,
@@ -603,6 +776,7 @@ pub async fn send_direct_delete_once(
     .await
 }
 
+#[allow(dead_code)]
 pub async fn send_direct_reaction_once(
     origin: String,
     identity: Identity,
@@ -610,8 +784,25 @@ pub async fn send_direct_reaction_once(
     target_msg_id: String,
     reaction: Option<String>,
 ) -> Result<DirectSendResult> {
-    send_direct_plain_control_once(
-        origin,
+    send_direct_reaction_once_with_fallback(
+        vec![origin],
+        identity,
+        recipient_public_key,
+        target_msg_id,
+        reaction,
+    )
+    .await
+}
+
+pub async fn send_direct_reaction_once_with_fallback(
+    origins: Vec<String>,
+    identity: Identity,
+    recipient_public_key: String,
+    target_msg_id: String,
+    reaction: Option<String>,
+) -> Result<DirectSendResult> {
+    send_direct_plain_control_once_with_fallback(
+        origins,
         identity,
         recipient_public_key,
         target_msg_id,
@@ -621,6 +812,7 @@ pub async fn send_direct_reaction_once(
     .await
 }
 
+#[allow(dead_code)]
 pub async fn send_direct_pin_once(
     origin: String,
     identity: Identity,
@@ -628,9 +820,26 @@ pub async fn send_direct_pin_once(
     target_msg_id: String,
     pinned: bool,
 ) -> Result<DirectSendResult> {
+    send_direct_pin_once_with_fallback(
+        vec![origin],
+        identity,
+        recipient_public_key,
+        target_msg_id,
+        pinned,
+    )
+    .await
+}
+
+pub async fn send_direct_pin_once_with_fallback(
+    origins: Vec<String>,
+    identity: Identity,
+    recipient_public_key: String,
+    target_msg_id: String,
+    pinned: bool,
+) -> Result<DirectSendResult> {
     let kind = if pinned { "pin" } else { "unpin" };
-    send_direct_plain_control_once(
-        origin,
+    send_direct_plain_control_once_with_fallback(
+        origins,
         identity,
         recipient_public_key,
         target_msg_id,
@@ -640,8 +849,20 @@ pub async fn send_direct_pin_once(
     .await
 }
 
+#[allow(dead_code)]
 pub async fn send_call_signal_once(
     origin: String,
+    identity: Identity,
+    recipient_public_key: String,
+    kind: String,
+    data: String,
+) -> Result<DirectSendResult> {
+    send_call_signal_once_with_fallback(vec![origin], identity, recipient_public_key, kind, data)
+        .await
+}
+
+pub async fn send_call_signal_once_with_fallback(
+    origins: Vec<String>,
     identity: Identity,
     recipient_public_key: String,
     kind: String,
@@ -673,18 +894,29 @@ pub async fn send_call_signal_once(
         ack_type: None,
         message: None,
     };
-    send_direct_control_network(origin, &identity, envelope, event_id).await
+    send_direct_control_network_to_origins(&origins, &identity, envelope, event_id).await
 }
 
+#[allow(dead_code)]
 pub async fn flush_outbox_once(
     origin: String,
     identity: Identity,
     store: LocalStore,
     events: UnboundedSender<RealtimeEvent>,
 ) {
-    flush_outbox(&origin, &identity, &store, &events).await;
+    flush_outbox_once_with_fallback(vec![origin], identity, store, events).await;
 }
 
+pub async fn flush_outbox_once_with_fallback(
+    origins: Vec<String>,
+    identity: Identity,
+    store: LocalStore,
+    events: UnboundedSender<RealtimeEvent>,
+) {
+    flush_outbox(&origins, &identity, &store, &events).await;
+}
+
+#[allow(dead_code)]
 async fn send_direct_message_network(
     origin: String,
     identity: &Identity,
@@ -693,7 +925,27 @@ async fn send_direct_message_network(
     plaintext: String,
     msg_id: String,
 ) -> Result<DirectSendResult> {
-    let (mut socket, _) = connect_authenticated(origin, identity).await?;
+    send_direct_message_network_to_origins(
+        &[origin],
+        identity,
+        store,
+        recipient_public_key,
+        plaintext,
+        msg_id,
+    )
+    .await
+}
+
+async fn send_direct_message_network_to_origins(
+    origins: &[String],
+    identity: &Identity,
+    store: &LocalStore,
+    recipient_public_key: String,
+    plaintext: String,
+    msg_id: String,
+) -> Result<DirectSendResult> {
+    let (mut socket, _, _active_origin) =
+        connect_authenticated_with_fallback(origins, identity).await?;
     let (data, used_prekey) = if let Some(mut session) =
         store.load_session(&identity.public_key, &recipient_public_key)?
     {
@@ -725,6 +977,11 @@ async fn send_direct_message_network(
         recipient_public_key,
         data,
     );
+    apply_metadata_batch_delay(
+        envelope.recipient_pub_key.as_deref().unwrap_or_default(),
+        &msg_id,
+    )
+    .await;
     socket
         .send(Message::Text(serde_json::to_string(&envelope)?.into()))
         .await
@@ -741,8 +998,28 @@ async fn send_direct_message_network(
     })
 }
 
+#[allow(dead_code)]
 async fn send_direct_plain_control_once(
     origin: String,
+    identity: Identity,
+    recipient_public_key: String,
+    target_msg_id: String,
+    kind: &str,
+    reaction: Option<String>,
+) -> Result<DirectSendResult> {
+    send_direct_plain_control_once_with_fallback(
+        vec![origin],
+        identity,
+        recipient_public_key,
+        target_msg_id,
+        kind,
+        reaction,
+    )
+    .await
+}
+
+async fn send_direct_plain_control_once_with_fallback(
+    origins: Vec<String>,
     identity: Identity,
     recipient_public_key: String,
     target_msg_id: String,
@@ -781,16 +1058,32 @@ async fn send_direct_plain_control_once(
         ),
         other => return Err(anyhow!("unsupported direct control type {other}")),
     };
-    send_direct_control_network(origin, &identity, envelope, event_id).await
+    send_direct_control_network_to_origins(&origins, &identity, envelope, event_id).await
 }
 
+#[allow(dead_code)]
 async fn send_direct_control_network(
     origin: String,
     identity: &Identity,
     envelope: Envelope,
     event_id: String,
 ) -> Result<DirectSendResult> {
-    let (mut socket, _) = connect_authenticated(origin, identity).await?;
+    send_direct_control_network_to_origins(&[origin], identity, envelope, event_id).await
+}
+
+async fn send_direct_control_network_to_origins(
+    origins: &[String],
+    identity: &Identity,
+    envelope: Envelope,
+    event_id: String,
+) -> Result<DirectSendResult> {
+    let (mut socket, _, _active_origin) =
+        connect_authenticated_with_fallback(origins, identity).await?;
+    apply_metadata_batch_delay(
+        envelope.recipient_pub_key.as_deref().unwrap_or_default(),
+        &event_id,
+    )
+    .await;
     socket
         .send(Message::Text(serde_json::to_string(&envelope)?.into()))
         .await
@@ -803,6 +1096,13 @@ async fn send_direct_control_network(
         used_prekey: false,
         acknowledged,
     })
+}
+
+async fn apply_metadata_batch_delay(thread_id: &str, msg_id: &str) {
+    let delay_ms = MetadataResistancePolicy::default().batch_delay_ms(thread_id, msg_id);
+    if delay_ms > 0 {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    }
 }
 
 async fn handle_realtime_envelope(
@@ -862,6 +1162,7 @@ async fn handle_realtime_envelope(
             );
             Ok(())
         }
+        "dummy" => Ok(()),
         other => {
             send_realtime_event(
                 events,
@@ -1504,7 +1805,7 @@ async fn ensure_prekeys_uploaded(
 }
 
 async fn flush_outbox(
-    origin: &str,
+    origins: &[String],
     identity: &Identity,
     store: &LocalStore,
     events: &UnboundedSender<RealtimeEvent>,
@@ -1539,8 +1840,8 @@ async fn flush_outbox(
                 )),
             );
         }
-        let result = send_direct_message_once(
-            origin.to_string(),
+        let result = send_direct_message_once_with_fallback(
+            origins.to_vec(),
             identity.clone(),
             store.clone(),
             message.recipient_public_key.clone(),
@@ -1654,6 +1955,130 @@ async fn connect_authenticated(origin: String, identity: &Identity) -> Result<(W
     }
 
     Ok((socket, success.session_token.unwrap_or_default()))
+}
+
+async fn connect_authenticated_with_fallback(
+    origins: &[String],
+    identity: &Identity,
+) -> Result<(WsStream, String, String)> {
+    let mut errors = Vec::new();
+    for origin in expand_origins_via_bootstrap(origins.to_vec()).await {
+        match connect_authenticated(origin.clone(), identity).await {
+            Ok((socket, session_token)) => return Ok((socket, session_token, origin)),
+            Err(error) => errors.push(format!("{origin}: {error}")),
+        }
+    }
+    Err(anyhow!(
+        "all websocket transports failed: {}",
+        errors.join(" | ")
+    ))
+}
+
+fn normalize_origin_candidates(origins: Vec<String>) -> Vec<String> {
+    let primary = origins
+        .first()
+        .cloned()
+        .unwrap_or_else(|| config::DEFAULT_BACKEND_ORIGIN.to_string());
+    let fallbacks = origins.into_iter().skip(1).collect::<Vec<_>>();
+    let normalized = transport::ordered_origins(&primary, &fallbacks);
+    if normalized.is_empty() {
+        vec![config::DEFAULT_BACKEND_ORIGIN.to_string()]
+    } else {
+        normalized
+    }
+}
+
+async fn expand_origins_via_bootstrap(origins: Vec<String>) -> Vec<String> {
+    let mut expanded = normalize_origin_candidates(origins);
+    let client = match reqwest::Client::builder()
+        .timeout(BOOTSTRAP_DISCOVERY_TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return expanded,
+    };
+    let bootstrap_origins = expanded.clone();
+    for origin in bootstrap_origins {
+        if expanded.len() >= MAX_BOOTSTRAP_DISCOVERY_ORIGINS {
+            break;
+        }
+        let url = config::bootstrap_url(&origin);
+        let Ok(response) = client.get(&url).send().await else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        let Ok(body) = response.json::<BootstrapResponse>().await else {
+            continue;
+        };
+        for endpoint in relay_endpoint_candidates(&body.relays) {
+            if expanded.len() >= MAX_BOOTSTRAP_DISCOVERY_ORIGINS {
+                break;
+            }
+            if !expanded.contains(&endpoint) {
+                expanded.push(endpoint);
+            }
+        }
+    }
+    expanded
+}
+
+fn relay_endpoint_candidates(relays: &[BootstrapRelayCapability]) -> Vec<String> {
+    let mut candidates = Vec::new();
+    for relay in relays {
+        if !relay_supports_websocket_endpoint(&relay.transports) {
+            continue;
+        }
+        for endpoint in &relay.endpoint_origins {
+            let Some(origin) = normalize_bootstrap_endpoint_origin(endpoint) else {
+                continue;
+            };
+            if !candidates.contains(&origin) {
+                candidates.push(origin);
+            }
+        }
+    }
+    candidates
+}
+
+fn relay_supports_websocket_endpoint(transports: &[String]) -> bool {
+    transports.iter().any(|transport| {
+        matches!(
+            transport.trim().to_ascii_lowercase().as_str(),
+            "central_ws" | "fallback_wss"
+        )
+    })
+}
+
+fn normalize_bootstrap_endpoint_origin(value: &str) -> Option<String> {
+    let parsed = Url::parse(value.trim()).ok()?;
+    let scheme = parsed.scheme().to_ascii_lowercase();
+    if scheme != "https" && scheme != "http" {
+        return None;
+    }
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    if parsed.path() != "" && parsed.path() != "/" {
+        return None;
+    }
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    let authority = if let Some(port) = parsed.port() {
+        format!("{host}:{port}")
+    } else {
+        host
+    };
+    Some(format!("{scheme}://{authority}"))
 }
 
 fn absolute_url(origin: &str, value: &str) -> String {
@@ -1772,4 +2197,51 @@ async fn wait_for_server_ack(socket: &mut WsStream, msg_id: &str) -> Result<bool
     })
     .await
     .unwrap_or(Ok(false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_endpoint_candidates_keep_websocket_origins_only() {
+        let relays = vec![
+            BootstrapRelayCapability {
+                endpoint_origins: vec!["https://mesh.example".to_string()],
+                transports: vec!["mesh_relay".to_string()],
+            },
+            BootstrapRelayCapability {
+                endpoint_origins: vec![
+                    "https://relay.example/".to_string(),
+                    "https://relay.example".to_string(),
+                    "ftp://bad.example".to_string(),
+                    "https://bad.example/path".to_string(),
+                    "https://user:pass@bad.example".to_string(),
+                    "HTTP://127.0.0.1:8080/".to_string(),
+                ],
+                transports: vec!["fallback_wss".to_string()],
+            },
+        ];
+
+        assert_eq!(
+            relay_endpoint_candidates(&relays),
+            vec!["https://relay.example", "http://127.0.0.1:8080"]
+        );
+    }
+
+    #[test]
+    fn normalize_bootstrap_endpoint_origin_rejects_non_origins() {
+        assert_eq!(
+            normalize_bootstrap_endpoint_origin("https://Relay.Example/"),
+            Some("https://relay.example".to_string())
+        );
+        assert_eq!(
+            normalize_bootstrap_endpoint_origin("https://relay.example?x=1"),
+            None
+        );
+        assert_eq!(
+            normalize_bootstrap_endpoint_origin("wss://relay.example"),
+            None
+        );
+    }
 }

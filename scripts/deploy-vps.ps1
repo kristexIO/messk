@@ -158,6 +158,22 @@ FILE_TOKEN_TTL_MINUTES=60
 SESSION_TOKEN_TTL_MINUTES=1440
 RATE_LIMIT_PER_MINUTE=200
 REDIS_ADDR=127.0.0.1:6379
+RELAY_ANNOUNCE_TOKEN=
+RELAY_MAX_TTL_MINUTES=1440
+RELAY_MAX_NODES=256
+RELAY_MIN_REVOCATION_EPOCH=0
+RELAY_REVOKED_NODES=
+RELAY_REVOKED_PUBLIC_KEYS=
+RELAY_ANNOUNCER_ENABLED=true
+RELAY_ANNOUNCE_TARGET=http://127.0.0.1:8080
+RELAY_NODE_ID=relay-__HOST__
+RELAY_SIGNING_KEY_FILE=/opt/messan/shared/relay-ed25519.b64
+RELAY_ENDPOINT_ORIGINS=http://__HOST__
+RELAY_TRANSPORTS=central_ws,fallback_wss
+RELAY_REGION_HINT=
+RELAY_CAPACITY_CLASS=small
+RELAY_TTL=12h
+RELAY_REFRESH_INTERVAL=6h
 ENABLE_METADATA_PROXY=false
 EOF
   fi
@@ -214,6 +230,8 @@ updates = {
     "SESSION_TOKEN_TTL_MINUTES": "1440",
     "RATE_LIMIT_PER_MINUTE": "200",
     "REDIS_ADDR": "127.0.0.1:6379",
+    "RELAY_MAX_TTL_MINUTES": "1440",
+    "RELAY_MAX_NODES": "256",
     "ENABLE_METADATA_PROXY": "false",
 }
 lines = path.read_text(encoding="utf-8").splitlines()
@@ -232,6 +250,33 @@ for line in lines:
         out.append(line)
 for key, value in updates.items():
     if key not in seen:
+        out.append(f"{key}={value}")
+domain = "__DOMAIN__".strip()
+host = "__HOST__".strip()
+public_origin = f"https://{domain}" if domain else f"http://{host}"
+node_source = domain or host or "local"
+node_id = "relay-" + "".join(ch.lower() if ch.isalnum() or ch in "._-" else "-" for ch in node_source)
+operator_defaults = {
+    "RELAY_MIN_REVOCATION_EPOCH": "0",
+    "RELAY_REVOKED_NODES": "",
+    "RELAY_REVOKED_PUBLIC_KEYS": "",
+    "RELAY_ANNOUNCER_ENABLED": "true",
+    "RELAY_ANNOUNCE_TARGET": "http://127.0.0.1:8080",
+    "RELAY_NODE_ID": node_id,
+    "RELAY_SIGNING_KEY_FILE": "/opt/messan/shared/relay-ed25519.b64",
+    "RELAY_ENDPOINT_ORIGINS": public_origin,
+    "RELAY_TRANSPORTS": "central_ws,fallback_wss",
+    "RELAY_REGION_HINT": "",
+    "RELAY_CAPACITY_CLASS": "small",
+    "RELAY_TTL": "12h",
+    "RELAY_REFRESH_INTERVAL": "6h",
+}
+existing_keys = set()
+for line in out:
+    if "=" in line and not line.lstrip().startswith("#"):
+        existing_keys.add(line.split("=", 1)[0].strip())
+for key, value in operator_defaults.items():
+    if key not in existing_keys:
         out.append(f"{key}={value}")
 path.write_text("\n".join(out) + "\n", encoding="utf-8")
 PY
@@ -356,6 +401,8 @@ APP_VERSION=\$(node -p "JSON.parse(require('fs').readFileSync('\$RELEASE_DIR/sou
 COMMIT_SHA=__COMMIT_SHA__
 BUILD_TIME=\$(date -u +%Y-%m-%dT%H:%M:%SZ)
 /usr/local/bin/go build -trimpath -ldflags="-s -w -X main.appVersion=\${APP_VERSION} -X main.commitSHA=\${COMMIT_SHA} -X main.buildTime=\${BUILD_TIME}" -o \$APP_ROOT/bin/messenger-server .
+/usr/local/bin/go build -trimpath -ldflags="-s -w" -o \$APP_ROOT/bin/relay-announce ./tools/relay-announce
+chmod 0755 \$APP_ROOT/bin/messenger-server \$APP_ROOT/bin/relay-announce
 
 cd \$RELEASE_DIR/source/messk
 npm ci
@@ -389,6 +436,37 @@ MemoryDenyWriteExecute=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 SystemCallArchitectures=native
 ReadWritePaths=/var/lib/messan /opt/messan
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/messan-relay-announce.service <<'EOF'
+[Unit]
+Description=Messan Relay Capability Announcer
+After=network-online.target messan.service
+Wants=network-online.target
+Requires=messan.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/messan/current/mess
+EnvironmentFile=/opt/messan/current/mess/.env
+ExecStart=/bin/bash -lc 'if [ "${RELAY_ANNOUNCER_ENABLED:-false}" != "true" ]; then echo "relay announcer disabled"; exec sleep infinity; fi; interval="${RELAY_REFRESH_INTERVAL:-6h}"; if [ "$interval" = "0" ]; then interval="6h"; fi; exec /opt/messan/bin/relay-announce -generate-key -refresh-interval "$interval"'
+Restart=always
+RestartSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+ReadWritePaths=/opt/messan/shared
 
 [Install]
 WantedBy=multi-user.target
@@ -544,6 +622,21 @@ server {
         include /etc/nginx/snippets/messan-proxy.conf;
     }
 
+    location = /bootstrap {
+        limit_req zone=messan_api burst=30 nodelay;
+        include /etc/nginx/snippets/messan-proxy.conf;
+    }
+
+    location = /peers {
+        limit_req zone=messan_api burst=30 nodelay;
+        include /etc/nginx/snippets/messan-proxy.conf;
+    }
+
+    location ^~ /relay/ {
+        limit_req zone=messan_api burst=30 nodelay;
+        include /etc/nginx/snippets/messan-proxy.conf;
+    }
+
     location ^~ /admin/ {
         allow 127.0.0.1;
         allow ::1;
@@ -621,6 +714,8 @@ systemctl enable coturn
 systemctl restart coturn
 systemctl enable messan
 systemctl restart messan
+systemctl enable messan-relay-announce
+systemctl restart messan-relay-announce
 systemctl restart nginx
 
 if [ -n "\$DOMAIN" ] && [ ! -f "/etc/letsencrypt/live/\$DOMAIN/fullchain.pem" ]; then
@@ -701,7 +796,24 @@ if ! curl -fsS http://127.0.0.1:8080/version; then
   fi
   exit 1
 fi
+if ! curl -fsS http://127.0.0.1:8080/relay/health; then
+  if [ -n "\$PREVIOUS_RELEASE" ] && [ -d "\$PREVIOUS_RELEASE" ]; then
+    ln -sfn "\$PREVIOUS_RELEASE" "\$CURRENT_LINK"
+    systemctl restart messan || true
+    systemctl restart nginx || true
+  fi
+  exit 1
+fi
+if ! curl -fsS http://127.0.0.1:8080/bootstrap; then
+  if [ -n "\$PREVIOUS_RELEASE" ] && [ -d "\$PREVIOUS_RELEASE" ]; then
+    ln -sfn "\$PREVIOUS_RELEASE" "\$CURRENT_LINK"
+    systemctl restart messan || true
+    systemctl restart nginx || true
+  fi
+  exit 1
+fi
 systemctl is-active coturn
+systemctl is-active messan-relay-announce
 '@
 
 $remoteDeployScript = (

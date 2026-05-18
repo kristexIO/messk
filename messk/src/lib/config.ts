@@ -13,6 +13,24 @@ function normalizeOrigin(value: string | undefined | null): string | undefined {
   return value.replace(/\/+$/, '');
 }
 
+export function normalizeBackendOrigin(value: string | undefined | null): string | undefined {
+  const normalized = normalizeOrigin(value);
+  if (!normalized) {
+    return undefined;
+  }
+  const parsed = tryParseUrl(normalized);
+  if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+    return undefined;
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    return undefined;
+  }
+  if (parsed.pathname && parsed.pathname !== '/') {
+    return undefined;
+  }
+  return parsed.origin;
+}
+
 function tryParseUrl(value: string | undefined): URL | null {
   if (!value) {
     return null;
@@ -68,7 +86,35 @@ function parseRtcUrlList(value: string | undefined, fallback: string[] = []): st
   return raw && raw.length > 0 ? raw : fallback;
 }
 
-function toWebSocketOrigin(origin: string): string {
+export function parseBackendOriginList(value: string | undefined): string[] {
+  const seen = new Set<string>();
+  const origins: string[] = [];
+  for (const entry of value?.split(',') ?? []) {
+    const origin = normalizeBackendOrigin(entry.trim());
+    if (!origin || seen.has(origin)) {
+      continue;
+    }
+    seen.add(origin);
+    origins.push(origin);
+  }
+  return origins;
+}
+
+export function normalizeBackendOriginList(primary: string, fallbacks: string[]): string[] {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const origin of [primary, ...fallbacks]) {
+    const normalized = normalizeBackendOrigin(origin);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    ordered.push(normalized);
+  }
+  return ordered.length ? ordered : [DEFAULT_BACKEND_ORIGIN];
+}
+
+export function toWebSocketOrigin(origin: string): string {
   if (origin.startsWith('https://')) {
     return `wss://${origin.slice('https://'.length)}`;
   }
@@ -78,7 +124,9 @@ function toWebSocketOrigin(origin: string): string {
   return origin;
 }
 
-const backendOrigin = resolveBackendOrigin();
+const backendOrigin = normalizeBackendOrigin(resolveBackendOrigin()) ?? DEFAULT_BACKEND_ORIGIN;
+const fallbackBackendOrigins = parseBackendOriginList(import.meta.env.VITE_FALLBACK_BACKEND_URLS as string | undefined);
+const backendOrigins = normalizeBackendOriginList(backendOrigin, fallbackBackendOrigins);
 const stunUrls = parseRtcUrlList(import.meta.env.VITE_STUN_URLS as string | undefined, DEFAULT_STUN_URLS);
 const turnUrls = parseRtcUrlList(import.meta.env.VITE_TURN_URLS as string | undefined);
 const turnUsername = (import.meta.env.VITE_TURN_USERNAME as string | undefined)?.trim() || '';
@@ -93,7 +141,9 @@ const rtcIceServers: RTCIceServer[] = [
 
 export const appConfig = {
   backendOrigin,
+  backendOrigins,
   wsUrl: `${toWebSocketOrigin(backendOrigin)}/ws`,
+  wsUrls: backendOrigins.map((origin) => `${toWebSocketOrigin(origin)}/ws`),
   uploadUrl: `${backendOrigin}/upload`,
   profileUrl: `${backendOrigin}/profile`,
   rtcIceServers,
