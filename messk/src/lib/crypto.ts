@@ -134,7 +134,6 @@ export async function x3dhInitiate(
 
   // Reserved zero component keeps the KDF shape stable while PQC is disabled.
   const pqcSecret = new Uint8Array(32);
-  let pqcCiphertext: string | undefined;
 
   // Combine DH + PQC
   const combined = new Uint8Array(32 * 4);
@@ -145,8 +144,7 @@ export async function x3dhInitiate(
 
   return {
     sharedSecret: await deriveX3DHRootKey(combined),
-    ephemeralPub: encodeBase64(ephemeral.publicKey),
-    pqcCiphertext
+    ephemeralPub: encodeBase64(ephemeral.publicKey)
   };
 }
 

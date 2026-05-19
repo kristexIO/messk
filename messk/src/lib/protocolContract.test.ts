@@ -4,16 +4,22 @@ import {
   DEFAULT_TRANSPORT_PRIORITY,
   SERVER_ACK_TYPES,
   clampHistoryLimit,
+  createBlindMeshEnvelope,
   displayMessageText,
   isDirectHistoryEvent,
   isDeletedMessagePayload,
+  isValidMeshTopic,
   isSupportedTransportKind,
   messagePayloadPreview,
+  meshDedupeKey,
+  meshTopic,
   metadataBatchDelayMs,
   metadataPaddingTargetLen,
+  nextMeshHop,
   normalizeTransportPriority,
   requiresEncryptedData,
   requiresTargetMessageId,
+  validateBlindMeshEnvelope,
 } from './protocolContract';
 
 describe('protocolContract', () => {
@@ -71,6 +77,33 @@ describe('protocolContract', () => {
     expect(first).toBeGreaterThanOrEqual(0);
     expect(first).toBeLessThanOrEqual(250);
     expect(metadataBatchDelayMs({ minBatchDelayMs: 40, maxBatchDelayMs: 20 }, 'thread-a', 'msg-a')).toBe(40);
+  });
+
+  it('builds blind mesh envelopes without sender or recipient fields', () => {
+    const envelope = createBlindMeshEnvelope('direct', 'Direct_ABCD-1234', 'msg-1', 'ciphertext', 10_000);
+
+    expect(meshTopic('direct', 'Direct_ABCD-1234')).toBe('messk/v1/direct/direct_abcd-1234');
+    expect(meshTopic('group', 'bad/thread')).toBeNull();
+    expect(envelope).toMatchObject({
+      topic: 'messk/v1/direct/direct_abcd-1234',
+      msgId: 'msg-1',
+      hopLimit: 3,
+    });
+    expect(JSON.stringify(envelope)).not.toContain('sender');
+    expect(JSON.stringify(envelope)).not.toContain('recipient');
+    expect(envelope && validateBlindMeshEnvelope(envelope, 1_000)).toBe(true);
+    expect(envelope && nextMeshHop(envelope)?.hopLimit).toBe(2);
+    expect(meshDedupeKey('topic', 'msg')).toBe('topic:msg');
+  });
+
+  it('rejects invalid mesh topics and expired envelopes', () => {
+    const envelope = createBlindMeshEnvelope('channel', 'chan_a', 'msg-1', 'ciphertext', 10_000);
+
+    expect(isValidMeshTopic('messk/v1/channel/chan_a')).toBe(true);
+    expect(isValidMeshTopic('messk/v1/channel/bad/thread')).toBe(false);
+    expect(envelope && validateBlindMeshEnvelope({ ...envelope, hopLimit: 99 }, 1_000)).toBe(false);
+    expect(envelope && validateBlindMeshEnvelope(envelope, 10_001)).toBe(false);
+    expect(createBlindMeshEnvelope('direct', 'thread', 'bad msg', 'ciphertext', 10_000)).toBeNull();
   });
 
   it('unwraps and summarizes stable message payloads', () => {

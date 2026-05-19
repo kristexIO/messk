@@ -452,16 +452,13 @@ impl MesskApp {
                     self.profile_nickname = profile.nickname;
                     self.profile_username = profile.username.unwrap_or_default();
                     self.profile_avatar = profile.avatar;
-                    if let (Some(store), Some(identity)) = (&self.store, &self.identity) {
-                        if profile_pub_key == identity.public_key {
-                            if let Ok(local_profile) = self.current_profile() {
-                                if let Err(error) =
-                                    store.save_own_profile(&identity.public_key, &local_profile)
-                                {
-                                    self.logs.push(format!("profile cache error: {error}"));
-                                }
-                            }
-                        }
+                    if let (Some(store), Some(identity)) = (&self.store, &self.identity)
+                        && profile_pub_key == identity.public_key
+                        && let Ok(local_profile) = self.current_profile()
+                        && let Err(error) =
+                            store.save_own_profile(&identity.public_key, &local_profile)
+                    {
+                        self.logs.push(format!("profile cache error: {error}"));
                     }
                     self.logs.push("profile loaded from server".to_string());
                 }
@@ -1188,12 +1185,12 @@ impl MesskApp {
     }
 
     fn play_voice_payload(&mut self, msg_id: String, payload: VoiceMessagePayload) {
-        if let Some(player) = &self.voice_playback {
-            if player.msg_id() == msg_id {
-                player.toggle_pause();
-                self.refresh_voice_playback_status();
-                return;
-            }
+        if let Some(player) = &self.voice_playback
+            && player.msg_id() == msg_id
+        {
+            player.toggle_pause();
+            self.refresh_voice_playback_status();
+            return;
         }
         self.stop_voice_playback();
 

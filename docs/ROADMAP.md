@@ -67,6 +67,14 @@ Exit criteria:
   health-visible relay metrics.
 - Keep metadata resistance enabled for direct traffic: encrypted padding,
   short batch windows, and online-only dummy envelope support.
+- Keep mesh work behind a feature flag until the blind envelope, topic, TTL,
+  hop-limit, and dedupe contract passes web/Rust fixtures.
+- Use the local mesh simulator to prove duplicate/drop behavior, relay-node
+  loss, and 3-9 node propagation before enabling libp2p in staging.
+- Keep the `mesh_libp2p` adapter compile-tested behind `mesh-prototype`;
+  anonymous Gossipsub, Kademlia, AutoNAT, DCUtR, and Circuit Relay behaviours
+  plus composable swarm parts must remain opt-in until the swarm runner and
+  abuse controls are reviewed.
 - Add staging release flow before production deploy.
 - Add monitoring for websocket disconnects, failed decrypts, queue growth,
   upload failures, relay churn, and rate-limit hits.

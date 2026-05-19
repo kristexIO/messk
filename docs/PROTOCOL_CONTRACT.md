@@ -226,6 +226,58 @@ and refresh it from `/bootstrap`; relays that advertise `central_ws` or
 `fallback_wss` contribute normalized `endpointOrigins` for subsequent websocket
 reconnect attempts.
 
+## Mesh Prototype Contract
+
+The mesh layer is an R&D transport contract behind the Rust `mesh-prototype`
+feature. It is not a production default yet. The goal is to let libp2p
+Kademlia/Gossipsub/Circuit Relay adapters carry the same opaque envelopes as
+the central backend without learning sender identity, recipient identity, or
+plaintext.
+
+Mesh topics use:
+
+```text
+messk/v1/<direct|group|channel>/<thread_id>
+```
+
+`thread_id` must already be a non-identifying route id, for example the
+existing direct thread hash or a room id that is safe to reveal to subscribed
+peers. Topic path segments are ASCII `A-Z`, `a-z`, `0-9`, `_`, `-`, or `.`, and
+are normalized to lowercase.
+
+Blind mesh envelopes contain only:
+
+```json
+{
+  "v": 1,
+  "topic": "messk/v1/direct/direct_abcd",
+  "msgId": "client-generated-id",
+  "ciphertext": "encrypted envelope bytes",
+  "hopLimit": 3,
+  "expiresAtMs": 1770000000000
+}
+```
+
+They must not contain `sender_pub_key`, `recipient_pub_key`, plaintext, file
+keys, session secrets, or server session tokens. Mesh adapters dedupe by
+`topic + msgId`, decrement `hopLimit` before forwarding, drop expired envelopes,
+and pass accepted ciphertext back into the normal client outbox/history/decrypt
+pipeline.
+
+`clients/core` includes a feature-flagged local simulator for this contract. It
+models 3-9 local nodes today, duplicate gossip paths, hop-limit exhaustion, TTL
+expiry, and relay-node loss with an alternate path.
+
+`clients/core/src/mesh_libp2p.rs` is the first compile-tested libp2p adapter
+layer behind the same feature flag. It builds anonymous Gossipsub, Kademlia,
+Identify, AutoNAT, DCUtR, and Circuit Relay v2 client/server behaviours, maps
+Messk topics to Gossipsub `IdentTopic`, and serializes/deserializes only blind
+mesh envelopes at the network boundary. It also exposes composable swarm parts
+with optional AutoNAT/DCUtR/Relay behaviours behind `Toggle`, so production code
+can keep the feature disabled while staging builds experiment with real swarms.
+The adapter must stay disabled in normal builds until a swarm runner, bootstrap
+policy, and abuse controls are tested in staging.
+
 If `RELAY_ANNOUNCE_TOKEN` is unset, relay announcements are accepted only from
 loopback for local development. Production nodes must configure an announce
 token and keep relay signing keys outside git. Operators can revoke relay

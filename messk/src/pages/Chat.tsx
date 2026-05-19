@@ -2637,7 +2637,7 @@ export const Chat: React.FC = () => {
                   <div className="text-sm font-semibold uppercase tracking-[0.22em] text-text-muted">Activity</div>
                   <div className="mt-3 space-y-2 overflow-y-auto custom-scrollbar">
                     {(channelActivity ?? []).slice(0, 10).map((entry) => {
-                      let text = '';
+                      let text: string;
                       switch (entry.type) {
                         case 'post_edited':
                           text = `${resolveParticipantName(entry.actorPubKey)} edited a post`;

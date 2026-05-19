@@ -28,6 +28,24 @@ export const DEFAULT_TRANSPORT_PRIORITY: TransportKind[] = [
   'user_proxy',
 ];
 
+export const MESH_PROTOCOL_VERSION = 1;
+export const MESH_TOPIC_PREFIX = 'messk/v1';
+export const MESH_THREAD_KINDS = ['direct', 'group', 'channel'] as const;
+export const MESH_DEFAULT_HOP_LIMIT = 3;
+export const MESH_MAX_HOP_LIMIT = 8;
+export const MESH_MAX_CIPHERTEXT_LEN = 1024 * 1024;
+
+export type MeshThreadKind = (typeof MESH_THREAD_KINDS)[number];
+
+export type BlindMeshEnvelope = {
+  v: number;
+  topic: string;
+  msgId: string;
+  ciphertext: string;
+  hopLimit: number;
+  expiresAtMs: number;
+};
+
 export const PADDING_PROFILES = ['disabled', 'interactive', 'balanced', 'high_privacy'] as const;
 
 export type PaddingProfile = (typeof PADDING_PROFILES)[number];
@@ -91,6 +109,67 @@ export function normalizeTransportPriority(priority: string[]): TransportKind[] 
     return true;
   });
   return normalized.length ? normalized : [...DEFAULT_TRANSPORT_PRIORITY];
+}
+
+export function meshTopic(kind: MeshThreadKind, threadId: string) {
+  const normalizedThreadId = normalizeMeshTopicSegment(threadId);
+  if (!normalizedThreadId) return null;
+  return `${MESH_TOPIC_PREFIX}/${kind}/${normalizedThreadId}`;
+}
+
+export function isValidMeshTopic(topic: string) {
+  if (!topic.startsWith(`${MESH_TOPIC_PREFIX}/`)) return false;
+  const [, , kind, threadId, extra] = topic.split('/');
+  return Boolean(kind && threadId && !extra && isMeshThreadKind(kind) && normalizeMeshTopicSegment(threadId));
+}
+
+export function createBlindMeshEnvelope(
+  kind: MeshThreadKind,
+  threadId: string,
+  msgId: string,
+  ciphertext: string,
+  expiresAtMs: number
+): BlindMeshEnvelope | null {
+  const topic = meshTopic(kind, threadId);
+  const normalizedMsgId = normalizeMeshMessageId(msgId);
+  if (!topic || !normalizedMsgId || !ciphertext.trim() || ciphertext.length > MESH_MAX_CIPHERTEXT_LEN) {
+    return null;
+  }
+  return {
+    v: MESH_PROTOCOL_VERSION,
+    topic,
+    msgId: normalizedMsgId,
+    ciphertext,
+    hopLimit: MESH_DEFAULT_HOP_LIMIT,
+    expiresAtMs,
+  };
+}
+
+export function validateBlindMeshEnvelope(envelope: BlindMeshEnvelope, nowMs: number) {
+  return (
+    envelope.v === MESH_PROTOCOL_VERSION &&
+    isValidMeshTopic(envelope.topic) &&
+    normalizeMeshMessageId(envelope.msgId) === envelope.msgId &&
+    Boolean(envelope.ciphertext.trim()) &&
+    envelope.ciphertext.length <= MESH_MAX_CIPHERTEXT_LEN &&
+    Number.isInteger(envelope.hopLimit) &&
+    envelope.hopLimit >= 0 &&
+    envelope.hopLimit <= MESH_MAX_HOP_LIMIT &&
+    Number.isFinite(envelope.expiresAtMs) &&
+    envelope.expiresAtMs > nowMs
+  );
+}
+
+export function nextMeshHop(envelope: BlindMeshEnvelope): BlindMeshEnvelope | null {
+  if (envelope.hopLimit <= 0) return null;
+  return {
+    ...envelope,
+    hopLimit: envelope.hopLimit - 1,
+  };
+}
+
+export function meshDedupeKey(topic: string, msgId: string) {
+  return `${topic}:${msgId}`;
 }
 
 export function metadataPaddingTargetLen(profile: PaddingProfile, payloadLength: number) {
@@ -277,6 +356,22 @@ function titleCaseFirst(value: string) {
   const trimmed = value.trim();
   if (!trimmed) return '';
   return `${trimmed[0].toUpperCase()}${trimmed.slice(1)}`;
+}
+
+function isMeshThreadKind(value: string): value is MeshThreadKind {
+  return (MESH_THREAD_KINDS as readonly string[]).includes(value);
+}
+
+function normalizeMeshTopicSegment(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 160) return null;
+  return /^[A-Za-z0-9_.-]+$/.test(trimmed) ? trimmed.toLowerCase() : null;
+}
+
+function normalizeMeshMessageId(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 128) return null;
+  return /^[A-Za-z0-9_.:-]+$/.test(trimmed) ? trimmed : null;
 }
 
 function stableMetadataHash32(parts: string[]) {
