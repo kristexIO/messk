@@ -1,5 +1,9 @@
 pub mod call;
 pub mod history;
+#[cfg(feature = "mesh-prototype")]
+pub mod mesh;
+#[cfg(feature = "mesh-prototype")]
+pub mod mesh_libp2p;
 pub mod metadata;
 pub mod outbox;
 pub mod payload;

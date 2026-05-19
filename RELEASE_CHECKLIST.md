@@ -30,6 +30,7 @@
 - Confirm relay credentials, signing keys, VPS keys, and operator tokens are not committed or logged.
 - Confirm direct `edit`, `delete`, `reaction`, `reply`, `pin`, and `unpin` envelopes include `target_msg_id` and never plaintext.
 - Confirm metadata resistance remains active: direct ratchet payloads include encrypted padding, short batch windows do not break outbox retry, and `dummy` envelopes are online-only.
+- Confirm mesh prototype code is disabled in production unless explicitly staged; `mesh_libp2p` must require `--features mesh-prototype`, and blind mesh envelopes must not include sender, recipient, plaintext, file keys, session secrets, or session tokens.
 
 ## UX Checks
 - Confirm chat list search, message search, drafts, pins, reactions, edit/delete, and read receipts all behave correctly.
