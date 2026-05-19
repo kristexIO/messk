@@ -237,7 +237,7 @@ pub fn ordered_origins(primary: &str, fallbacks: &[String]) -> Vec<String> {
 
 pub fn parse_origin_list(raw: &str) -> Vec<String> {
     let mut origins = Vec::new();
-    for part in raw.split(|character| matches!(character, '\n' | '\r' | ',' | ';')) {
+    for part in raw.split(['\n', '\r', ',', ';']) {
         if let Some(origin) = normalize_origin(part)
             && !origins.contains(&origin)
         {
