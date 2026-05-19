@@ -3,8 +3,9 @@ param(
   [Alias("Host")]
   [string]$ServerHost,
 
-  [Parameter(Mandatory = $true)]
-  [string]$Password,
+  [string]$Password = "",
+  [string]$KeyFile = "",
+  [int]$Port = 22,
 
   [string]$User = "root",
   [string]$Domain = "",
@@ -16,6 +17,16 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($Password) -and [string]::IsNullOrWhiteSpace($KeyFile)) {
+  throw "Provide -KeyFile for SSH-key deploys, or -Password only for one-time bootstrap."
+}
+
+if (-not [string]::IsNullOrWhiteSpace($KeyFile)) {
+  $KeyFile = (Resolve-Path $KeyFile).Path
+} elseif (-not [string]::IsNullOrWhiteSpace($Password)) {
+  Write-Warning "Password deploy is intended only for initial bootstrap. Prefer -KeyFile and disable SSH password login after rotation."
+}
 
 if ([string]::IsNullOrWhiteSpace($LocalRoot)) {
   $LocalRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -363,6 +374,13 @@ X11Forwarding no
 AllowTcpForwarding no
 AllowAgentForwarding no
 EOF
+if [ -s /root/.ssh/authorized_keys ]; then
+  cat >> /etc/ssh/sshd_config.d/99-messan-hardening.conf <<'EOF'
+PubkeyAuthentication yes
+PasswordAuthentication no
+PermitRootLogin prohibit-password
+EOF
+fi
 sshd -t
 systemctl reload ssh || systemctl reload sshd || true
 
@@ -837,7 +855,9 @@ import base64
 
 host = r'''__HOST__'''
 user = r'''__USER__'''
+port = int(r'''__PORT__''')
 password = r'''__PASSWORD__'''
+key_file = r'''__KEY_FILE__'''
 local_archive = r'''__LOCAL_ARCHIVE__'''
 remote_archive = r'''__REMOTE_ARCHIVE__'''
 remote_script = r'''__REMOTE_SCRIPT__'''
@@ -845,7 +865,19 @@ remote_script_body = base64.b64decode(r'''__SCRIPT_B64__''').decode('utf-8')
 
 client = paramiko.SSHClient()
 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-client.connect(hostname=host, username=user, password=password, timeout=20, banner_timeout=60, auth_timeout=60)
+connect_kwargs = {
+    "hostname": host,
+    "username": user,
+    "port": port,
+    "timeout": 20,
+    "banner_timeout": 60,
+    "auth_timeout": 60,
+}
+if key_file:
+    connect_kwargs["key_filename"] = key_file
+if password:
+    connect_kwargs["password"] = password
+client.connect(**connect_kwargs)
 
 sftp = client.open_sftp()
 sftp.put(local_archive, remote_archive)
@@ -871,7 +903,9 @@ raise SystemExit(status)
 $pythonDeploy = (
   $pythonDeployTemplate.Replace("__HOST__", $ServerHost)
 ).Replace("__USER__", $User).
+  Replace("__PORT__", [string]$Port).
   Replace("__PASSWORD__", $Password).
+  Replace("__KEY_FILE__", $KeyFile).
   Replace("__LOCAL_ARCHIVE__", $archivePath).
   Replace("__REMOTE_ARCHIVE__", $remoteArchivePath).
   Replace("__REMOTE_SCRIPT__", $remoteScriptPath).
