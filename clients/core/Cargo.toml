@@ -24,4 +24,4 @@ libp2p = { version = "0.56.0", optional = true, default-features = false, featur
     "yamux",
 ] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
+serde_json = "1.0.149"

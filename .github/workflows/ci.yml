@@ -12,7 +12,7 @@ jobs:
     name: Release Preflight
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - shell: pwsh
         run: ./scripts/release-preflight.ps1 -BackendOrigin http://localhost:8080 -AllowLocalhost
 
@@ -23,8 +23,8 @@ jobs:
       run:
         working-directory: mess
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: mess/go.mod
           cache-dependency-path: mess/go.sum
@@ -37,7 +37,7 @@ jobs:
       run:
         working-directory: mess
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: docker compose config
       - run: docker build -t e2ee-messenger-backend:ci .
 
@@ -48,8 +48,8 @@ jobs:
       run:
         working-directory: messk
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -63,7 +63,7 @@ jobs:
     name: Native Windows Client
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: Core fmt
         run: cargo fmt --manifest-path clients/core/Cargo.toml --check
