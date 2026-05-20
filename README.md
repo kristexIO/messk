@@ -29,6 +29,9 @@ survive real usage:
 - cross-client protocol mirrors for Go, TypeScript, and Rust;
 - native Windows identity storage protected by DPAPI;
 - repeatable release scripts, health checks, backups, and VPS hardening.
+- relay/bootstrap discovery with signed relay capabilities;
+- feature-gated libp2p mesh prototype for staged resilience experiments;
+- metadata-resistance foundations: padding, batch windows, and dummy envelopes.
 
 ## Product Surface
 
@@ -39,19 +42,36 @@ survive real usage:
 | Windows client | Native Rust/egui shell with local SQLite, DPAPI vaulting, message state, media foundations, notifications, playback modules. |
 | Shared Rust core | Protocol constants, payload parsing, history cursors, retry rules, and storage contract tests. |
 | Backend | HTTP/WebSocket router, SQLite persistence, Redis fanout option, uploads, health/version/admin endpoints. |
-| Operations | PowerShell release gates, smoke checks, backups, VPS deploy, nginx/ufw/fail2ban/sysctl hardening. |
+| Relay/bootstrap | Signed relay announcements, peer registry, relay health, bootstrap discovery. |
+| Mesh prototype | Feature-gated libp2p builders and simulator for Gossipsub, Kademlia, AutoNAT, DCUtR, Relay v2. |
+| Operations | PowerShell release gates, smoke checks, backups, key-based VPS deploy, nginx/ufw/fail2ban/sysctl hardening. |
+
+## Main Branch Release State
+
+| Gate | Status |
+| --- | --- |
+| GitHub Actions on `main` | Green after the mesh/relay merge. |
+| Frontend dependency audit | `npm audit` reports 0 vulnerabilities. |
+| Backend tests | `go test ./...` passes. |
+| Shared Rust core | Default and `mesh-prototype` tests pass. |
+| Native Windows client | Tests, clippy, and build pass. |
+| VPS deploy | Ready for key-based staging deploy after operator SSH key setup. |
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    W["Web client<br/>React + Vite"] --> B["Go backend<br/>HTTP + WebSocket"]
-    N["Windows client<br/>Rust + egui"] --> B
-    N --> C["clients/core<br/>shared Rust protocol"]
-    M["Future mobile clients"] --> C
+    W["Web client<br/>React + Vite"] --> P{"Transport policy"}
+    N["Windows client<br/>Rust + egui"] --> C["clients/core<br/>shared Rust protocol"]
+    C --> P
+    P --> B["Go backend<br/>central_ws"]
+    P --> RY["Relay/bootstrap path"]
+    P --> MP["Mesh prototype<br/>feature gated"]
+    P --> FW["Fallback WSS<br/>operator configured"]
     B --> D["SQLite<br/>ciphertext history + queues"]
     B --> R["Redis<br/>optional fanout"]
     B --> U["Uploads<br/>encrypted blobs"]
+    B --> BO["/bootstrap + /relay/health"]
 ```
 
 The backend is the protocol source of truth. Client-facing contract changes must
@@ -120,7 +140,11 @@ powershell -ExecutionPolicy Bypass -File scripts\release-build.ps1 -BackendOrigi
 Deploy to a VPS:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\deploy-vps.ps1 -ServerHost <ip> -User root -Password <password> -Domain <domain>
+powershell -ExecutionPolicy Bypass -File scripts\deploy-vps.ps1 `
+  -ServerHost <server-host> `
+  -User root `
+  -KeyFile $env:USERPROFILE\.ssh\messk_prod_ed25519 `
+  -Domain <domain>
 ```
 
 The deploy script builds the backend and web client on the server, creates a new
@@ -128,6 +152,10 @@ release directory, switches `/opt/messan/current`, restarts services, verifies
 `/health` and `/version`, and keeps rollback releases. It also applies production
 hardening for nginx, UFW, fail2ban, sysctl, swap, service limits, and systemd
 sandboxing.
+
+Password-based SSH is only acceptable for a one-time bootstrap before key
+rotation. Production deploys should use `-KeyFile`, with private keys, tokens,
+and `.env` files kept outside the repository.
 
 ## Security Model
 
@@ -141,6 +169,8 @@ sandboxing.
   persistence.
 - Metadata proxying is disabled by default and should stay disabled unless a
   production use case is reviewed.
+- Mesh prototype code is disabled by default and only compiles with the
+  explicit `mesh-prototype` Rust feature.
 - Production deploys must pass the release checklist, health smoke, backup, and
   rollback steps before promotion.
 
@@ -158,6 +188,9 @@ the operational contract.
 - [Windows client](docs/WINDOWS_CLIENT.md)
 - [Shared Rust core](docs/SHARED_RUST_CORE.md)
 - [Roadmap](docs/ROADMAP.md)
+- [Main release report](docs/MAIN_RELEASE_REPORT.md)
+- [Mesh/libp2p release report](docs/MESH_LIBP2P_RELEASE_REPORT.md)
+- [Operator tutorial RU](docs/OPERATOR_TUTORIAL_RU.md)
 - [Release checklist](RELEASE_CHECKLIST.md)
 
 ## Roadmap
