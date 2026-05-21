@@ -24,6 +24,20 @@ function Get-ResponseHeader($Response, $Name) {
   return $null
 }
 
+function Assert-JsonEndpoint($Path, $RequiredProperty) {
+  $response = Invoke-WebRequest -Uri "http://127.0.0.1:$port$Path" -TimeoutSec 2
+  $contentType = Get-ResponseHeader $response "Content-Type"
+  if ($contentType -notmatch "application/json") {
+    throw "$Path returned non-JSON content type: $contentType"
+  }
+
+  $body = $response.Content | ConvertFrom-Json
+  if ($null -eq $body.$RequiredProperty) {
+    throw "$Path did not include required property '$RequiredProperty'."
+  }
+  return $body
+}
+
 try {
   $env:PORT = $port
   $env:DB_PATH = $dbPath
@@ -55,6 +69,20 @@ try {
         $version = Invoke-RestMethod -Uri "http://127.0.0.1:$port/version" -TimeoutSec 2
         if ([string]::IsNullOrWhiteSpace($version.version) -or [string]::IsNullOrWhiteSpace($version.commit) -or [string]::IsNullOrWhiteSpace($version.builtAt)) {
           throw "Backend /version returned an incomplete payload."
+        }
+
+        $relayHealth = Assert-JsonEndpoint "/relay/health" "status"
+        if ($relayHealth.status -ne "ok") {
+          throw "Backend /relay/health returned status '$($relayHealth.status)'."
+        }
+        $bootstrap = Assert-JsonEndpoint "/bootstrap" "mode"
+        if ($bootstrap.mode -ne "bootstrap") {
+          throw "Backend /bootstrap returned mode '$($bootstrap.mode)'."
+        }
+        $relayPeers = Assert-JsonEndpoint "/relay/peers" "peers"
+        $peers = Assert-JsonEndpoint "/peers" "peers"
+        if ($null -eq $relayPeers.count -or $null -eq $peers.count) {
+          throw "Peer discovery endpoints returned incomplete payloads."
         }
 
         Write-Host "Backend health smoke passed with status: $($health.status)"

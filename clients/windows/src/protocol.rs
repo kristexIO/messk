@@ -77,17 +77,10 @@ impl Envelope {
         Self::new(core_protocol::WIRE_CLEAR_PREKEYS)
     }
 
-    pub fn upload_prekeys(
-        sender_public_key: String,
-        prekeys: Vec<String>,
-        signed_prekey: String,
-        signed_prekey_sig: String,
-    ) -> Self {
+    pub fn upload_prekeys(sender_public_key: String, prekeys: Vec<String>) -> Self {
         Self {
             sender_pub_key: Some(sender_public_key),
             prekeys: Some(prekeys),
-            signed_prekey: Some(signed_prekey),
-            signed_prekey_sig: Some(signed_prekey_sig),
             ..Self::new(core_protocol::WIRE_UPLOAD_PREKEYS)
         }
     }

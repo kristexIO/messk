@@ -1776,22 +1776,7 @@ async fn ensure_prekeys_uploaded(
         return;
     }
 
-    let signed_prekey = match crate::crypto::generate_box_keypair() {
-        Ok(prekey) => prekey.public_key,
-        Err(error) => {
-            send_realtime_event(
-                events,
-                RealtimeEvent::Info(format!("signed prekey generation failed: {error}")),
-            );
-            return;
-        }
-    };
-    let envelope = Envelope::upload_prekeys(
-        identity.public_key.clone(),
-        public_prekeys.clone(),
-        signed_prekey,
-        "native_dummy_sig".to_string(),
-    );
+    let envelope = Envelope::upload_prekeys(identity.public_key.clone(), public_prekeys.clone());
     match send_envelope(socket, &envelope).await {
         Ok(()) => send_realtime_event(
             events,

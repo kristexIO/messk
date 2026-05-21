@@ -10,6 +10,7 @@
 - Run `powershell -ExecutionPolicy Bypass -File scripts/release-build.ps1 -BackendOrigin https://your-production-backend.example` to create release artifacts.
 - Run `powershell -ExecutionPolicy Bypass -File scripts/smoke-check.ps1` from the workspace root before tagging a release.
 - Run `powershell -ExecutionPolicy Bypass -File scripts/backend-health-smoke.ps1` when validating a backend-only deploy.
+- Run `powershell -ExecutionPolicy Bypass -File scripts/production-smoke.ps1 -BackendOrigin https://your-production-backend.example` after DNS and nginx are live.
 - Run `powershell -ExecutionPolicy Bypass -File scripts/docker-check.ps1` before shipping a containerized backend.
 - Use `scripts/deploy-vps.ps1 -KeyFile <ssh-key>` for VPS deploys; `-Password` is only acceptable for one-time bootstrap before key rotation.
 - Confirm `clients/core` tests pass through `scripts/check-all.ps1`; native client protocol changes must not live only in the Windows UI shell.

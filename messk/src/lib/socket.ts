@@ -2099,19 +2099,12 @@ export class SocketManager {
         pubKeysForUpload.push(pkBase64);
       }
       
-      // Generate a stub Signed PreKey
-      const spkPair = box.keyPair();
-      const spkBase64 = encodeBase64(spkPair.publicKey);
-      const spkSig = 'dummy_sig'; // TODO: replace with Ed25519 signature when identity keys are separated
-
       // Save prekeys to DB (clone to avoid in-place mutation)
       await db.prekeys.bulkAdd(newKeys.map(pk => ({ ...pk })));
       this.ws?.send(JSON.stringify({
         type: 'upload_prekeys',
         sender_pub_key: pubKey,
-        prekeys: pubKeysForUpload,
-        signed_prekey: spkBase64,
-        signed_prekey_sig: spkSig
+        prekeys: pubKeysForUpload
       }));
     }
   }

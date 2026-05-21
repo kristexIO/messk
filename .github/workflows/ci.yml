@@ -69,6 +69,8 @@ jobs:
         run: cargo fmt --manifest-path clients/core/Cargo.toml --check
       - name: Core tests
         run: cargo test --manifest-path clients/core/Cargo.toml
+      - name: Core mesh prototype tests
+        run: cargo test --manifest-path clients/core/Cargo.toml --features mesh-prototype
       - name: Core clippy
         run: cargo clippy --manifest-path clients/core/Cargo.toml -- -D warnings
       - name: Windows fmt

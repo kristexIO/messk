@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -596,6 +597,21 @@ func TestPreKeyValidation(t *testing.T) {
 	}
 	if areValidPreKeys([]string{"bad-key"}) {
 		t.Fatal("expected malformed prekey to be rejected")
+	}
+}
+
+func TestSignedPreKeyValidation(t *testing.T) {
+	preKey := base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012"))
+	signature := base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
+
+	if !isValidSignedPreKey(preKey, signature) {
+		t.Fatal("expected signed prekey shape to be accepted")
+	}
+	if isValidSignedPreKey(preKey, "invalid-signature") {
+		t.Fatal("expected placeholder signature to be rejected")
+	}
+	if isValidSignedPreKey("bad-key", signature) {
+		t.Fatal("expected malformed signed prekey to be rejected")
 	}
 }
 

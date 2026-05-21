@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	crypto_rand "crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -306,6 +307,17 @@ func (c *Client) readPump() {
 						continue
 					}
 				}
+				signedPreKey := env.SignedPreKey
+				signedPreKeySig := env.SignedPreKeySig
+				if signedPreKey != "" || signedPreKeySig != "" {
+					if !isValidSignedPreKey(signedPreKey, signedPreKeySig) {
+						logEvent("ws_invalid_signed_prekey", map[string]any{
+							"pub_key": c.PubKey,
+						})
+						signedPreKey = ""
+						signedPreKeySig = ""
+					}
+				}
 				go func() {
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer cancel()
@@ -314,8 +326,8 @@ func (c *Client) readPump() {
 							log.Printf("Error saving prekeys for %s: %v", c.PubKey, err)
 						}
 					}
-					if env.SignedPreKey != "" && env.SignedPreKeySig != "" {
-						if err := c.hub.db.SaveSignedPreKey(ctx, c.PubKey, env.SignedPreKey, env.SignedPreKeySig); err != nil {
+					if signedPreKey != "" && signedPreKeySig != "" {
+						if err := c.hub.db.SaveSignedPreKey(ctx, c.PubKey, signedPreKey, signedPreKeySig); err != nil {
 							log.Printf("Error saving signed prekey for %s: %v", c.PubKey, err)
 						}
 					}
@@ -622,6 +634,14 @@ func areValidPreKeys(preKeys []string) bool {
 		seen[preKey] = struct{}{}
 	}
 	return true
+}
+
+func isValidSignedPreKey(preKey, signature string) bool {
+	if !isValidPublicKey(preKey) {
+		return false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(signature)
+	return err == nil && len(decoded) == ed25519.SignatureSize
 }
 
 func isValidPublicKey(value string) bool {

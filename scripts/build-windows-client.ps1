@@ -37,6 +37,10 @@ if ($RunTests) {
   if ($LASTEXITCODE -ne 0) {
     throw "Shared Rust core tests failed"
   }
+  & cargo test --manifest-path (Join-Path $coreRoot "Cargo.toml") --features mesh-prototype
+  if ($LASTEXITCODE -ne 0) {
+    throw "Shared Rust core mesh prototype tests failed"
+  }
   & cargo test --manifest-path (Join-Path $clientRoot "Cargo.toml")
   if ($LASTEXITCODE -ne 0) {
     throw "Windows client tests failed"
