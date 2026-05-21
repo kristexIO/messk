@@ -1,3 +1,4 @@
+![Status](https://img.shields.io/badge/status-alpha-orange)
 # Messk
 
 [![CI](https://github.com/kristexIO/messk/actions/workflows/ci.yml/badge.svg)](https://github.com/kristexIO/messk/actions/workflows/ci.yml)
