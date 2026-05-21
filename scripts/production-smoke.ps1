@@ -1,6 +1,8 @@
 param(
   [Parameter(Mandatory = $true)]
-  [string]$BackendOrigin
+  [string]$BackendOrigin,
+
+  [string]$ExpectedCommitPrefix = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,6 +49,9 @@ if ($health.status -ne "ok" -and $health.status -ne "degraded") {
 $version = Invoke-JsonEndpoint $origin "/version" "version"
 if ([string]::IsNullOrWhiteSpace($version.commit) -or [string]::IsNullOrWhiteSpace($version.builtAt)) {
   throw "/version returned an incomplete payload."
+}
+if (-not [string]::IsNullOrWhiteSpace($ExpectedCommitPrefix) -and -not $version.commit.StartsWith($ExpectedCommitPrefix)) {
+  throw "/version returned commit '$($version.commit)', expected prefix '$ExpectedCommitPrefix'."
 }
 
 $relayHealth = Invoke-JsonEndpoint $origin "/relay/health" "status"

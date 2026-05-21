@@ -928,4 +928,15 @@ if ($deployExitCode -ne 0) {
   throw "Remote deploy failed"
 }
 
+$publicOrigin = if (-not [string]::IsNullOrWhiteSpace($Domain)) {
+  "https://$Domain"
+} else {
+  "http://$ServerHost"
+}
+
+& (Join-Path $PSScriptRoot "production-smoke.ps1") -BackendOrigin $publicOrigin -ExpectedCommitPrefix $commitSHA
+if ($LASTEXITCODE -ne 0) {
+  throw "Production smoke failed"
+}
+
 Write-Host "Deploy completed successfully."
