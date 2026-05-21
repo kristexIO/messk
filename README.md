@@ -1,4 +1,3 @@
-![Status](https://img.shields.io/badge/status-alpha-orange)
 # Messk
 
 [![CI](https://github.com/kristexIO/messk/actions/workflows/ci.yml/badge.svg)](https://github.com/kristexIO/messk/actions/workflows/ci.yml)
@@ -7,7 +6,7 @@
 ![Native Windows](https://img.shields.io/badge/windows-native%20Rust-orange)
 ![Shared core](https://img.shields.io/badge/core-Rust-111827)
 ![No WebView](https://img.shields.io/badge/client-no%20Electron%2FTauri%2FWebView-111827)
-
+![Status](https://img.shields.io/badge/status-alpha-neonpink)
 Messk is a full-stack end-to-end encrypted messenger built around a simple
 principle: the server routes ciphertext, while clients own identity, message
 plaintext, device state, and local recovery.
