@@ -845,6 +845,7 @@ $remoteDeployScript = (
   Replace("__REMOTE_ARCHIVE__", $remoteArchivePath).
   Replace("__REMOTE_SCRIPT__", $remoteScriptPath).
   Replace("\$", "$")
+$remoteDeployScript = $remoteDeployScript.Replace("`r`n", "`n").Replace("`r", "`n")
 
 $remoteDeployScriptBase64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($remoteDeployScript))
 
