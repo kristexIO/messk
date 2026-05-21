@@ -236,7 +236,7 @@ export const Sidebar: React.FC = () => {
   const workspaceTabs = [
     { id: 'chats' as const, label: t('chats'), accent: 'from-white to-white/70' },
     { id: 'groups' as const, label: t('groups'), accent: 'from-cyan-200 to-sky-300' },
-    { id: 'channels' as const, label: t('channels'), accent: 'from-violet-200 to-fuchsia-200' },
+    { id: 'channels' as const, label: t('channels'), accent: 'from-white to-white/70' },
   ];
 
   const inboxUnreadCount = Object.entries(unreadCounts ?? {}).reduce((total, [pubKey, count]) => {
@@ -568,7 +568,7 @@ export const Sidebar: React.FC = () => {
                   onClick={handleOpenQuickChannel}
                   className="mt-1 flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left text-sm text-white transition-all hover:bg-white/[0.06]"
                 >
-                  <Megaphone className="h-4 w-4 text-violet-200" />
+                  <Megaphone className="h-4 w-4 text-accent" />
                   <div>
                     <div className="font-medium">{t('newChannel')}</div>
                     <div className="text-[11px] text-text-muted">{t('newChannelHint')}</div>
@@ -725,7 +725,7 @@ export const Sidebar: React.FC = () => {
         <div className="mb-4 rounded-[26px] border border-white/8 bg-white/[0.03] p-3">
           <div className="mb-3 flex items-center justify-between px-2">
             <div className="flex items-center gap-2">
-              <Megaphone className="h-4 w-4 text-violet-200" />
+              <Megaphone className="h-4 w-4 text-accent" />
               <span className="text-xs font-semibold uppercase tracking-[0.22em] text-text-muted">{t('channels')}</span>
             </div>
             <button
@@ -773,11 +773,11 @@ export const Sidebar: React.FC = () => {
                   }}
                   className={`flex w-full items-center gap-3 rounded-2xl border px-3 py-3 text-left transition-all ${
                     activeChannelId === channel.id
-                      ? 'border-violet-300/30 bg-violet-300/10'
+                      ? 'border-accent/30 bg-accent/10'
                       : 'border-transparent bg-white/[0.02] hover:border-white/10 hover:bg-white/[0.05]'
                   }`}
                 >
-                  <div className="flex h-11 w-11 items-center justify-center overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-violet-300/20 to-white/5">
+                  <div className="flex h-11 w-11 items-center justify-center overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-accent/20 to-white/5">
                     {channel.avatar ? (
                       <img src={channel.avatar} alt={channel.title} className="h-full w-full object-cover" />
                     ) : (
@@ -792,11 +792,11 @@ export const Sidebar: React.FC = () => {
                     <div className="mt-1 flex items-center gap-2 text-[11px] text-text-muted">
                       <span>{t('subscribersCount', { count: channel.subscriberCount })}</span>
                       <span className="h-1 w-1 rounded-full bg-white/20" />
-                      <span className="uppercase tracking-wide text-violet-200/80">{channel.role}</span>
+                      <span className="uppercase tracking-wide text-accent/80">{channel.role}</span>
                     </div>
                   </div>
                   {(unreadCounts?.[channel.id] ?? 0) > 0 ? (
-                    <span className="rounded-full bg-violet-400 px-2 py-0.5 text-[10px] font-bold text-white">
+                    <span className="rounded-full bg-accent px-2 py-0.5 text-[10px] font-bold text-white">
                       {unreadCounts?.[channel.id]}
                     </span>
                   ) : null}
@@ -998,8 +998,8 @@ export const Sidebar: React.FC = () => {
                       }}
                       className={`rounded-xl p-2 transition-all ${
                         contact.archived
-                          ? 'text-violet-300 opacity-100'
-                          : 'text-text-muted opacity-0 group-hover:opacity-100 hover:text-violet-300'
+                          ? 'text-accent opacity-100'
+                          : 'text-text-muted opacity-0 group-hover:opacity-100 hover:text-accent'
                       }`}
                       title={contact.archived ? t('restoreChat') : t('archiveChat')}
                       aria-label={contact.archived ? t('restoreContact', { name: contact.name }) : t('archiveContact', { name: contact.name })}
@@ -1060,7 +1060,7 @@ export const Sidebar: React.FC = () => {
             <div>{activeWorkspaceTab === 'chats' ? t('visibleChats') : activeWorkspaceTab === 'groups' ? t('visibleGroups') : t('visibleChannels')}</div>
           </div>
           <div className="rounded-2xl bg-white/5 px-3 py-2">
-            <div className={`text-base font-semibold ${activeWorkspaceTab === 'groups' ? 'text-cyan-200' : activeWorkspaceTab === 'channels' ? 'text-violet-200' : 'text-accent'}`}>
+            <div className="text-base font-semibold text-accent">
               {activeWorkspaceTab === 'chats' ? inboxUnreadCount : activeWorkspaceTab === 'groups' ? (groups?.length ?? 0) : (channels?.length ?? 0)}
             </div>
             <div>{activeWorkspaceTab === 'chats' ? t('unread') : activeWorkspaceTab === 'groups' ? t('totalGroups') : t('totalChannels')}</div>

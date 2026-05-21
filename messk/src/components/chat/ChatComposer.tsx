@@ -24,7 +24,6 @@ type ChatComposerProps = {
   onToggleRecording: () => void;
   attachAriaLabel: string;
   sendAriaLabel: string;
-  accentTone?: 'accent' | 'violet';
   onTypingChange?: (nextValue: string) => void;
   replyTarget?: ReplyPreview | null;
   onCancelReply?: () => void;
@@ -51,15 +50,12 @@ export function ChatComposer({
   onToggleRecording,
   attachAriaLabel,
   sendAriaLabel,
-  accentTone = 'accent',
   onTypingChange,
   replyTarget,
   onCancelReply,
 }: ChatComposerProps) {
-  const focusAccentClass =
-    accentTone === 'violet' ? 'focus-within:border-violet-300/40' : 'focus-within:border-accent/40';
-  const voiceHoverClass =
-    accentTone === 'violet' ? 'text-text-muted hover:text-violet-200' : 'text-text-muted hover:text-accent';
+  const focusAccentClass = 'focus-within:border-accent/40';
+  const voiceHoverClass = 'text-text-muted hover:text-accent';
 
   return (
     <form onSubmit={onSubmit} className="mx-auto flex max-w-5xl items-end gap-2 sm:gap-3">

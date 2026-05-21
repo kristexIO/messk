@@ -4327,27 +4327,27 @@ enum MessageAction {
     DeleteLocal(String),
 }
 
-const COL_BG: egui::Color32 = egui::Color32::from_rgb(4, 13, 24);
-const COL_SIDE: egui::Color32 = egui::Color32::from_rgb(8, 28, 49);
-const COL_TOP: egui::Color32 = egui::Color32::from_rgb(13, 32, 53);
-const COL_CHAT: egui::Color32 = egui::Color32::from_rgb(3, 12, 22);
-const COL_PANEL: egui::Color32 = egui::Color32::from_rgb(15, 35, 55);
-const COL_PANEL_SOFT: egui::Color32 = egui::Color32::from_rgb(19, 45, 68);
-const COL_PANEL_HOVER: egui::Color32 = egui::Color32::from_rgb(24, 57, 84);
-const COL_ACTIVE: egui::Color32 = egui::Color32::from_rgb(21, 52, 78);
-const COL_INPUT: egui::Color32 = egui::Color32::from_rgb(9, 19, 32);
-const COL_BUBBLE_IN: egui::Color32 = egui::Color32::from_rgb(18, 43, 66);
-const COL_BUBBLE_OUT: egui::Color32 = egui::Color32::from_rgb(42, 159, 224);
-const COL_BUBBLE_OUT_BORDER: egui::Color32 = egui::Color32::from_rgb(71, 189, 245);
-const COL_BUBBLE_OUT_META: egui::Color32 = egui::Color32::from_rgb(220, 241, 252);
+const COL_BG: egui::Color32 = egui::Color32::from_rgb(14, 22, 33);
+const COL_SIDE: egui::Color32 = egui::Color32::from_rgb(23, 33, 43);
+const COL_TOP: egui::Color32 = egui::Color32::from_rgb(23, 33, 43);
+const COL_CHAT: egui::Color32 = egui::Color32::from_rgb(14, 22, 33);
+const COL_PANEL: egui::Color32 = egui::Color32::from_rgb(23, 33, 43);
+const COL_PANEL_SOFT: egui::Color32 = egui::Color32::from_rgb(27, 39, 51);
+const COL_PANEL_HOVER: egui::Color32 = egui::Color32::from_rgb(32, 46, 60);
+const COL_ACTIVE: egui::Color32 = egui::Color32::from_rgb(34, 52, 71);
+const COL_INPUT: egui::Color32 = egui::Color32::from_rgb(17, 28, 39);
+const COL_BUBBLE_IN: egui::Color32 = egui::Color32::from_rgb(24, 37, 51);
+const COL_BUBBLE_OUT: egui::Color32 = egui::Color32::from_rgb(43, 82, 120);
+const COL_BUBBLE_OUT_BORDER: egui::Color32 = egui::Color32::from_rgb(53, 98, 141);
+const COL_BUBBLE_OUT_META: egui::Color32 = egui::Color32::from_rgb(199, 220, 235);
 const COL_ACCENT: egui::Color32 = egui::Color32::from_rgb(42, 171, 238);
 const COL_DANGER: egui::Color32 = egui::Color32::from_rgb(224, 92, 92);
 const COL_WARN: egui::Color32 = egui::Color32::from_rgb(221, 166, 77);
 const COL_OK: egui::Color32 = egui::Color32::from_rgb(83, 184, 128);
 const COL_TEXT: egui::Color32 = egui::Color32::from_rgb(231, 237, 243);
 const COL_MUTED: egui::Color32 = egui::Color32::from_rgb(143, 161, 179);
-const COL_LINE: egui::Color32 = egui::Color32::from_rgb(31, 55, 78);
-const COL_LINE_STRONG: egui::Color32 = egui::Color32::from_rgb(54, 82, 110);
+const COL_LINE: egui::Color32 = egui::Color32::from_rgb(38, 50, 65);
+const COL_LINE_STRONG: egui::Color32 = egui::Color32::from_rgb(49, 65, 83);
 const SIDEBAR_WIDTH: f32 = 390.0;
 
 fn apply_visuals(ctx: &egui::Context, settings: &storage::StoredAppSettings) {
@@ -5009,11 +5009,7 @@ fn voice_payload_ui(
     } else {
         COL_BUBBLE_OUT_META
     };
-    let panel_fill = if incoming {
-        COL_PANEL_SOFT
-    } else {
-        egui::Color32::from_rgb(71, 139, 189)
-    };
+    let panel_fill = if incoming { COL_PANEL_SOFT } else { COL_ACTIVE };
     let active = playback.is_some_and(|player| player.msg_id() == message.msg_id);
     let paused = playback
         .filter(|player| player.msg_id() == message.msg_id)
@@ -5105,11 +5101,7 @@ fn payload_preview_ui(ui: &mut egui::Ui, payload: &MessagePayloadPreview, incomi
         MessagePayloadKind::Voice => {
             ui.horizontal(|ui| {
                 egui::Frame::new()
-                    .fill(if incoming {
-                        COL_PANEL_SOFT
-                    } else {
-                        egui::Color32::from_rgb(71, 139, 189)
-                    })
+                    .fill(if incoming { COL_PANEL_SOFT } else { COL_ACTIVE })
                     .corner_radius(egui::CornerRadius::same(18))
                     .inner_margin(egui::Margin::symmetric(10, 7))
                     .show(ui, |ui| {
@@ -5185,11 +5177,7 @@ fn encrypted_file_payload_ui(
     } else {
         COL_BUBBLE_OUT_META
     };
-    let panel_fill = if incoming {
-        COL_PANEL_SOFT
-    } else {
-        egui::Color32::from_rgb(71, 139, 189)
-    };
+    let panel_fill = if incoming { COL_PANEL_SOFT } else { COL_ACTIVE };
     let title = preview
         .map(|payload| payload.title.as_str())
         .filter(|value| !value.trim().is_empty())

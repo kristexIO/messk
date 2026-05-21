@@ -1622,7 +1622,7 @@ export const Chat: React.FC = () => {
                       <div className="mb-2 text-sm text-white truncate">{resolveParticipantName(subscriber.subscriberPubKey)}</div>
                       {subscriber.subscriberPubKey !== myPublicKey && subscriber.role !== 'owner' && activeChannel.role === 'owner' ? (
                         <div className="flex flex-wrap gap-2">
-                          <button type="button" onClick={() => void handleUpdateChannelRole(subscriber.subscriberPubKey, 'admin', 'Subscriber promoted to admin.')} className="rounded-lg border border-violet-300/30 bg-violet-300/10 px-2 py-1 text-xs text-white">Make admin</button>
+                          <button type="button" onClick={() => void handleUpdateChannelRole(subscriber.subscriberPubKey, 'admin', 'Subscriber promoted to admin.')} className="rounded-lg border border-accent/30 bg-accent/10 px-2 py-1 text-xs text-white">Make admin</button>
                           <button type="button" onClick={() => void handleUpdateChannelRole(subscriber.subscriberPubKey, 'poster', 'Subscriber can now post to the channel.')} className="rounded-lg border border-cyan-300/30 bg-cyan-300/10 px-2 py-1 text-xs text-cyan-100">Make poster</button>
                           <button type="button" onClick={() => void handleTransferChannelOwner(subscriber.subscriberPubKey)} className="rounded-lg border border-amber-300/30 bg-amber-300/10 px-2 py-1 text-xs text-amber-100">Transfer owner</button>
                         </div>
@@ -1655,7 +1655,7 @@ export const Chat: React.FC = () => {
                     <button type="button" onClick={() => void handleCopyGroupInviteLink()} className="w-full rounded-xl border border-accent/30 bg-accent/10 px-3 py-2 text-left text-sm text-white">Copy group invite link</button>
                   ) : null}
                   {activeChannel && canManageChannelSubscribers ? (
-                    <button type="button" onClick={() => void handleCopyChannelInviteLink()} className="w-full rounded-xl border border-violet-300/30 bg-violet-300/10 px-3 py-2 text-left text-sm text-white">Copy channel invite link</button>
+                    <button type="button" onClick={() => void handleCopyChannelInviteLink()} className="w-full rounded-xl border border-accent/30 bg-accent/10 px-3 py-2 text-left text-sm text-white">Copy channel invite link</button>
                   ) : null}
                   <div className="space-y-2">
                     {inviteLinks.map((link) => (
@@ -1778,7 +1778,7 @@ export const Chat: React.FC = () => {
                         </span>
                       ) : null}
                       {activeContact?.archived ? (
-                        <span className="rounded-full border border-violet-300/20 bg-violet-300/10 px-2 py-0.5 text-[10px] font-medium text-violet-200">
+                        <span className="rounded-full border border-accent/20 bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
                           Archived
                         </span>
                       ) : null}
@@ -1879,7 +1879,7 @@ export const Chat: React.FC = () => {
                   title={activeContact?.archived ? 'Restore chat' : 'Archive chat'}
                   aria-label={activeContact?.archived ? 'Restore chat' : 'Archive chat'}
                 >
-                  <Archive className={`w-5 h-5 ${activeContact?.archived ? 'text-violet-300' : ''}`} />
+                  <Archive className={`w-5 h-5 ${activeContact?.archived ? 'text-accent' : ''}`} />
                 </button>
                 <div className="mx-1 hidden h-6 w-px bg-white/10 sm:mx-2 sm:block" />
                 <button
@@ -2350,7 +2350,7 @@ export const Chat: React.FC = () => {
                   <ArrowLeft className="w-6 h-6" />
                 </button>
                 <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-violet-400/20 to-white/5 border border-white/10 flex items-center justify-center text-white shadow-xl relative overflow-hidden">
+                  <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-accent/20 to-white/5 border border-white/10 flex items-center justify-center text-white shadow-xl relative overflow-hidden">
                     {activeChannel.avatar ? (
                       <img src={activeChannel.avatar} alt={activeChannel.title} className="h-full w-full object-cover" />
                     ) : (
@@ -2359,7 +2359,7 @@ export const Chat: React.FC = () => {
                   </div>
                   <div className="min-w-0">
                     <h2 className="text-base font-bold text-white truncate">{activeChannel.title}</h2>
-                    <p className="text-[11px] text-violet-200 font-medium flex items-center gap-1 opacity-80">
+                    <p className="text-[11px] text-accent font-medium flex items-center gap-1 opacity-80">
                       <Megaphone className="w-3.5 h-3.5" /> {activeChannel.subscriberCount} subscribers
                     </p>
                   </div>
@@ -2376,7 +2376,7 @@ export const Chat: React.FC = () => {
                     Room settings
                   </button>
                 ) : null}
-                <div className="inline-flex items-center gap-2 rounded-full border border-violet-300/20 bg-violet-300/10 px-3 py-1.5 text-xs font-medium text-violet-100">
+                <div className="inline-flex items-center gap-2 rounded-full border border-accent/20 bg-accent/10 px-3 py-1.5 text-xs font-medium text-white">
                   <Crown className="h-3.5 w-3.5" />
                   {activeChannel?.role}
                 </div>
@@ -2386,12 +2386,12 @@ export const Chat: React.FC = () => {
             <div className="grid flex-1 overflow-hidden lg:grid-cols-[minmax(0,1fr)_340px]">
               <div className="flex min-h-0 flex-col">
                 {pinnedChannelMessage && !pinnedChannelMessage.deletedAt ? (
-                  <div className="mx-6 mt-4 rounded-2xl border border-violet-300/20 bg-violet-300/10 px-4 py-3 text-sm text-violet-50">
+                  <div className="mx-6 mt-4 rounded-2xl border border-accent/20 bg-accent/10 px-4 py-3 text-sm text-white">
                     <div className="flex items-center gap-2 font-medium">
                       <Pin className="h-4 w-4" />
                       Pinned post
                     </div>
-                    <div className="mt-1 text-xs text-violet-100/80">
+                    <div className="mt-1 text-xs text-white/80">
                       {pinnedChannelMessage.text.startsWith('{"type":"file"')
                         ? 'Attachment'
                         : pinnedChannelMessage.text.startsWith('{"type":"voice"')
@@ -2423,7 +2423,7 @@ export const Chat: React.FC = () => {
                       <React.Fragment key={msg.msgId}>
                         {firstUnreadMessageId === msg.msgId ? (
                           <div className="sticky top-2 z-10 flex justify-center">
-                            <div className="rounded-full border border-violet-300/30 bg-slate-950/85 px-3 py-1 text-xs font-medium text-violet-100 shadow-lg backdrop-blur">
+                            <div className="rounded-full border border-accent/30 bg-slate-950/85 px-3 py-1 text-xs font-medium text-white shadow-lg backdrop-blur">
                               New posts
                             </div>
                           </div>
@@ -2458,7 +2458,7 @@ export const Chat: React.FC = () => {
                     ))
                   ) : (
                     <div className="empty-thread-card h-full flex flex-col items-center justify-center text-center">
-                      <Megaphone className="w-16 h-16 mb-4 text-violet-200" />
+                      <Megaphone className="w-16 h-16 mb-4 text-accent" />
                       <h3 className="text-lg font-medium">Channel is ready</h3>
                       <p className="text-sm max-w-[320px] mt-1">
                         {canPostInChannel
@@ -2492,7 +2492,6 @@ export const Chat: React.FC = () => {
                       onToggleRecording={() => void (isRecording ? stopRecording() : startRecording())}
                       attachAriaLabel="Attach file to channel"
                       sendAriaLabel="Publish channel post"
-                      accentTone="violet"
                       replyTarget={replyTarget}
                       onCancelReply={() => setReplyTarget(null)}
                     />
@@ -2514,7 +2513,7 @@ export const Chat: React.FC = () => {
                       <button
                         type="button"
                         onClick={() => void handleCopyChannelInviteLink()}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-violet-300/25 bg-violet-300/10 px-2.5 py-1 text-[11px] font-medium text-white transition-all hover:border-violet-300/45 hover:bg-violet-300/20"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-accent/25 bg-accent/10 px-2.5 py-1 text-[11px] font-medium text-white transition-all hover:border-accent/45 hover:bg-accent/20"
                       >
                         <Link2 className="h-3.5 w-3.5" />
                         Copy link
@@ -2524,12 +2523,12 @@ export const Chat: React.FC = () => {
                       value={channelSubscriberInput}
                       onChange={(e) => setChannelSubscriberInput(e.target.value)}
                       placeholder="Paste public key"
-                      className="mt-3 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs outline-none transition-all focus:border-violet-300/40"
+                      className="mt-3 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs outline-none transition-all focus:border-accent/40"
                     />
                     <button
                       type="submit"
                       disabled={isAddingSubscriber || !channelSubscriberInput.trim()}
-                      className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-violet-300/30 bg-violet-300/10 px-3 py-2 text-xs font-medium text-white transition-all hover:border-violet-300/50 hover:bg-violet-300/20 disabled:opacity-50"
+                      className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-accent/30 bg-accent/10 px-3 py-2 text-xs font-medium text-white transition-all hover:border-accent/50 hover:bg-accent/20 disabled:opacity-50"
                     >
                       <UserPlus className="h-4 w-4" />
                       {isAddingSubscriber ? 'Adding...' : 'Add subscriber'}
@@ -2576,7 +2575,7 @@ export const Chat: React.FC = () => {
                                   type="button"
                                   onClick={() => void handleUpdateChannelRole(subscriber.subscriberPubKey, 'admin', 'Subscriber promoted to admin.')}
                                   disabled={subscriberActionPubKey === subscriber.subscriberPubKey}
-                                  className="inline-flex items-center gap-2 rounded-xl border border-violet-300/30 bg-violet-300/10 px-3 py-2 text-xs text-white transition-all hover:border-violet-300/50 hover:bg-violet-300/20 disabled:opacity-50"
+                                  className="inline-flex items-center gap-2 rounded-xl border border-accent/30 bg-accent/10 px-3 py-2 text-xs text-white transition-all hover:border-accent/50 hover:bg-accent/20 disabled:opacity-50"
                                 >
                                   <Shield className="h-3.5 w-3.5" />
                                   Promote to admin

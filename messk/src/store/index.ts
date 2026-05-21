@@ -4,9 +4,9 @@ import { clearRememberedIdentity, getStoredPinHash, hasRememberedIdentity, persi
 import { prepareDatabaseForIdentity } from '../lib/db';
 import { SETTINGS_STORAGE_KEY } from '../lib/storage';
 
-export type Theme = 'system' | 'dark' | 'light' | 'cyberpunk' | 'forest';
-export type DesignStyle = 'glass' | 'neumorph' | 'telegram';
-export type UiMode = 'classic' | 'next';
+export type Theme = 'system' | 'dark' | 'light' | 'forest';
+export type DesignStyle = 'telegram';
+export type UiMode = 'classic';
 export type Language = 'en' | 'ru' | 'fr' | 'de';
 export type FontSize = 'small' | 'normal' | 'large';
 export type InterfaceDensity = 'compact' | 'comfortable';
@@ -90,15 +90,17 @@ const normalizeLanguage = (value: unknown): Language => {
 };
 
 const normalizeTheme = (value: unknown): Theme => {
-  return value === 'system' || value === 'light' || value === 'cyberpunk' || value === 'forest' || value === 'dark' ? value : 'dark';
+  return value === 'system' || value === 'light' || value === 'forest' || value === 'dark' ? value : 'dark';
 };
 
 const normalizeDesignStyle = (value: unknown): DesignStyle => {
-  return value === 'neumorph' || value === 'telegram' || value === 'glass' ? value : 'glass';
+  void value;
+  return 'telegram';
 };
 
 const normalizeUiMode = (value: unknown): UiMode => {
-  return value === 'next' || value === 'classic' ? value : 'classic';
+  void value;
+  return 'classic';
 };
 
 const normalizeFontSize = (value: unknown): FontSize => {

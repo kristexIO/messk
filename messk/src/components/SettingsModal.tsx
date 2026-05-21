@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useAppStore } from '../store';
-import type { DesignStyle, FontSize, InterfaceDensity, Language, Theme, UiMode } from '../store';
-import { X, User, Palette, Shield, LogOut, Camera, Lock, Download, Upload, Database, PhoneCall, PhoneIncoming, PhoneOutgoing, PhoneMissed, Layers } from 'lucide-react';
+import type { FontSize, InterfaceDensity, Language, Theme } from '../store';
+import { X, User, Palette, Shield, LogOut, Camera, Lock, Download, Upload, Database, PhoneCall, PhoneIncoming, PhoneOutgoing, PhoneMissed } from 'lucide-react';
 import { socketManager } from '../lib/socket';
 import { db, getDatabaseNameForIdentity } from '../lib/db';
 import { useLiveQuery } from 'dexie-react-hooks';
@@ -31,8 +31,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     interfaceDensity,
     autoLockMinutes,
     setTheme,
-    setDesignStyle,
-    setUiMode,
     setFontSize,
     setInterfaceDensity,
     setAutoLockMinutes,
@@ -363,7 +361,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
   const themes: { id: Theme; name: string; color: string }[] = [
     { id: 'system', name: 'System', color: 'settings-theme-system' },
     { id: 'dark', name: 'Slate', color: 'bg-[#17212b]' },
-    { id: 'cyberpunk', name: 'Violet', color: 'bg-[#4c4176]' },
     { id: 'forest', name: 'Pine', color: 'bg-[#276747]' },
     { id: 'light', name: 'Cloud', color: 'bg-[#f5f8fb]' },
   ];
@@ -372,30 +369,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     { id: 'ru', code: 'RU', label: t('russian') },
     { id: 'fr', code: 'FR', label: t('french') },
     { id: 'de', code: 'DE', label: t('german') },
-  ];
-  const designStyles: { id: DesignStyle; name: string; description: string; previewClass: string }[] = [
-    {
-      id: 'glass',
-      name: 'Glassmorphism',
-      description: 'Blurred translucent panels',
-      previewClass: 'settings-preview-glass',
-    },
-    {
-      id: 'neumorph',
-      name: 'Neumorphism',
-      description: 'Soft inset and raised surfaces',
-      previewClass: 'settings-preview-neumorph',
-    },
-    {
-      id: 'telegram',
-      name: 'Telegram Flow',
-      description: 'Deep blue navigation and compact chat bubbles',
-      previewClass: 'settings-preview-telegram',
-    },
-  ];
-  const uiModes: { id: UiMode; name: string; description: string }[] = [
-    { id: 'classic', name: 'Classic UI', description: 'Strict compact messenger layout' },
-    { id: 'next', name: 'Next UI', description: 'Expressive glass layout with larger hierarchy' },
   ];
   const fontSizes: { id: FontSize; name: string }[] = [
     { id: 'small', name: 'Small' },
@@ -567,23 +540,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                 </button>
               ))}
             </div>
-            <div className="space-y-2">
-              <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Interface mode</div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {uiModes.map((mode) => (
-                  <button
-                    key={mode.id}
-                    onClick={() => setUiMode(mode.id)}
-                    className={`settings-choice rounded-2xl p-4 text-left transition-all ${
-                      uiMode === mode.id ? 'is-active' : ''
-                    }`}
-                  >
-                    <div className="text-sm font-semibold">{mode.name}</div>
-                    <div className="mt-1 text-xs text-text-muted">{mode.description}</div>
-                  </button>
-                ))}
-              </div>
-            </div>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div className="settings-card rounded-2xl p-4">
                 <div className="mb-3 text-xs uppercase tracking-[0.22em] text-text-muted">Font size</div>
@@ -617,33 +573,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                 </div>
               </div>
             </div>
-            {uiMode === 'next' ? (
-            <div className="space-y-2">
-              <div className="text-xs uppercase tracking-[0.22em] text-text-muted flex items-center gap-2">
-                <Layers className="w-3.5 h-3.5" />
-                {t('surfaceStyle')}
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                {designStyles.map((style) => (
-                  <button
-                    key={style.id}
-                    onClick={() => setDesignStyle(style.id)}
-                    className={`settings-choice rounded-2xl p-4 text-left transition-all ${
-                      designStyle === style.id ? 'is-active' : ''
-                    }`}
-                  >
-                    <div className={`settings-design-preview ${style.previewClass}`} aria-hidden="true">
-                      <span />
-                      <span />
-                      <span />
-                    </div>
-                    <div className="text-sm font-semibold">{style.name}</div>
-                    <div className="mt-1 text-xs text-text-muted">{style.description}</div>
-                  </button>
-                ))}
-              </div>
-            </div>
-            ) : null}
           </section>
 
           <section className="space-y-4">
@@ -662,7 +591,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
               </div>
               <div className="settings-card rounded-2xl p-4">
                 <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Archived</div>
-                <div className="mt-2 text-xl font-semibold text-violet-200">{archivedChatCount}</div>
+                <div className="mt-2 text-xl font-semibold text-accent">{archivedChatCount}</div>
               </div>
               <div className="settings-card rounded-2xl p-4">
                 <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Groups</div>
@@ -680,7 +609,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="text-xs uppercase tracking-[0.22em] text-text-muted">Owned channels</div>
-                    <div className="mt-2 text-xl font-semibold text-violet-200">{ownedChannelCount}</div>
+                    <div className="mt-2 text-xl font-semibold text-accent">{ownedChannelCount}</div>
                   </div>
                 <div className="max-w-[220px] text-right text-xs leading-5 text-text-muted">
                   Overview cards moved here so the sidebar can stay focused on navigation and creation.

@@ -286,7 +286,7 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 }
 
 function isTheme(value: unknown): value is Theme {
-  return value === 'system' || value === 'dark' || value === 'light' || value === 'cyberpunk' || value === 'forest';
+  return value === 'system' || value === 'dark' || value === 'light' || value === 'forest';
 }
 
 function isMessageStatus(value: unknown): value is StoredMessage['status'] {
