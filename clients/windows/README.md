@@ -22,6 +22,7 @@ Current milestone:
 - Optional Windows startup registration through the current user's Run key.
 - Native window/taskbar icon.
 - Portable install/uninstall scripts included in release packages.
+- Visible client version metadata in the native UI.
 - Identity seed persistence through Windows DPAPI, scoped to the current OS user.
 - Panic reset for local identity, sessions, prekeys, messages, and outbox.
 

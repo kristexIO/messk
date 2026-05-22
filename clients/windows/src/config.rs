@@ -1,4 +1,5 @@
 pub const APP_NAME: &str = "Messk";
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const CLIENT_STATE_VERSION: &str = "clean_20260511";
 pub const DEFAULT_BACKEND_ORIGIN: &str = "https://messk.online";
 

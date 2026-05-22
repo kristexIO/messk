@@ -3185,7 +3185,17 @@ impl MesskApp {
                                     .strong()
                                     .color(COL_TEXT),
                             );
-                            connection_chip(ui, &self.realtime_status);
+                            ui.horizontal(|ui| {
+                                connection_chip(ui, &self.realtime_status);
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Windows v{}",
+                                        config::APP_VERSION
+                                    ))
+                                    .size(10.0)
+                                    .color(COL_MUTED),
+                                );
+                            });
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if icon_button(ui, "Exit").clicked() {
