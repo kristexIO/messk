@@ -71,6 +71,9 @@ pub struct OutboxMessage {
     pub plaintext: String,
     pub attempts: u32,
     pub last_error: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub next_retry_at_ms: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -877,7 +880,7 @@ impl LocalStore {
         let conn = self.connection()?;
         let mut statement = conn.prepare(
             r#"
-            SELECT msg_id, recipient_pub_key, plaintext, attempts, last_error
+            SELECT msg_id, recipient_pub_key, plaintext, attempts, last_error, created_at_ms, updated_at_ms
             FROM outbox
             WHERE account_pub_key = ?1
               AND (?3 - updated_at_ms) >= CASE
@@ -894,14 +897,50 @@ impl LocalStore {
         let rows =
             statement.query_map(params![account_public_key, limit as i64, now_ms()], |row| {
                 let attempts = row.get::<_, i64>(3)?.max(0) as u32;
+                let updated_at_ms = row.get(6)?;
                 Ok(OutboxMessage {
                     msg_id: row.get(0)?,
                     recipient_public_key: row.get(1)?,
                     plaintext: row.get(2)?,
                     attempts,
                     last_error: row.get(4)?,
+                    created_at_ms: row.get(5)?,
+                    updated_at_ms,
+                    next_retry_at_ms: updated_at_ms + outbox_retry_delay_ms(attempts),
                 })
             })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn list_outbox_preview(
+        &self,
+        account_public_key: &str,
+        limit: usize,
+    ) -> Result<Vec<OutboxMessage>> {
+        let conn = self.connection()?;
+        let mut statement = conn.prepare(
+            r#"
+            SELECT msg_id, recipient_pub_key, plaintext, attempts, last_error, created_at_ms, updated_at_ms
+            FROM outbox
+            WHERE account_pub_key = ?1
+            ORDER BY updated_at_ms DESC, created_at_ms ASC
+            LIMIT ?2
+            "#,
+        )?;
+        let rows = statement.query_map(params![account_public_key, limit as i64], |row| {
+            let attempts = row.get::<_, i64>(3)?.max(0) as u32;
+            let updated_at_ms = row.get(6)?;
+            Ok(OutboxMessage {
+                msg_id: row.get(0)?,
+                recipient_public_key: row.get(1)?,
+                plaintext: row.get(2)?,
+                attempts,
+                last_error: row.get(4)?,
+                created_at_ms: row.get(5)?,
+                updated_at_ms,
+                next_retry_at_ms: updated_at_ms + outbox_retry_delay_ms(attempts),
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -1273,6 +1312,16 @@ fn clamp_font_scale(value: f32) -> f32 {
     value.clamp(0.9, 1.2)
 }
 
+fn outbox_retry_delay_ms(attempts: u32) -> i64 {
+    match attempts {
+        0 | 1 => 0,
+        2 => 5_000,
+        3 => 15_000,
+        4 => 60_000,
+        _ => 300_000,
+    }
+}
+
 fn default_store_path() -> Result<PathBuf> {
     if let Some(appdata) = env::var_os("APPDATA") {
         return Ok(PathBuf::from(appdata).join("Messk").join("state.sqlite"));
@@ -1409,6 +1458,21 @@ mod tests {
             .enqueue_outbox("account", "m1", &peer.public_key, "hello")
             .unwrap();
         assert_eq!(store.list_outbox("account", 10).unwrap().len(), 1);
+        let queued = store.list_outbox_preview("account", 10).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].msg_id, "m1");
+        assert_eq!(queued[0].recipient_public_key, peer.public_key);
+        assert_eq!(queued[0].plaintext, "hello");
+        assert_eq!(queued[0].attempts, 0);
+        assert!(queued[0].created_at_ms > 0);
+        assert!(queued[0].updated_at_ms > 0);
+        assert_eq!(queued[0].next_retry_at_ms, queued[0].updated_at_ms);
+        store
+            .mark_outbox_attempt("account", "m1", Some("network down"))
+            .unwrap();
+        let queued = store.list_outbox_preview("account", 10).unwrap();
+        assert_eq!(queued[0].attempts, 1);
+        assert_eq!(queued[0].last_error.as_deref(), Some("network down"));
         store.delete_outbox("account", "m1").unwrap();
         assert!(store.list_outbox("account", 10).unwrap().is_empty());
         store.delete_message("account", "m1").unwrap();

@@ -171,6 +171,7 @@ pub struct MesskApp {
     contacts: HashMap<String, ContactAlias>,
     pinned_message_ids: HashSet<String>,
     outbox_count: usize,
+    outbox_preview: Vec<storage::OutboxMessage>,
     realtime_tasks: Vec<JoinHandle<()>>,
     logs: Vec<String>,
 }
@@ -242,6 +243,7 @@ impl MesskApp {
             contacts: HashMap::new(),
             pinned_message_ids: HashSet::new(),
             outbox_count: 0,
+            outbox_preview: Vec::new(),
             realtime_tasks: Vec::new(),
             logs: vec!["Messk native client booted.".to_string(), store_log],
         };
@@ -1894,6 +1896,7 @@ impl MesskApp {
         self.profile_public_key.clear();
         self.profile_display_name.clear();
         self.outbox_count = 0;
+        self.outbox_preview.clear();
         self.logs.push("local identity forgotten".to_string());
     }
 
@@ -1940,6 +1943,7 @@ impl MesskApp {
         self.profile_public_key.clear();
         self.profile_display_name.clear();
         self.outbox_count = 0;
+        self.outbox_preview.clear();
         self.realtime_status = "offline".to_string();
     }
 
@@ -1958,9 +1962,13 @@ impl MesskApp {
     fn refresh_account_stats(&mut self) {
         let (Some(store), Some(identity)) = (&self.store, &self.identity) else {
             self.outbox_count = 0;
+            self.outbox_preview.clear();
             return;
         };
         self.outbox_count = store.outbox_count(&identity.public_key).unwrap_or_default();
+        self.outbox_preview = store
+            .list_outbox_preview(&identity.public_key, 5)
+            .unwrap_or_default();
     }
 
     fn set_message_status(&mut self, msg_id: &str, status: &str) {
@@ -3308,6 +3316,17 @@ impl MesskApp {
                                     },
                                 );
                             });
+                            if !self.outbox_preview.is_empty() {
+                                ui.add_space(10.0);
+                                for queued in self.outbox_preview.iter().take(3) {
+                                    outbox_queue_row(
+                                        ui,
+                                        &self.contact_title(&queued.recipient_public_key),
+                                        queued,
+                                    );
+                                    ui.add_space(6.0);
+                                }
+                            }
                         });
                 });
             }
@@ -4586,6 +4605,78 @@ fn metric_box(ui: &mut egui::Ui, value: String, label: &str) {
         });
 }
 
+fn outbox_queue_row(ui: &mut egui::Ui, title: &str, message: &storage::OutboxMessage) {
+    egui::Frame::new()
+        .fill(COL_PANEL_SOFT)
+        .stroke(egui::Stroke::new(1.0, COL_LINE))
+        .corner_radius(egui::CornerRadius::same(7))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(292.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(trim_line(title, 24))
+                        .size(12.0)
+                        .strong()
+                        .color(COL_TEXT),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format_retry_due(message.next_retry_at_ms))
+                            .size(10.0)
+                            .color(if message.next_retry_at_ms <= app_now_ms() {
+                                COL_OK
+                            } else {
+                                COL_WARN
+                            }),
+                    );
+                });
+            });
+            ui.add_space(3.0);
+            ui.label(
+                egui::RichText::new(trim_line(&display_message_text(&message.plaintext), 42))
+                    .size(11.0)
+                    .color(COL_MUTED),
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("attempts {}", message.attempts))
+                        .size(10.0)
+                        .color(COL_MUTED),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "queued {}",
+                        format_activity_time(message.created_at_ms)
+                    ))
+                    .size(10.0)
+                    .color(COL_MUTED),
+                );
+                if message.attempts > 0 {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "last try {}",
+                            format_activity_time(message.updated_at_ms)
+                        ))
+                        .size(10.0)
+                        .color(COL_MUTED),
+                    );
+                }
+                if let Some(error) = &message.last_error {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(trim_line(error, 28))
+                            .size(10.0)
+                            .color(COL_WARN),
+                    );
+                }
+            });
+        });
+}
+
 fn primary_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(primary_button_widget(text))
 }
@@ -5415,6 +5506,17 @@ fn format_activity_time(timestamp_ms: i64) -> String {
     } else {
         format!("{}d", elapsed_ms / day_ms)
     }
+}
+
+fn format_retry_due(timestamp_ms: i64) -> String {
+    let remaining_ms = timestamp_ms.saturating_sub(app_now_ms());
+    if remaining_ms == 0 {
+        return "ready".to_string();
+    }
+    if remaining_ms < 60_000 {
+        return format!("retry in {}s", (remaining_ms + 999) / 1000);
+    }
+    format!("retry in {}m", (remaining_ms + 59_999) / 60_000)
 }
 
 fn app_now_ms() -> i64 {

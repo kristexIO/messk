@@ -17,11 +17,11 @@ Current milestone:
 - Retry backoff for queued direct messages after network/server errors.
 - Persisted one-time prekeys with safe server upload and stale prekey cleanup.
 - Periodic outbox flush while realtime is connected.
+- Visible retry outbox with queued message previews, attempts, last error, and next retry timing.
+- Contact list and chat start by public key or @username.
 - Identity seed persistence through Windows DPAPI, scoped to the current OS user.
 - Panic reset for local identity, sessions, prekeys, messages, and outbox.
 
 Next milestones:
 
-- Richer delivery history for the retry outbox.
-- Contact list and chat start by username.
 - Native notifications, tray, auto-start, and installer.
