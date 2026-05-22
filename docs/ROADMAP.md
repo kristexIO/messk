@@ -49,6 +49,8 @@ Exit criteria:
 ## Phase 4: Groups, Channels, Profiles
 
 - Add room metadata contract with roles and permissions.
+- Keep the Windows local room surface usable: room list, create/edit, pin, mute,
+  delete, and profile panel for groups/channels.
 - Implement member list, invites, join requests, pinned messages, and mute state.
 - Show avatars for contacts, groups, and channels.
 - Add safety number, key-change warning, and contact profile view parity.
@@ -56,6 +58,7 @@ Exit criteria:
 Exit criteria:
 
 - Groups and channels are not placeholders in Windows.
+- Windows local room state persists per account.
 - Room permissions are enforced by backend tests and reflected in UI.
 
 ## Phase 5: Production Hardening

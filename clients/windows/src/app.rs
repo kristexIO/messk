@@ -108,6 +108,19 @@ struct ContactAlias {
 }
 
 #[derive(Debug, Clone)]
+struct RoomSummary {
+    room_id: String,
+    kind: String,
+    title: String,
+    avatar: String,
+    role: String,
+    muted: bool,
+    pinned: bool,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone)]
 struct ReplyDraft {
     msg_id: String,
     preview: String,
@@ -170,8 +183,19 @@ pub struct MesskApp {
     show_contact_profile: bool,
     profile_public_key: String,
     profile_display_name: String,
+    show_room_editor: bool,
+    room_editor_id: String,
+    room_editor_kind: String,
+    room_editor_title: String,
+    room_editor_avatar: String,
+    room_editor_role: String,
+    room_editor_muted: bool,
+    room_editor_pinned: bool,
+    room_editor_status: String,
     messages: Vec<ChatLine>,
     contacts: HashMap<String, ContactAlias>,
+    rooms: Vec<RoomSummary>,
+    selected_room_id: String,
     pinned_message_ids: HashSet<String>,
     outbox_count: usize,
     outbox_preview: Vec<storage::OutboxMessage>,
@@ -243,8 +267,19 @@ impl MesskApp {
             show_contact_profile: false,
             profile_public_key: String::new(),
             profile_display_name: String::new(),
+            show_room_editor: false,
+            room_editor_id: String::new(),
+            room_editor_kind: "group".to_string(),
+            room_editor_title: String::new(),
+            room_editor_avatar: String::new(),
+            room_editor_role: String::new(),
+            room_editor_muted: false,
+            room_editor_pinned: false,
+            room_editor_status: String::new(),
             messages: Vec::new(),
             contacts: HashMap::new(),
+            rooms: Vec::new(),
+            selected_room_id: String::new(),
             pinned_message_ids: HashSet::new(),
             outbox_count: 0,
             outbox_preview: Vec::new(),
@@ -704,6 +739,7 @@ impl MesskApp {
         }
         self.load_messages_for_identity(&identity.public_key);
         self.load_contacts_for_identity(&identity.public_key);
+        self.load_rooms_for_identity(&identity.public_key);
         self.identity = Some(identity);
         self.pending_identity = None;
         self.seed_confirmation_input.clear();
@@ -736,6 +772,7 @@ impl MesskApp {
                 self.persist_identity(&identity);
                 self.load_messages_for_identity(&identity.public_key);
                 self.load_contacts_for_identity(&identity.public_key);
+                self.load_rooms_for_identity(&identity.public_key);
                 self.load_profile_for_identity(&identity.public_key);
                 self.identity = Some(identity);
                 if self.profile_nickname.trim().is_empty() {
@@ -1667,6 +1704,38 @@ impl MesskApp {
         }
     }
 
+    fn load_rooms_for_identity(&mut self, account_public_key: &str) {
+        let Some(store) = &self.store else {
+            self.rooms.clear();
+            self.selected_room_id.clear();
+            return;
+        };
+        let mut rooms = Vec::new();
+        for kind in ["group", "channel"] {
+            match store.list_rooms(account_public_key, kind) {
+                Ok(mut loaded) => rooms.append(&mut loaded),
+                Err(error) => self.logs.push(format!("{kind} load error: {error}")),
+            }
+        }
+        self.rooms = rooms
+            .into_iter()
+            .map(|room| RoomSummary {
+                room_id: room.room_id,
+                kind: room.kind,
+                title: room.title,
+                avatar: room.avatar,
+                role: room.role,
+                muted: room.muted,
+                pinned: room.pinned,
+                created_at_ms: room.created_at_ms,
+                updated_at_ms: room.updated_at_ms,
+            })
+            .collect();
+        if let Some(kind) = workspace_kind(self.active_workspace) {
+            self.select_first_room_if_needed(kind);
+        }
+    }
+
     fn load_profile_for_identity(&mut self, account_public_key: &str) {
         let Some(store) = &self.store else {
             return;
@@ -1847,6 +1916,250 @@ impl MesskApp {
         self.show_new_chat = false;
     }
 
+    fn switch_workspace(&mut self, workspace: usize) {
+        self.active_workspace = workspace.min(2);
+        if let Some(kind) = workspace_kind(self.active_workspace) {
+            self.select_first_room_if_needed(kind);
+            self.reply_draft = None;
+            self.edit_draft = None;
+            self.message_search.clear();
+            self.show_message_search = false;
+            self.call_status.clear();
+            self.pending_call = None;
+            self.active_call = None;
+            self.voice_playback = None;
+            if let Some(recorder) = self.voice_recorder.take() {
+                recorder.cancel();
+            }
+            self.voice_status.clear();
+        }
+    }
+
+    fn open_room_editor_for_workspace(&mut self) {
+        let Some(kind) = workspace_kind(self.active_workspace) else {
+            return;
+        };
+        self.room_editor_id.clear();
+        self.room_editor_kind = kind.to_string();
+        self.room_editor_title.clear();
+        self.room_editor_avatar.clear();
+        self.room_editor_role = default_room_role(kind).to_string();
+        self.room_editor_muted = false;
+        self.room_editor_pinned = false;
+        self.room_editor_status.clear();
+        self.show_room_editor = true;
+    }
+
+    fn open_room_editor_for_selected(&mut self) {
+        let Some(room) = self.selected_room().cloned() else {
+            self.open_room_editor_for_workspace();
+            return;
+        };
+        self.room_editor_id = room.room_id;
+        self.room_editor_kind = room.kind;
+        self.room_editor_title = room.title;
+        self.room_editor_avatar = room.avatar;
+        self.room_editor_role = room.role;
+        self.room_editor_muted = room.muted;
+        self.room_editor_pinned = room.pinned;
+        self.room_editor_status.clear();
+        self.show_room_editor = true;
+    }
+
+    fn save_room_editor(&mut self) {
+        let Some(account_public_key) = self
+            .identity
+            .as_ref()
+            .map(|identity| identity.public_key.clone())
+        else {
+            self.room_editor_status = "Identity is missing".to_string();
+            return;
+        };
+        let title = self.room_editor_title.trim().to_string();
+        if title.is_empty() {
+            self.room_editor_status = "Name is required".to_string();
+            return;
+        }
+        let kind = if matches!(self.room_editor_kind.as_str(), "group" | "channel") {
+            self.room_editor_kind.clone()
+        } else {
+            "group".to_string()
+        };
+        let existing = self
+            .rooms
+            .iter()
+            .find(|room| room.room_id == self.room_editor_id)
+            .cloned();
+        let now = app_now_ms();
+        let room_id = if self.room_editor_id.trim().is_empty() {
+            format!("{kind}-{}", Uuid::new_v4())
+        } else {
+            self.room_editor_id.trim().to_string()
+        };
+        let role = self.room_editor_role.trim().to_string();
+        let role = if role.is_empty() {
+            default_room_role(&kind).to_string()
+        } else {
+            role
+        };
+        let room = storage::StoredRoom {
+            room_id: room_id.clone(),
+            kind: kind.clone(),
+            title: title.clone(),
+            avatar: self.room_editor_avatar.trim().to_string(),
+            role,
+            muted: self.room_editor_muted,
+            pinned: self.room_editor_pinned,
+            created_at_ms: existing
+                .as_ref()
+                .map(|room| room.created_at_ms)
+                .unwrap_or(now),
+            updated_at_ms: now,
+        };
+        if let Some(store) = &self.store
+            && let Err(error) = store.save_room(&account_public_key, &room)
+        {
+            self.room_editor_status = format!("Save failed: {error}");
+            return;
+        }
+        let summary = RoomSummary {
+            room_id: room.room_id,
+            kind: room.kind,
+            title: room.title,
+            avatar: room.avatar,
+            role: room.role,
+            muted: room.muted,
+            pinned: room.pinned,
+            created_at_ms: room.created_at_ms,
+            updated_at_ms: room.updated_at_ms,
+        };
+        if let Some(existing) = self
+            .rooms
+            .iter_mut()
+            .find(|room| room.room_id == summary.room_id)
+        {
+            *existing = summary;
+        } else {
+            self.rooms.push(summary);
+        }
+        self.selected_room_id = room_id;
+        self.sort_rooms();
+        self.show_room_editor = false;
+        self.room_editor_status.clear();
+        self.logs.push(format!("{} saved", room_kind_label(&kind)));
+    }
+
+    fn toggle_selected_room_mute(&mut self) {
+        let Some(room) = self.selected_room().cloned() else {
+            return;
+        };
+        let muted = !room.muted;
+        if let (Some(store), Some(identity)) = (&self.store, &self.identity)
+            && let Err(error) = store.set_room_muted(&identity.public_key, &room.room_id, muted)
+        {
+            self.logs.push(format!("room mute error: {error}"));
+            return;
+        }
+        if let Some(existing) = self
+            .rooms
+            .iter_mut()
+            .find(|existing| existing.room_id == room.room_id)
+        {
+            existing.muted = muted;
+            existing.updated_at_ms = app_now_ms();
+        }
+        self.logs.push(if muted {
+            "room muted".to_string()
+        } else {
+            "room unmuted".to_string()
+        });
+    }
+
+    fn toggle_selected_room_pin(&mut self) {
+        let Some(room) = self.selected_room().cloned() else {
+            return;
+        };
+        let pinned = !room.pinned;
+        if let (Some(store), Some(identity)) = (&self.store, &self.identity)
+            && let Err(error) = store.set_room_pinned(&identity.public_key, &room.room_id, pinned)
+        {
+            self.logs.push(format!("room pin error: {error}"));
+            return;
+        }
+        if let Some(existing) = self
+            .rooms
+            .iter_mut()
+            .find(|existing| existing.room_id == room.room_id)
+        {
+            existing.pinned = pinned;
+            existing.updated_at_ms = app_now_ms();
+        }
+        self.sort_rooms();
+        self.logs.push(if pinned {
+            "room pinned".to_string()
+        } else {
+            "room unpinned".to_string()
+        });
+    }
+
+    fn delete_selected_room(&mut self) {
+        let Some(room) = self.selected_room().cloned() else {
+            return;
+        };
+        if let (Some(store), Some(identity)) = (&self.store, &self.identity)
+            && let Err(error) = store.delete_room(&identity.public_key, &room.room_id)
+        {
+            self.logs.push(format!("room delete error: {error}"));
+            return;
+        }
+        self.rooms
+            .retain(|existing| existing.room_id != room.room_id);
+        self.selected_room_id.clear();
+        self.select_first_room_if_needed(&room.kind);
+        self.logs
+            .push(format!("{} removed", room_kind_label(&room.kind)));
+    }
+
+    fn selected_room(&self) -> Option<&RoomSummary> {
+        let kind = workspace_kind(self.active_workspace)?;
+        self.rooms
+            .iter()
+            .find(|room| room.kind == kind && room.room_id == self.selected_room_id)
+    }
+
+    fn select_first_room_if_needed(&mut self, kind: &str) {
+        if self
+            .rooms
+            .iter()
+            .any(|room| room.kind == kind && room.room_id == self.selected_room_id)
+        {
+            return;
+        }
+        self.selected_room_id = self
+            .rooms
+            .iter()
+            .filter(|room| room.kind == kind)
+            .max_by_key(|room| {
+                (
+                    room.pinned,
+                    room.updated_at_ms,
+                    std::cmp::Reverse(room.title.to_ascii_lowercase()),
+                )
+            })
+            .map(|room| room.room_id.clone())
+            .unwrap_or_default();
+    }
+
+    fn sort_rooms(&mut self) {
+        self.rooms.sort_by(|left, right| {
+            right
+                .pinned
+                .cmp(&left.pinned)
+                .then(right.updated_at_ms.cmp(&left.updated_at_ms))
+                .then(left.title.to_lowercase().cmp(&right.title.to_lowercase()))
+        });
+    }
+
     fn try_load_stored_identity(&mut self) {
         let Some(store) = &self.store else {
             return;
@@ -1888,6 +2201,7 @@ impl MesskApp {
                 self.seed_confirmed = false;
                 self.load_messages_for_identity(&identity.public_key);
                 self.load_contacts_for_identity(&identity.public_key);
+                self.load_rooms_for_identity(&identity.public_key);
                 self.load_profile_for_identity(&identity.public_key);
                 self.identity = Some(identity);
                 self.refresh_account_stats();
@@ -1931,6 +2245,8 @@ impl MesskApp {
         self.profile_status.clear();
         self.messages.clear();
         self.contacts.clear();
+        self.rooms.clear();
+        self.selected_room_id.clear();
         self.pinned_message_ids.clear();
         self.reply_draft = None;
         self.edit_draft = None;
@@ -1949,6 +2265,7 @@ impl MesskApp {
         self.voice_status.clear();
         self.show_new_chat = false;
         self.show_contact_profile = false;
+        self.show_room_editor = false;
         self.profile_public_key.clear();
         self.profile_display_name.clear();
         self.outbox_count = 0;
@@ -1978,6 +2295,8 @@ impl MesskApp {
         self.profile_status.clear();
         self.messages.clear();
         self.contacts.clear();
+        self.rooms.clear();
+        self.selected_room_id.clear();
         self.pinned_message_ids.clear();
         self.reply_draft = None;
         self.edit_draft = None;
@@ -1996,6 +2315,7 @@ impl MesskApp {
         self.voice_status.clear();
         self.show_new_chat = false;
         self.show_contact_profile = false;
+        self.show_room_editor = false;
         self.profile_public_key.clear();
         self.profile_display_name.clear();
         self.outbox_count = 0;
@@ -2477,11 +2797,18 @@ impl eframe::App for MesskApp {
                     ui.allocate_ui_with_layout(
                         egui::vec2(chat_width, available.y),
                         egui::Layout::top_down(egui::Align::Min),
-                        |ui| self.chat_panel(ui),
+                        |ui| {
+                            if self.active_workspace == 0 {
+                                self.chat_panel(ui);
+                            } else {
+                                self.room_panel(ui);
+                            }
+                        },
                     );
                 });
             });
         self.new_chat_window(ui.ctx());
+        self.room_editor_window(ui.ctx());
         self.contact_profile_window(ui.ctx());
         self.settings_window(ui.ctx());
     }
@@ -3089,6 +3416,99 @@ impl MesskApp {
         self.show_new_chat = open;
     }
 
+    fn room_editor_window(&mut self, ctx: &egui::Context) {
+        if !self.show_room_editor {
+            return;
+        }
+
+        let mut open = self.show_room_editor;
+        let mut save = false;
+        let mut cancel = false;
+        let is_edit = !self.room_editor_id.trim().is_empty();
+        let title = if is_edit { "Edit room" } else { "New room" };
+
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                if is_edit {
+                    status_pill(
+                        ui,
+                        "type",
+                        room_kind_label(&self.room_editor_kind),
+                        COL_ACCENT,
+                    );
+                } else {
+                    ui.horizontal(|ui| {
+                        settings_choice(ui, &mut self.room_editor_kind, "group", "Group");
+                        settings_choice(ui, &mut self.room_editor_kind, "channel", "Channel");
+                    });
+                }
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new("Name").size(12.0).color(COL_MUTED));
+                ui.add_sized(
+                    [420.0, 36.0],
+                    egui::TextEdit::singleline(&mut self.room_editor_title)
+                        .hint_text(room_name_hint(&self.room_editor_kind)),
+                );
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new("Role").size(12.0).color(COL_MUTED));
+                ui.add_sized(
+                    [420.0, 36.0],
+                    egui::TextEdit::singleline(&mut self.room_editor_role)
+                        .hint_text(default_room_role(&self.room_editor_kind)),
+                );
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new("Avatar").size(12.0).color(COL_MUTED));
+                ui.add_sized(
+                    [420.0, 56.0],
+                    egui::TextEdit::multiline(&mut self.room_editor_avatar)
+                        .desired_rows(2)
+                        .hint_text("Avatar data URL or empty"),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.room_editor_pinned, "Pinned");
+                    ui.checkbox(&mut self.room_editor_muted, "Muted");
+                });
+                if !self.room_editor_status.trim().is_empty() {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(&self.room_editor_status)
+                            .size(12.0)
+                            .color(COL_WARN),
+                    );
+                }
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_sized([120.0, 38.0], primary_button_widget("Save"))
+                        .clicked()
+                    {
+                        save = true;
+                    }
+                    if ui
+                        .add_sized([92.0, 38.0], neutral_button_widget("Cancel"))
+                        .clicked()
+                    {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if cancel {
+            open = false;
+        }
+        if save {
+            self.save_room_editor();
+            open = self.show_room_editor;
+        }
+        self.show_room_editor = open;
+    }
+
     fn contact_profile_window(&mut self, ctx: &egui::Context) {
         if !self.show_contact_profile {
             return;
@@ -3416,19 +3836,22 @@ impl MesskApp {
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     ui.horizontal(|ui| {
-                        workspace_tab(ui, self.active_workspace == 0, "Chats")
-                            .clicked()
-                            .then(|| self.active_workspace = 0);
-                        workspace_tab(ui, self.active_workspace == 1, "Groups")
-                            .clicked()
-                            .then(|| self.active_workspace = 1);
-                        workspace_tab(ui, self.active_workspace == 2, "Channels")
-                            .clicked()
-                            .then(|| self.active_workspace = 2);
+                        if workspace_tab(ui, self.active_workspace == 0, "Chats").clicked() {
+                            self.switch_workspace(0);
+                        }
+                        if workspace_tab(ui, self.active_workspace == 1, "Groups").clicked() {
+                            self.switch_workspace(1);
+                        }
+                        if workspace_tab(ui, self.active_workspace == 2, "Channels").clicked() {
+                            self.switch_workspace(2);
+                        }
                     });
                 });
 
             ui.add_space(12.0);
+            let search_hint = workspace_search_hint(self.active_workspace);
+            let (filter_one, filter_two, filter_three) =
+                workspace_filter_labels(self.active_workspace);
             egui::Frame::new()
                 .fill(COL_SIDE)
                 .inner_margin(egui::Margin::symmetric(24, 0))
@@ -3437,27 +3860,31 @@ impl MesskApp {
                         ui.add_sized(
                             [292.0, 38.0],
                             egui::TextEdit::singleline(&mut self.chat_search)
-                                .hint_text("Search chats, keys and drafts..."),
+                                .hint_text(search_hint),
                         );
                         ui.add_space(8.0);
                         if ui
                             .add_sized([38.0, 38.0], primary_button_widget("+"))
                             .clicked()
                         {
-                            self.new_chat_public_key = self.chat_search.trim().to_string();
-                            self.new_chat_name.clear();
-                            self.show_new_chat = true;
+                            if self.active_workspace == 0 {
+                                self.new_chat_public_key = self.chat_search.trim().to_string();
+                                self.new_chat_name.clear();
+                                self.show_new_chat = true;
+                            } else {
+                                self.open_room_editor_for_workspace();
+                            }
                         }
                     });
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
-                        filter_chip(ui, self.active_filter == 0, "Inbox")
+                        filter_chip(ui, self.active_filter == 0, filter_one)
                             .clicked()
                             .then(|| self.active_filter = 0);
-                        filter_chip(ui, self.active_filter == 1, "Unread")
+                        filter_chip(ui, self.active_filter == 1, filter_two)
                             .clicked()
                             .then(|| self.active_filter = 1);
-                        filter_chip(ui, self.active_filter == 2, "Archived")
+                        filter_chip(ui, self.active_filter == 2, filter_three)
                             .clicked()
                             .then(|| self.active_filter = 2);
                     });
@@ -3465,6 +3892,10 @@ impl MesskApp {
 
             ui.add_space(12.0);
             let summaries = self.filtered_chat_summaries();
+            let active_room_kind = workspace_kind(self.active_workspace);
+            let room_summaries = active_room_kind
+                .map(|kind| self.filtered_room_summaries(kind))
+                .unwrap_or_default();
             let list_height = (ui.available_height() - 132.0).max(180.0);
             let list_top = ui.cursor().top();
             ui.allocate_ui_with_layout(
@@ -3476,8 +3907,36 @@ impl MesskApp {
                         .id_salt("chat-list")
                         .max_height(list_height)
                         .show(ui, |ui| {
-                            if self.active_workspace != 0 {
-                                community_preview_rows(ui, self.active_workspace);
+                            if let Some(kind) = active_room_kind {
+                                if room_summaries.is_empty() {
+                                    if chat_row(
+                                        ui,
+                                        false,
+                                        room_empty_title(kind),
+                                        room_empty_subtitle(kind),
+                                        "new",
+                                        0,
+                                    )
+                                    .clicked()
+                                    {
+                                        self.open_room_editor_for_workspace();
+                                    }
+                                } else {
+                                    for room in &room_summaries {
+                                        if chat_row(
+                                            ui,
+                                            self.selected_room_id == room.room_id,
+                                            &room.title,
+                                            &room_row_subtitle(room),
+                                            &room_row_status(room),
+                                            room.updated_at_ms,
+                                        )
+                                        .clicked()
+                                        {
+                                            self.selected_room_id = room.room_id.clone();
+                                        }
+                                    }
+                                }
                             } else if summaries.is_empty() {
                                 chat_row(
                                     ui,
@@ -3549,8 +4008,18 @@ impl MesskApp {
                         "connecting" => "Wait",
                         _ => "Off",
                     };
+                    let metric_count = if active_room_kind.is_some() {
+                        room_summaries.len()
+                    } else {
+                        summaries.len()
+                    };
+                    let metric_label = if let Some(kind) = active_room_kind {
+                        room_plural_metric_label(kind)
+                    } else {
+                        "Chats"
+                    };
                     ui.columns(3, |columns| {
-                        metric_box(&mut columns[0], summaries.len().to_string(), "Chats");
+                        metric_box(&mut columns[0], metric_count.to_string(), metric_label);
                         metric_box(&mut columns[1], self.outbox_count.to_string(), "Queued");
                         metric_box(&mut columns[2], realtime_label.to_string(), "Status");
                     });
@@ -4275,6 +4744,223 @@ impl MesskApp {
         });
     }
 
+    fn room_panel(&mut self, ui: &mut egui::Ui) {
+        let kind = workspace_kind(self.active_workspace).unwrap_or("group");
+        let selected = self.selected_room().cloned();
+        let width = ui.available_width().max(520.0);
+        let height = ui.available_height();
+        let mut create_room = false;
+        let mut edit_room = false;
+        let mut toggle_pin = false;
+        let mut toggle_mute = false;
+        let mut delete_room = false;
+
+        egui::Frame::new().fill(COL_CHAT).show(ui, |ui| {
+            ui.set_width(width);
+            ui.set_min_width(width);
+            ui.set_max_width(width);
+            ui.set_min_height(height);
+
+            egui::Frame::new()
+                .fill(COL_TOP)
+                .stroke(egui::Stroke::new(1.0, COL_LINE))
+                .inner_margin(egui::Margin::symmetric(20, 10))
+                .show(ui, |ui| {
+                    ui.set_width((width - 40.0).max(480.0));
+                    let title = selected
+                        .as_ref()
+                        .map(|room| room.title.as_str())
+                        .unwrap_or_else(|| room_plural_label(kind));
+                    let subtitle = selected
+                        .as_ref()
+                        .map(room_panel_subtitle)
+                        .unwrap_or_else(|| format!("{} workspace", room_kind_label(kind)));
+                    ui.horizontal(|ui| {
+                        avatar_box(ui, title, 40.0);
+                        ui.add_space(12.0);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new(title)
+                                    .size(17.0)
+                                    .strong()
+                                    .color(COL_TEXT),
+                            );
+                            ui.label(egui::RichText::new(subtitle).size(11.0).color(COL_MUTED));
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if icon_button(ui, "New").clicked() {
+                                create_room = true;
+                            }
+                            if selected.is_some() && icon_button(ui, "Edit").clicked() {
+                                edit_room = true;
+                            }
+                            if let Some(room) = &selected {
+                                if icon_button(ui, if room.pinned { "Unpin" } else { "Pin" })
+                                    .clicked()
+                                {
+                                    toggle_pin = true;
+                                }
+                                if icon_button(ui, if room.muted { "Unmute" } else { "Mute" })
+                                    .clicked()
+                                {
+                                    toggle_mute = true;
+                                }
+                            }
+                        });
+                    });
+                });
+
+            egui::Frame::new()
+                .fill(COL_CHAT)
+                .inner_margin(egui::Margin::symmetric(28, 24))
+                .show(ui, |ui| {
+                    ui.set_width((width - 56.0).max(480.0));
+                    ui.set_min_height((height - 88.0).max(360.0));
+                    if let Some(room) = &selected {
+                        ui.horizontal(|ui| {
+                            status_pill(ui, "type", room_kind_label(&room.kind), COL_ACCENT);
+                            status_pill(ui, "role", &room.role, COL_MUTED);
+                            status_pill(
+                                ui,
+                                "state",
+                                &room_row_status(room),
+                                status_color(&room_row_status(room)),
+                            );
+                        });
+                        ui.add_space(20.0);
+                        egui::Frame::new()
+                            .fill(COL_PANEL)
+                            .stroke(egui::Stroke::new(1.0, COL_LINE))
+                            .corner_radius(egui::CornerRadius::same(8))
+                            .inner_margin(egui::Margin::symmetric(18, 16))
+                            .show(ui, |ui| {
+                                ui.set_width((width - 92.0).max(440.0));
+                                ui.horizontal(|ui| {
+                                    avatar_box(ui, &room.title, 54.0);
+                                    ui.add_space(14.0);
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(&room.title)
+                                                .size(21.0)
+                                                .strong()
+                                                .color(COL_TEXT),
+                                        );
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "Updated {}",
+                                                format_activity_time(room.updated_at_ms)
+                                            ))
+                                            .size(12.0)
+                                            .color(COL_MUTED),
+                                        );
+                                    });
+                                });
+                                ui.add_space(16.0);
+                                ui.columns(4, |columns| {
+                                    detail_box(
+                                        &mut columns[0],
+                                        "ID",
+                                        trim_line(&short_key(&room.room_id), 16),
+                                    );
+                                    detail_box(
+                                        &mut columns[1],
+                                        "Created",
+                                        format_activity_time(room.created_at_ms),
+                                    );
+                                    detail_box(
+                                        &mut columns[2],
+                                        "Pinned",
+                                        if room.pinned { "yes" } else { "no" }.to_string(),
+                                    );
+                                    detail_box(
+                                        &mut columns[3],
+                                        "Muted",
+                                        if room.muted { "yes" } else { "no" }.to_string(),
+                                    );
+                                });
+                                ui.add_space(18.0);
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .add_sized([112.0, 36.0], primary_button_widget("Edit"))
+                                        .clicked()
+                                    {
+                                        edit_room = true;
+                                    }
+                                    if ui
+                                        .add_sized(
+                                            [112.0, 36.0],
+                                            neutral_button_widget(if room.pinned {
+                                                "Unpin"
+                                            } else {
+                                                "Pin"
+                                            }),
+                                        )
+                                        .clicked()
+                                    {
+                                        toggle_pin = true;
+                                    }
+                                    if ui
+                                        .add_sized(
+                                            [112.0, 36.0],
+                                            neutral_button_widget(if room.muted {
+                                                "Unmute"
+                                            } else {
+                                                "Mute"
+                                            }),
+                                        )
+                                        .clicked()
+                                    {
+                                        toggle_mute = true;
+                                    }
+                                    if ui
+                                        .add_sized([112.0, 36.0], danger_button_widget("Delete"))
+                                        .clicked()
+                                    {
+                                        delete_room = true;
+                                    }
+                                });
+                            });
+                    } else {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(((height - 88.0) * 0.25).clamp(60.0, 140.0));
+                            avatar_box(ui, room_plural_label(kind), 54.0);
+                            ui.add_space(14.0);
+                            ui.label(
+                                egui::RichText::new(room_empty_panel_title(kind))
+                                    .size(22.0)
+                                    .strong()
+                                    .color(COL_TEXT),
+                            );
+                            ui.add_space(10.0);
+                            if ui
+                                .add_sized([184.0, 40.0], primary_button_widget("Create"))
+                                .clicked()
+                            {
+                                create_room = true;
+                            }
+                        });
+                    }
+                });
+        });
+
+        if create_room {
+            self.open_room_editor_for_workspace();
+        }
+        if edit_room {
+            self.open_room_editor_for_selected();
+        }
+        if toggle_pin {
+            self.toggle_selected_room_pin();
+        }
+        if toggle_mute {
+            self.toggle_selected_room_mute();
+        }
+        if delete_room {
+            self.delete_selected_room();
+        }
+    }
+
     fn chat_summaries(&self) -> Vec<ChatSummary> {
         let mut summaries: Vec<ChatSummary> = Vec::new();
         for message in &self.messages {
@@ -4339,6 +5025,36 @@ impl MesskApp {
                     || summary.peer_public_key.to_lowercase().contains(&search)
             })
             .collect()
+    }
+
+    fn filtered_room_summaries(&self, kind: &str) -> Vec<RoomSummary> {
+        let search = self.chat_search.trim().to_lowercase();
+        let mut rooms: Vec<RoomSummary> = self
+            .rooms
+            .iter()
+            .filter(|room| room.kind == kind)
+            .filter(|room| {
+                if self.active_filter == 1 && !room.muted {
+                    return false;
+                }
+                if self.active_filter == 2 && !room.pinned {
+                    return false;
+                }
+                search.is_empty()
+                    || room.title.to_lowercase().contains(&search)
+                    || room.role.to_lowercase().contains(&search)
+                    || room.room_id.to_lowercase().contains(&search)
+            })
+            .cloned()
+            .collect();
+        rooms.sort_by(|left, right| {
+            right
+                .pinned
+                .cmp(&left.pinned)
+                .then(right.updated_at_ms.cmp(&left.updated_at_ms))
+                .then(left.title.to_lowercase().cmp(&right.title.to_lowercase()))
+        });
+        rooms
     }
 
     fn identity_name(&self) -> String {
@@ -4588,9 +5304,11 @@ fn apply_visuals(ctx: &egui::Context, settings: &storage::StoredAppSettings) {
 
 fn status_color(status: &str) -> egui::Color32 {
     match status {
-        "ok" | "ready" | "listening" | "sent" | "delivered" | "read" => COL_OK,
+        "ok" | "ready" | "listening" | "sent" | "delivered" | "read" | "active" | "pinned" => {
+            COL_OK
+        }
         "checking" | "connecting" | "pending" | "waiting" | "waiting_retry" | "waiting retry"
-        | "editing" => COL_WARN,
+        | "editing" | "muted" => COL_WARN,
         "error" | "offline" | "failed" | "deleted" => COL_DANGER,
         _ => COL_MUTED,
     }
@@ -4660,6 +5378,108 @@ fn icon_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     )
 }
 
+fn workspace_kind(workspace: usize) -> Option<&'static str> {
+    match workspace {
+        1 => Some("group"),
+        2 => Some("channel"),
+        _ => None,
+    }
+}
+
+fn workspace_search_hint(workspace: usize) -> &'static str {
+    match workspace_kind(workspace) {
+        Some("group") => "Search groups, roles and IDs...",
+        Some("channel") => "Search channels, roles and IDs...",
+        _ => "Search chats, keys and drafts...",
+    }
+}
+
+fn workspace_filter_labels(workspace: usize) -> (&'static str, &'static str, &'static str) {
+    match workspace_kind(workspace) {
+        Some(_) => ("All", "Muted", "Pinned"),
+        None => ("Inbox", "Unread", "Archived"),
+    }
+}
+
+fn room_kind_label(kind: &str) -> &'static str {
+    match kind {
+        "channel" => "channel",
+        _ => "group",
+    }
+}
+
+fn room_plural_label(kind: &str) -> &'static str {
+    match kind {
+        "channel" => "Channels",
+        _ => "Groups",
+    }
+}
+
+fn room_plural_metric_label(kind: &str) -> &'static str {
+    match kind {
+        "channel" => "Channels",
+        _ => "Groups",
+    }
+}
+
+fn default_room_role(kind: &str) -> &'static str {
+    match kind {
+        "channel" => "admin",
+        _ => "owner",
+    }
+}
+
+fn room_name_hint(kind: &str) -> &'static str {
+    match kind {
+        "channel" => "Announcements",
+        _ => "Core team",
+    }
+}
+
+fn room_empty_title(kind: &str) -> &'static str {
+    match kind {
+        "channel" => "Create channel",
+        _ => "Create group",
+    }
+}
+
+fn room_empty_subtitle(_kind: &str) -> &'static str {
+    "Name, role, pin and mute state"
+}
+
+fn room_empty_panel_title(kind: &str) -> &'static str {
+    match kind {
+        "channel" => "No channel selected",
+        _ => "No group selected",
+    }
+}
+
+fn room_row_status(room: &RoomSummary) -> String {
+    if room.pinned {
+        "pinned".to_string()
+    } else if room.muted {
+        "muted".to_string()
+    } else {
+        "active".to_string()
+    }
+}
+
+fn room_row_subtitle(room: &RoomSummary) -> String {
+    format!(
+        "{} - {}",
+        room.role,
+        format_activity_time(room.updated_at_ms)
+    )
+}
+
+fn room_panel_subtitle(room: &RoomSummary) -> String {
+    format!(
+        "{} - created {}",
+        room.role,
+        format_activity_time(room.created_at_ms)
+    )
+}
+
 fn settings_choice(
     ui: &mut egui::Ui,
     current: &mut String,
@@ -4709,27 +5529,6 @@ fn filter_chip(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response
     )
 }
 
-fn community_preview_rows(ui: &mut egui::Ui, workspace: usize) {
-    let rows = if workspace == 1 {
-        [
-            ("Private group", "Avatar, members, pins", "ready"),
-            ("Voice room", "Calls and voice notes", "beta"),
-            ("Secure invites", "Roles and expiring links", "next"),
-        ]
-    } else {
-        [
-            ("Announcements", "Encrypted channel feed", "ready"),
-            ("Media channel", "Files, voice, gallery", "beta"),
-            ("Release notes", "Pinned updates", "next"),
-        ]
-    };
-
-    for (title, subtitle, status) in rows {
-        let response = chat_row(ui, false, title, subtitle, status, 0);
-        response.on_hover_text("Group and channel data will sync through the shared protocol.");
-    }
-}
-
 fn metric_box(ui: &mut egui::Ui, value: String, label: &str) {
     egui::Frame::new()
         .fill(COL_PANEL_SOFT)
@@ -4748,6 +5547,30 @@ fn metric_box(ui: &mut egui::Ui, value: String, label: &str) {
                 ui.add_space(2.0);
                 ui.label(egui::RichText::new(label).size(10.0).color(COL_MUTED));
             });
+        });
+}
+
+fn detail_box(ui: &mut egui::Ui, label: &str, value: String) {
+    egui::Frame::new()
+        .fill(COL_PANEL_SOFT)
+        .stroke(egui::Stroke::new(1.0, COL_LINE))
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(10, 10))
+        .show(ui, |ui| {
+            ui.set_width(110.0);
+            ui.label(
+                egui::RichText::new(label)
+                    .size(10.0)
+                    .strong()
+                    .color(COL_MUTED),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(value)
+                    .size(13.0)
+                    .strong()
+                    .color(COL_TEXT),
+            );
         });
 }
 

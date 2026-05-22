@@ -92,6 +92,19 @@ pub struct StoredContact {
     pub updated_at_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredRoom {
+    pub room_id: String,
+    pub kind: String,
+    pub title: String,
+    pub avatar: String,
+    pub role: String,
+    pub muted: bool,
+    pub pinned: bool,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct StoredOwnProfile {
     pub nickname: String,
@@ -380,6 +393,7 @@ impl LocalStore {
         let tx = conn.transaction()?;
         for table in [
             "outbox",
+            "rooms",
             "message_attachments",
             "message_reactions",
             "message_pins",
@@ -450,6 +464,120 @@ impl LocalStore {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn save_room(&self, account_public_key: &str, room: &StoredRoom) -> Result<()> {
+        let room_id = room.room_id.trim();
+        let kind = room.kind.trim();
+        let title = room.title.trim();
+        if account_public_key.trim().is_empty()
+            || room_id.is_empty()
+            || !matches!(kind, "group" | "channel")
+            || title.is_empty()
+        {
+            return Ok(());
+        }
+        let now = now_ms();
+        let created_at_ms = if room.created_at_ms > 0 {
+            room.created_at_ms
+        } else {
+            now
+        };
+        let updated_at_ms = room.updated_at_ms.max(now);
+        self.connection()?.execute(
+            r#"
+            INSERT INTO rooms(
+                account_pub_key, room_id, kind, title, avatar, role,
+                muted, pinned, created_at_ms, updated_at_ms
+            )
+            VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(account_pub_key, room_id)
+            DO UPDATE SET
+                kind = excluded.kind,
+                title = excluded.title,
+                avatar = excluded.avatar,
+                role = excluded.role,
+                muted = excluded.muted,
+                pinned = excluded.pinned,
+                updated_at_ms = excluded.updated_at_ms
+            "#,
+            params![
+                account_public_key,
+                room_id,
+                kind,
+                title,
+                room.avatar.trim(),
+                room.role.trim(),
+                room.muted as i64,
+                room.pinned as i64,
+                created_at_ms,
+                updated_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_rooms(&self, account_public_key: &str, kind: &str) -> Result<Vec<StoredRoom>> {
+        if !matches!(kind, "group" | "channel") {
+            return Ok(Vec::new());
+        }
+        let conn = self.connection()?;
+        let mut statement = conn.prepare(
+            r#"
+            SELECT room_id, kind, title, avatar, role, muted, pinned, created_at_ms, updated_at_ms
+            FROM rooms
+            WHERE account_pub_key = ?1 AND kind = ?2
+            ORDER BY pinned DESC, updated_at_ms DESC, title COLLATE NOCASE ASC
+            "#,
+        )?;
+        let rows = statement.query_map(params![account_public_key, kind], |row| {
+            Ok(StoredRoom {
+                room_id: row.get(0)?,
+                kind: row.get(1)?,
+                title: row.get(2)?,
+                avatar: row.get(3)?,
+                role: row.get(4)?,
+                muted: row.get::<_, i64>(5)? != 0,
+                pinned: row.get::<_, i64>(6)? != 0,
+                created_at_ms: row.get(7)?,
+                updated_at_ms: row.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn set_room_muted(
+        &self,
+        account_public_key: &str,
+        room_id: &str,
+        muted: bool,
+    ) -> Result<()> {
+        self.connection()?.execute(
+            "UPDATE rooms SET muted = ?3, updated_at_ms = ?4 WHERE account_pub_key = ?1 AND room_id = ?2",
+            params![account_public_key, room_id, muted as i64, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_room_pinned(
+        &self,
+        account_public_key: &str,
+        room_id: &str,
+        pinned: bool,
+    ) -> Result<()> {
+        self.connection()?.execute(
+            "UPDATE rooms SET pinned = ?3, updated_at_ms = ?4 WHERE account_pub_key = ?1 AND room_id = ?2",
+            params![account_public_key, room_id, pinned as i64, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_room(&self, account_public_key: &str, room_id: &str) -> Result<()> {
+        self.connection()?.execute(
+            "DELETE FROM rooms WHERE account_pub_key = ?1 AND room_id = ?2",
+            params![account_public_key, room_id],
+        )?;
+        Ok(())
     }
 
     pub fn save_prekeys(
@@ -1107,6 +1235,23 @@ impl LocalStore {
             CREATE INDEX IF NOT EXISTS idx_contacts_account_updated
             ON contacts(account_pub_key, updated_at_ms);
 
+            CREATE TABLE IF NOT EXISTS rooms (
+                account_pub_key TEXT NOT NULL,
+                room_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                avatar TEXT NOT NULL,
+                role TEXT NOT NULL,
+                muted INTEGER NOT NULL DEFAULT 0,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY(account_pub_key, room_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_rooms_account_kind_updated
+            ON rooms(account_pub_key, kind, pinned, updated_at_ms);
+
             CREATE TABLE IF NOT EXISTS account_profiles (
                 account_pub_key TEXT PRIMARY KEY,
                 nickname TEXT NOT NULL,
@@ -1508,6 +1653,35 @@ mod tests {
         assert_eq!(contacts[0].display_name, "Alice");
         assert_eq!(contacts[0].peer_public_key, peer.public_key);
 
+        let room = StoredRoom {
+            room_id: "group-local".to_string(),
+            kind: "group".to_string(),
+            title: "Core team".to_string(),
+            avatar: String::new(),
+            role: "owner".to_string(),
+            muted: false,
+            pinned: true,
+            created_at_ms: now_ms(),
+            updated_at_ms: now_ms(),
+        };
+        store.save_room("account", &room).unwrap();
+        let rooms = store.list_rooms("account", "group").unwrap();
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(rooms[0].title, "Core team");
+        assert!(rooms[0].pinned);
+        store
+            .set_room_muted("account", "group-local", true)
+            .unwrap();
+        store
+            .set_room_pinned("account", "group-local", false)
+            .unwrap();
+        let rooms = store.list_rooms("account", "group").unwrap();
+        assert!(rooms[0].muted);
+        assert!(!rooms[0].pinned);
+        store.delete_room("account", "group-local").unwrap();
+        assert!(store.list_rooms("account", "group").unwrap().is_empty());
+        store.save_room("account", &room).unwrap();
+
         store.save_identity_blob("account", b"protected").unwrap();
         let identity = store.load_last_identity_blob().unwrap().unwrap();
         assert_eq!(identity.account_public_key, "account");
@@ -1546,6 +1720,7 @@ mod tests {
         );
         assert!(store.list_outbox("account", 10).unwrap().is_empty());
         assert!(store.list_contacts("account").unwrap().is_empty());
+        assert!(store.list_rooms("account", "group").unwrap().is_empty());
         assert!(store.list_pinned_message_ids("account").unwrap().is_empty());
         assert!(store.load_last_identity_blob().unwrap().is_none());
 

@@ -24,9 +24,11 @@ Current milestone:
 - Portable install/uninstall scripts included in release packages.
 - Visible client version metadata in the native UI.
 - System tray menu with show, hide, quit, and optional close-to-tray mode.
+- Local group/channel room list with create/edit, pin, mute, delete, and profile panels.
 - Identity seed persistence through Windows DPAPI, scoped to the current OS user.
 - Panic reset for local identity, sessions, prekeys, messages, and outbox.
 
 Next milestones:
 
+- Backend-synced room membership, invites, permissions, and room messages.
 - Signed installer polish.
