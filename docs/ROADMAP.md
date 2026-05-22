@@ -60,7 +60,7 @@ Exit criteria:
 
 ## Phase 5: Production Hardening
 
-- Add Windows installer, version metadata, and tray mode polish.
+- Add signed Windows installer, version metadata, and tray mode polish.
 - Grow the relay/bootstrap registry behind signed relay announcements,
   operator-issued announce tokens, a secret-free relay announce CLI, and
   health-visible relay metrics.

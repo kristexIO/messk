@@ -62,6 +62,14 @@ if (-not $SkipWindowsClient) {
   Copy-Item -Force `
     -LiteralPath (Join-Path $root "clients\windows\target\release\messk-windows.exe") `
     -Destination $windowsExe
+  $windowsInstall = Join-Path $windowsDist "install.ps1"
+  $windowsUninstall = Join-Path $windowsDist "uninstall.ps1"
+  Copy-Item -Force `
+    -LiteralPath (Join-Path $root "clients\windows\packaging\install.ps1") `
+    -Destination $windowsInstall
+  Copy-Item -Force `
+    -LiteralPath (Join-Path $root "clients\windows\packaging\uninstall.ps1") `
+    -Destination $windowsUninstall
 
   $windowsReadme = Join-Path $windowsDist "README.txt"
   @"
@@ -75,6 +83,12 @@ Backend: $BackendOrigin
 
 Run:
   messk-windows.exe
+
+Install:
+  powershell -ExecutionPolicy Bypass -File install.ps1
+
+Uninstall:
+  powershell -ExecutionPolicy Bypass -File uninstall.ps1 -KeepData
 
 Notes:
   - Native Rust/egui client, no WebView/Electron/Tauri.
@@ -97,7 +111,7 @@ Notes:
   if (Test-Path -LiteralPath $windowsZip) {
     Remove-Item -Force -LiteralPath $windowsZip
   }
-  Compress-Archive -Force -LiteralPath @($windowsExe, $windowsReadme, $windowsManifest) -DestinationPath $windowsZip
+  Compress-Archive -Force -LiteralPath @($windowsExe, $windowsReadme, $windowsManifest, $windowsInstall, $windowsUninstall) -DestinationPath $windowsZip
 }
 
 Write-Host "Release build completed. Artifacts:"
