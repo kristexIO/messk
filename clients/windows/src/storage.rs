@@ -55,6 +55,7 @@ pub struct StoredAppSettings {
     pub density: String,
     pub font_scale: f32,
     pub auto_connect: bool,
+    pub auto_start: bool,
     pub desktop_notifications: bool,
 }
 
@@ -165,6 +166,9 @@ impl LocalStore {
         if let Some(value) = load_app_setting(&conn, "auto_connect")? {
             settings.auto_connect = value == "true";
         }
+        if let Some(value) = load_app_setting(&conn, "auto_start")? {
+            settings.auto_start = value == "true";
+        }
         if let Some(value) = load_app_setting(&conn, "desktop_notifications")? {
             settings.desktop_notifications = value == "true";
         }
@@ -200,6 +204,7 @@ impl LocalStore {
                     format!("{:.2}", clamp_font_scale(settings.font_scale)),
                 ),
                 ("auto_connect", settings.auto_connect.to_string()),
+                ("auto_start", settings.auto_start.to_string()),
                 (
                     "desktop_notifications",
                     settings.desktop_notifications.to_string(),
@@ -1233,6 +1238,7 @@ impl Default for StoredAppSettings {
             density: "comfortable".to_string(),
             font_scale: 1.0,
             auto_connect: false,
+            auto_start: false,
             desktop_notifications: true,
         }
     }
@@ -1355,6 +1361,7 @@ mod tests {
         settings.density = "compact".to_string();
         settings.font_scale = 1.15;
         settings.auto_connect = true;
+        settings.auto_start = true;
         settings.desktop_notifications = false;
         store.save_app_settings(&settings).unwrap();
         let settings = store.load_app_settings().unwrap();
@@ -1364,6 +1371,7 @@ mod tests {
         assert_eq!(settings.density, "compact");
         assert_eq!(settings.font_scale, 1.15);
         assert!(settings.auto_connect);
+        assert!(settings.auto_start);
         assert!(!settings.desktop_notifications);
 
         let peer = crypto::generate_box_keypair().unwrap();

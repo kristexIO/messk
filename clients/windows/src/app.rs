@@ -1,5 +1,5 @@
 use crate::{
-    config, crypto, media, net, notifier, playback, storage,
+    autostart, config, crypto, media, net, notifier, playback, storage,
     ui::format::{clean_status, short_key, trim_line},
     vault, voice,
 };
@@ -1686,6 +1686,18 @@ impl MesskApp {
         if !is_valid_density(&self.settings_draft.density) {
             self.settings_draft.density = "comfortable".to_string();
         }
+        if self.settings_draft.auto_start != self.settings.auto_start {
+            if let Err(error) = autostart::set_enabled(self.settings_draft.auto_start) {
+                self.logs.push(format!("auto-start update error: {error}"));
+                self.settings_draft.auto_start = self.settings.auto_start;
+                return;
+            }
+            self.logs.push(if self.settings_draft.auto_start {
+                "auto-start enabled".to_string()
+            } else {
+                "auto-start disabled".to_string()
+            });
+        }
 
         if let Some(store) = &self.store
             && let Err(error) = store.save_app_settings(&self.settings_draft)
@@ -2667,6 +2679,13 @@ impl MesskApp {
                 );
                 ui.add_space(8.0);
                 ui.checkbox(&mut self.settings_draft.auto_connect, "Connect on launch");
+                ui.add_enabled(
+                    autostart::is_supported(),
+                    egui::Checkbox::new(
+                        &mut self.settings_draft.auto_start,
+                        "Run at Windows startup",
+                    ),
+                );
                 ui.checkbox(
                     &mut self.settings_draft.desktop_notifications,
                     "Desktop notifications",

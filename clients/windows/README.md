@@ -19,9 +19,10 @@ Current milestone:
 - Periodic outbox flush while realtime is connected.
 - Visible retry outbox with queued message previews, attempts, last error, and next retry timing.
 - Contact list and chat start by public key or @username.
+- Optional Windows startup registration through the current user's Run key.
 - Identity seed persistence through Windows DPAPI, scoped to the current OS user.
 - Panic reset for local identity, sessions, prekeys, messages, and outbox.
 
 Next milestones:
 
-- Native notifications, tray, auto-start, and installer.
+- Tray mode and installer polish.

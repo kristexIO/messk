@@ -207,7 +207,7 @@ Short term:
 Long term:
 
 - mobile clients through the shared Rust core;
-- signed Windows installer, tray mode, notifications, and auto-start;
+- signed Windows installer and tray mode polish;
 - staging-to-production release flow with monitoring, rollback, and alerts.
 
 ## Contributing
