@@ -20,6 +20,7 @@ Current milestone:
 - Visible retry outbox with queued message previews, attempts, last error, and next retry timing.
 - Contact list and chat start by public key or @username.
 - Optional Windows startup registration through the current user's Run key.
+- Native window/taskbar icon.
 - Identity seed persistence through Windows DPAPI, scoped to the current OS user.
 - Panic reset for local identity, sessions, prekeys, messages, and outbox.
 

@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod app_icon;
 mod autostart;
 mod config;
 mod crypto;
@@ -20,7 +21,8 @@ fn main() -> eframe::Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Messk")
             .with_inner_size([1320.0, 820.0])
-            .with_min_inner_size([1040.0, 680.0]),
+            .with_min_inner_size([1040.0, 680.0])
+            .with_icon(app_icon::messk_icon()),
         ..Default::default()
     };
 
