@@ -23,9 +23,10 @@ Current milestone:
 - Native window/taskbar icon.
 - Portable install/uninstall scripts included in release packages.
 - Visible client version metadata in the native UI.
+- System tray menu with show, hide, quit, and optional close-to-tray mode.
 - Identity seed persistence through Windows DPAPI, scoped to the current OS user.
 - Panic reset for local identity, sessions, prekeys, messages, and outbox.
 
 Next milestones:
 
-- Tray mode and signed installer polish.
+- Signed installer polish.

@@ -56,6 +56,7 @@ pub struct StoredAppSettings {
     pub font_scale: f32,
     pub auto_connect: bool,
     pub auto_start: bool,
+    pub tray_mode: bool,
     pub desktop_notifications: bool,
 }
 
@@ -169,6 +170,9 @@ impl LocalStore {
         if let Some(value) = load_app_setting(&conn, "auto_start")? {
             settings.auto_start = value == "true";
         }
+        if let Some(value) = load_app_setting(&conn, "tray_mode")? {
+            settings.tray_mode = value == "true";
+        }
         if let Some(value) = load_app_setting(&conn, "desktop_notifications")? {
             settings.desktop_notifications = value == "true";
         }
@@ -205,6 +209,7 @@ impl LocalStore {
                 ),
                 ("auto_connect", settings.auto_connect.to_string()),
                 ("auto_start", settings.auto_start.to_string()),
+                ("tray_mode", settings.tray_mode.to_string()),
                 (
                     "desktop_notifications",
                     settings.desktop_notifications.to_string(),
@@ -1239,6 +1244,7 @@ impl Default for StoredAppSettings {
             font_scale: 1.0,
             auto_connect: false,
             auto_start: false,
+            tray_mode: false,
             desktop_notifications: true,
         }
     }
@@ -1362,6 +1368,7 @@ mod tests {
         settings.font_scale = 1.15;
         settings.auto_connect = true;
         settings.auto_start = true;
+        settings.tray_mode = true;
         settings.desktop_notifications = false;
         store.save_app_settings(&settings).unwrap();
         let settings = store.load_app_settings().unwrap();
@@ -1372,6 +1379,7 @@ mod tests {
         assert_eq!(settings.font_scale, 1.15);
         assert!(settings.auto_connect);
         assert!(settings.auto_start);
+        assert!(settings.tray_mode);
         assert!(!settings.desktop_notifications);
 
         let peer = crypto::generate_box_keypair().unwrap();

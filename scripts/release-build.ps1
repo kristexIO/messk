@@ -94,7 +94,7 @@ Notes:
   - Native Rust/egui client, no WebView/Electron/Tauri.
   - Local state is stored in APPDATA\Messk\state.sqlite.
   - Identity seed and ratchet sessions are protected locally.
-  - Settings include theme, density, backend origin, auto-connect, Windows startup and desktop notifications.
+  - Settings include theme, density, backend origin, auto-connect, Windows startup, tray mode and desktop notifications.
 "@ | Set-Content -Encoding UTF8 -LiteralPath $windowsReadme
 
   $windowsManifest = Join-Path $windowsDist "release.json"

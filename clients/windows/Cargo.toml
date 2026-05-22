@@ -27,6 +27,7 @@ sha2 = "0.10.9"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+tray-icon = "0.21.3"
 url = "2.5.8"
 uuid = { version = "1.23.1", features = ["v4"] }
 winrt-notification = "0.5.1"

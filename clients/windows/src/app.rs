@@ -75,6 +75,9 @@ enum UiEvent {
         action: String,
         error: String,
     },
+    TrayShow,
+    TrayHide,
+    TrayQuit,
     DirectoryResolved {
         result: net::DirectoryResolveResult,
         display_name: String,
@@ -172,12 +175,13 @@ pub struct MesskApp {
     pinned_message_ids: HashSet<String>,
     outbox_count: usize,
     outbox_preview: Vec<storage::OutboxMessage>,
+    tray_icon: Option<tray_icon::TrayIcon>,
     realtime_tasks: Vec<JoinHandle<()>>,
     logs: Vec<String>,
 }
 
 impl MesskApp {
-    pub fn new(_creation_context: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(creation_context: &eframe::CreationContext<'_>) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_name("messk-net")
@@ -244,9 +248,11 @@ impl MesskApp {
             pinned_message_ids: HashSet::new(),
             outbox_count: 0,
             outbox_preview: Vec::new(),
+            tray_icon: None,
             realtime_tasks: Vec::new(),
             logs: vec!["Messk native client booted.".to_string(), store_log],
         };
+        app.install_tray_icon(creation_context.egui_ctx.clone());
         app.try_load_stored_identity();
         if app.settings.auto_connect && app.identity.is_some() {
             app.connect_realtime();
@@ -254,7 +260,20 @@ impl MesskApp {
         app
     }
 
-    fn drain_events(&mut self) {
+    fn install_tray_icon(&mut self, ctx: egui::Context) {
+        if self.tray_icon.is_some() {
+            return;
+        }
+        match build_tray_icon(ctx, self.tx.clone()) {
+            Ok(tray_icon) => {
+                self.tray_icon = Some(tray_icon);
+                self.logs.push("tray icon ready".to_string());
+            }
+            Err(error) => self.logs.push(format!("tray icon unavailable: {error}")),
+        }
+    }
+
+    fn drain_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.rx.try_recv() {
             match event {
                 UiEvent::HealthOk(status) => {
@@ -424,6 +443,20 @@ impl MesskApp {
                     ));
                     self.refresh_account_stats();
                 }
+                UiEvent::TrayShow => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    self.logs.push("window restored from tray".to_string());
+                }
+                UiEvent::TrayHide => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    self.logs.push("window hidden to tray".to_string());
+                }
+                UiEvent::TrayQuit => {
+                    self.settings.tray_mode = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
                 UiEvent::DirectoryResolved {
                     result,
                     display_name,
@@ -486,6 +519,17 @@ impl MesskApp {
             }
         }
         self.refresh_voice_playback_status();
+    }
+
+    fn handle_tray_close_request(&mut self, ctx: &egui::Context) {
+        let close_requested = ctx.input(|input| input.viewport().close_requested());
+        if !close_requested || !self.settings.tray_mode || self.tray_icon.is_none() {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        self.logs
+            .push("close intercepted; running in tray".to_string());
     }
 
     fn refresh_voice_playback_status(&mut self) {
@@ -2405,7 +2449,8 @@ impl MesskApp {
 
 impl eframe::App for MesskApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.drain_events();
+        self.drain_events(ui.ctx());
+        self.handle_tray_close_request(ui.ctx());
         self.handle_file_drops(ui.ctx());
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(250));
@@ -2685,6 +2730,10 @@ impl MesskApp {
                         &mut self.settings_draft.auto_start,
                         "Run at Windows startup",
                     ),
+                );
+                ui.checkbox(
+                    &mut self.settings_draft.tray_mode,
+                    "Keep running in tray on close",
                 );
                 ui.checkbox(
                     &mut self.settings_draft.desktop_notifications,
@@ -4375,6 +4424,9 @@ enum MessageAction {
     DeleteLocal(String),
 }
 
+const TRAY_SHOW_ID: &str = "messk.tray.show";
+const TRAY_HIDE_ID: &str = "messk.tray.hide";
+const TRAY_QUIT_ID: &str = "messk.tray.quit";
 const COL_BG: egui::Color32 = egui::Color32::from_rgb(14, 22, 33);
 const COL_SIDE: egui::Color32 = egui::Color32::from_rgb(23, 33, 43);
 const COL_TOP: egui::Color32 = egui::Color32::from_rgb(23, 33, 43);
@@ -4397,6 +4449,71 @@ const COL_MUTED: egui::Color32 = egui::Color32::from_rgb(143, 161, 179);
 const COL_LINE: egui::Color32 = egui::Color32::from_rgb(38, 50, 65);
 const COL_LINE_STRONG: egui::Color32 = egui::Color32::from_rgb(49, 65, 83);
 const SIDEBAR_WIDTH: f32 = 390.0;
+
+fn build_tray_icon(
+    ctx: egui::Context,
+    tx: mpsc::Sender<UiEvent>,
+) -> Result<tray_icon::TrayIcon, String> {
+    use tray_icon::{
+        Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
+        menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+    };
+
+    let show_item = MenuItem::with_id(TRAY_SHOW_ID, "Show Messk", true, None);
+    let hide_item = MenuItem::with_id(TRAY_HIDE_ID, "Hide to tray", true, None);
+    let quit_item = MenuItem::with_id(TRAY_QUIT_ID, "Quit", true, None);
+    let separator = PredefinedMenuItem::separator();
+    let menu = Menu::with_items(&[&show_item, &hide_item, &separator, &quit_item])
+        .map_err(|error| error.to_string())?;
+
+    let icon_data = crate::app_icon::messk_icon();
+    let icon = Icon::from_rgba(icon_data.rgba, icon_data.width, icon_data.height)
+        .map_err(|error| error.to_string())?;
+
+    let menu_tx = tx.clone();
+    let menu_ctx = ctx.clone();
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        let event = if event.id == TRAY_SHOW_ID {
+            UiEvent::TrayShow
+        } else if event.id == TRAY_HIDE_ID {
+            UiEvent::TrayHide
+        } else if event.id == TRAY_QUIT_ID {
+            UiEvent::TrayQuit
+        } else {
+            return;
+        };
+        let _ = menu_tx.send(event);
+        menu_ctx.request_repaint();
+    }));
+
+    let tray_tx = tx;
+    let tray_ctx = ctx;
+    TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+        let should_show = matches!(
+            event,
+            TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } | TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            }
+        );
+        if should_show {
+            let _ = tray_tx.send(UiEvent::TrayShow);
+            tray_ctx.request_repaint();
+        }
+    }));
+
+    TrayIconBuilder::new()
+        .with_tooltip(format!("Messk v{}", config::APP_VERSION))
+        .with_menu(Box::new(menu))
+        .with_menu_on_left_click(false)
+        .with_icon(icon)
+        .build()
+        .map_err(|error| error.to_string())
+}
 
 fn apply_visuals(ctx: &egui::Context, settings: &storage::StoredAppSettings) {
     let mut visuals = egui::Visuals::dark();
