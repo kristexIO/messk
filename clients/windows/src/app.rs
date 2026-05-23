@@ -1381,12 +1381,6 @@ impl MesskApp {
         self.send_call_signal(call.peer_public_key, call::CALL_ANSWER, payload);
     }
 
-    fn show_native_screen_share_unavailable(&mut self) {
-        self.call_status =
-            "Screen sharing media is available in the web app; native Windows capture is not implemented yet."
-                .to_string();
-    }
-
     fn reject_or_end_pending_call(&mut self) {
         let Some(call) = self.pending_call.clone() else {
             self.call_status.clear();
@@ -4191,9 +4185,6 @@ impl MesskApp {
                                             self.start_native_call_signal(
                                                 call::CallMediaKind::Audio,
                                             );
-                                        }
-                                        if has_active_chat && icon_button(ui, "Share").clicked() {
-                                            self.show_native_screen_share_unavailable();
                                         }
                                         if self.outbox_count > 0
                                             && icon_button(ui, "Retry").clicked()
