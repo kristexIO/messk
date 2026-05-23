@@ -136,7 +136,7 @@ struct EditDraft {
 struct PendingCall {
     peer_public_key: String,
     incoming: bool,
-    is_video: bool,
+    media: call::CallMediaKind,
 }
 
 pub struct MesskApp {
@@ -1324,20 +1324,22 @@ impl MesskApp {
         }
     }
 
-    fn start_native_call_signal(&mut self, is_video: bool) {
+    fn start_native_call_signal(&mut self, media: call::CallMediaKind) {
         let peer = self.recipient_public_key.trim().to_string();
         if peer.is_empty() {
             self.logs
                 .push("open a direct chat before starting a call".to_string());
             return;
         }
-        let media = if is_video {
-            call::CallMediaKind::Video
-        } else {
-            call::CallMediaKind::Audio
+        let (media_mode, is_video) = match media {
+            call::CallMediaKind::Audio => ("audio", false),
+            call::CallMediaKind::Video => ("video", true),
+            call::CallMediaKind::Screen => ("screen", true),
         };
         let payload = serde_json::json!({
             "isVideo": is_video,
+            "isScreenShare": media == call::CallMediaKind::Screen,
+            "mediaMode": media_mode,
             "nativeClient": true,
             "client": "messk-windows",
             "supportsMedia": false,
@@ -1347,12 +1349,13 @@ impl MesskApp {
         self.pending_call = Some(PendingCall {
             peer_public_key: peer.clone(),
             incoming: false,
-            is_video,
+            media,
         });
         self.active_call = Some(call::CallSession::outgoing(peer.clone(), media));
         self.call_status = format!(
-            "Calling {} via secure signaling - native media engine pending",
-            short_key(&peer)
+            "Requesting {} with {} - native media engine unavailable",
+            call_media_label(media),
+            short_key(&peer),
         );
         self.send_call_signal(peer, call::CALL_OFFER, payload);
     }
@@ -1376,6 +1379,12 @@ impl MesskApp {
         }
         self.pending_call = None;
         self.send_call_signal(call.peer_public_key, call::CALL_ANSWER, payload);
+    }
+
+    fn show_native_screen_share_unavailable(&mut self) {
+        self.call_status =
+            "Screen sharing media is available in the web app; native Windows capture is not implemented yet."
+                .to_string();
     }
 
     fn reject_or_end_pending_call(&mut self) {
@@ -1443,30 +1452,31 @@ impl MesskApp {
             .get("isVideo")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
-        let media = if is_video {
-            call::CallMediaKind::Video
-        } else {
-            call::CallMediaKind::Audio
+        let media = match parsed.get("mediaMode").and_then(|value| value.as_str()) {
+            Some("screen") => call::CallMediaKind::Screen,
+            Some("video") => call::CallMediaKind::Video,
+            _ if is_video => call::CallMediaKind::Video,
+            _ => call::CallMediaKind::Audio,
         };
         match kind.as_str() {
             call::CALL_OFFER => {
                 self.pending_call = Some(PendingCall {
                     peer_public_key: sender_public_key.clone(),
                     incoming: true,
-                    is_video,
+                    media,
                 });
                 self.active_call = Some(call::CallSession::incoming(
                     sender_public_key.clone(),
                     media,
                 ));
                 self.call_status = format!(
-                    "Incoming {} call from {} - native media engine pending",
-                    if is_video { "video" } else { "voice" },
+                    "Incoming {} from {} - open the web app for media",
+                    call_media_label(media),
                     short_key(&sender_public_key)
                 );
                 self.logs.push(format!(
-                    "incoming {} call signal from {}",
-                    if is_video { "video" } else { "voice" },
+                    "incoming {} signal from {}",
+                    call_media_label(media),
                     short_key(&sender_public_key)
                 ));
             }
@@ -4173,10 +4183,17 @@ impl MesskApp {
                                             ));
                                         }
                                         if has_active_chat && icon_button(ui, "Vid").clicked() {
-                                            self.start_native_call_signal(true);
+                                            self.start_native_call_signal(
+                                                call::CallMediaKind::Video,
+                                            );
                                         }
                                         if has_active_chat && icon_button(ui, "Call").clicked() {
-                                            self.start_native_call_signal(false);
+                                            self.start_native_call_signal(
+                                                call::CallMediaKind::Audio,
+                                            );
+                                        }
+                                        if has_active_chat && icon_button(ui, "Share").clicked() {
+                                            self.show_native_screen_share_unavailable();
                                         }
                                         if self.outbox_count > 0
                                             && icon_button(ui, "Retry").clicked()
@@ -4341,11 +4358,9 @@ impl MesskApp {
                                                 }
                                                 ui.add_space(8.0);
                                                 ui.label(
-                                                    egui::RichText::new(if call.is_video {
-                                                        "video"
-                                                    } else {
-                                                        "voice"
-                                                    })
+                                                    egui::RichText::new(call_media_label(
+                                                        call.media,
+                                                    ))
                                                     .size(11.0)
                                                     .strong()
                                                     .color(COL_MUTED),
@@ -6562,6 +6577,7 @@ fn call_media_label(media: call::CallMediaKind) -> &'static str {
     match media {
         call::CallMediaKind::Audio => "voice",
         call::CallMediaKind::Video => "video",
+        call::CallMediaKind::Screen => "screen share",
     }
 }
 

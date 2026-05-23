@@ -1,8 +1,8 @@
 import React, { useEffect, useEffectEvent, useState, useRef } from 'react';
 import { useAppStore } from '../store';
-import { WebRTCManager } from '../lib/webrtc';
+import { type CallMediaMode, type LocalVideoSource, WebRTCManager } from '../lib/webrtc';
 import { appConfig } from '../lib/config';
-import { Phone, PhoneOff, Video, Mic, MicOff, VideoOff, ShieldCheck, RotateCcw, Activity } from 'lucide-react';
+import { Phone, PhoneOff, Video, Mic, MicOff, VideoOff, ShieldCheck, RotateCcw, Activity, MonitorUp, ScreenShareOff } from 'lucide-react';
 import { socketManager } from '../lib/socket';
 import { db } from '../lib/db';
 import { useLiveQuery } from 'dexie-react-hooks';
@@ -14,7 +14,8 @@ type WebRTCSignalDetail = {
 };
 
 type StartCallDetail = {
-  video: boolean;
+  mode?: CallMediaMode;
+  video?: boolean;
   peerPubKey?: string;
 };
 
@@ -24,10 +25,14 @@ const CALL_TIMEOUT_MS = 30_000;
 const CONNECT_TIMEOUT_MS = 15_000;
 const STATUS_RESET_MS = 2_500;
 
+function callMediaLabel(mode: CallMediaMode) {
+  return mode === 'screen' ? 'screen share' : `${mode} call`;
+}
+
 async function logCallEvent(input: {
   peerPubKey: string | null;
   direction: 'incoming' | 'outgoing';
-  media: 'audio' | 'video';
+  media: CallMediaMode;
   outcome: 'started' | 'connected' | 'missed' | 'declined' | 'ended' | 'failed';
 }) {
   if (!input.peerPubKey) {
@@ -46,6 +51,24 @@ async function logCallEvent(input: {
 }
 
 function errorToStatus(error: unknown): string | null {
+  if (error instanceof DOMException) {
+    switch (error.name) {
+      case 'NotAllowedError':
+        return 'Microphone, camera, or screen sharing permission was denied';
+      case 'SecurityError':
+        return 'Browser blocked microphone, camera, or screen sharing access';
+      case 'NotFoundError':
+        return 'Requested microphone, camera, or screen source was not found';
+      case 'NotReadableError':
+        return 'Requested media source is already in use';
+      case 'OverconstrainedError':
+        return 'Requested media device is unavailable';
+      case 'AbortError':
+        return 'Media startup was interrupted. Retry the call.';
+      default:
+        return null;
+    }
+  }
   if (error instanceof Error && error.message.trim()) {
     const normalizedMessage = error.message.trim();
     const loweredMessage = normalizedMessage.toLowerCase();
@@ -58,45 +81,27 @@ function errorToStatus(error: unknown): string | null {
     }
     return normalizedMessage;
   }
-  if (!(error instanceof DOMException)) {
-    return null;
-  }
-
-  switch (error.name) {
-    case 'NotAllowedError':
-      return 'Microphone or camera access denied';
-    case 'SecurityError':
-      return 'Browser blocked microphone or camera access';
-    case 'NotFoundError':
-      return 'Camera or microphone not found';
-    case 'NotReadableError':
-      return 'Camera or microphone is busy';
-    case 'OverconstrainedError':
-      return 'Requested media device is unavailable';
-    case 'AbortError':
-      return 'Media startup was interrupted. Retry the call.';
-    default:
-      return null;
-  }
+  return null;
 }
 
 export const CallOverlay: React.FC = () => {
   const { activePeerKey, myPublicKey } = useAppStore();
   const [callState, setCallState] = useState<'idle' | 'incoming' | 'outgoing' | 'active'>('idle');
-  const [isVideo, setIsVideo] = useState(false);
   const [callerPubKey, setCallerPubKey] = useState<string | null>(null);
   const [incomingSDP, setIncomingSDP] = useState<RTCSessionDescriptionInit | null>(null);
   const [isMicOn, setIsMicOn] = useState(true);
-  const [isVideoOn, setIsVideoOn] = useState(true);
+  const [isVideoOn, setIsVideoOn] = useState(false);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [hasRemoteVideo, setHasRemoteVideo] = useState(false);
   const [statusText, setStatusText] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<StatusTone>('neutral');
   const [peerConnectionState, setPeerConnectionState] = useState<RTCPeerConnectionState>('new');
   const [iceConnectionState, setIceConnectionState] = useState<RTCIceConnectionState>('new');
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [signalOnlyCall, setSignalOnlyCall] = useState(false);
-  const [lastRetryTarget, setLastRetryTarget] = useState<{ peerPubKey: string; video: boolean } | null>(null);
+  const [lastRetryTarget, setLastRetryTarget] = useState<{ peerPubKey: string; mode: CallMediaMode } | null>(null);
   const [callDirection, setCallDirection] = useState<'incoming' | 'outgoing'>('outgoing');
-  const [callMedia, setCallMedia] = useState<'audio' | 'video'>('audio');
+  const [callMedia, setCallMedia] = useState<CallMediaMode>('audio');
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -108,7 +113,7 @@ export const CallOverlay: React.FC = () => {
   const callPeerRef = useRef<string | null>(null);
   const pendingRemoteCandidatesRef = useRef<Array<{ senderPubKey: string; candidate: RTCIceCandidateInit }>>([]);
   const callDirectionRef = useRef<'incoming' | 'outgoing'>('outgoing');
-  const callMediaRef = useRef<'audio' | 'video'>('audio');
+  const callMediaRef = useRef<CallMediaMode>('audio');
   const lastLoggedOutcomeRef = useRef<'connected' | 'missed' | 'declined' | 'ended' | 'failed' | null>(null);
   const displayPeerKey = callerPubKey ?? activePeerKey;
   const displayContact = useLiveQuery(async () => {
@@ -166,14 +171,15 @@ export const CallOverlay: React.FC = () => {
     }
   };
 
-  const markCallContext = (peerPubKey: string | null, direction: 'incoming' | 'outgoing', video: boolean) => {
+  const markCallContext = (peerPubKey: string | null, direction: 'incoming' | 'outgoing', mode: CallMediaMode) => {
     callPeerRef.current = peerPubKey;
     callDirectionRef.current = direction;
-    callMediaRef.current = video ? 'video' : 'audio';
+    callMediaRef.current = mode;
     lastLoggedOutcomeRef.current = null;
     setCallDirection(direction);
-    setCallMedia(video ? 'video' : 'audio');
-    setIsVideo(video);
+    setCallMedia(mode);
+    setIsVideoOn(mode === 'video');
+    setIsScreenSharing(direction === 'outgoing' && mode === 'screen');
     if (peerPubKey) {
       setCallerPubKey(peerPubKey);
     }
@@ -198,7 +204,7 @@ export const CallOverlay: React.FC = () => {
   ) => {
     callGenerationRef.current += 1;
     const retryTarget = options?.allowRetry && callDirectionRef.current === 'outgoing' && callPeerRef.current
-      ? { peerPubKey: callPeerRef.current, video: callMediaRef.current === 'video' }
+      ? { peerPubKey: callPeerRef.current, mode: callMediaRef.current }
       : null;
     clearCallTimeout();
     clearConnectTimeout();
@@ -214,7 +220,9 @@ export const CallOverlay: React.FC = () => {
     setCallerPubKey(null);
     setIncomingSDP(null);
     setIsMicOn(true);
-    setIsVideoOn(true);
+    setIsVideoOn(false);
+    setIsScreenSharing(false);
+    setHasRemoteVideo(false);
     setPeerConnectionState('new');
     setIceConnectionState('new');
     setShowDiagnostics(false);
@@ -272,10 +280,31 @@ export const CallOverlay: React.FC = () => {
           logTerminalOutcome('failed');
           resetCallState('Peer connection failed', { tone: 'danger', allowRetry: true, autoResetStatus: false });
         }
+      },
+      (stream, source: LocalVideoSource) => {
+        if (callGenerationRef.current !== generation) {
+          return;
+        }
+        setIsScreenSharing(source === 'screen');
+        if (source === 'camera') {
+          setIsVideoOn(true);
+        }
+        if (!stream && localVideoRef.current) {
+          localVideoRef.current.srcObject = null;
+          return;
+        }
+        if (stream) {
+          void attachStream(localVideoRef.current, stream);
+        }
+      },
+      (visible) => {
+        if (callGenerationRef.current === generation) {
+          setHasRemoteVideo(visible);
+        }
       }
     );
 
-  const handleStartCallAction = async (video: boolean, targetPubKey = activePeerKey) => {
+  const handleStartCallAction = async (mode: CallMediaMode, targetPubKey = activePeerKey) => {
     if (!targetPubKey) {
       presentStatus('Open a direct chat before starting a call', 'warning', false);
       return;
@@ -285,7 +314,7 @@ export const CallOverlay: React.FC = () => {
       return;
     }
     if (!socketManager.isRealtimeReady()) {
-      setLastRetryTarget({ peerPubKey: targetPubKey, video });
+      setLastRetryTarget({ peerPubKey: targetPubKey, mode });
       presentStatus('Reconnecting secure signaling...', 'warning', false);
     }
     try {
@@ -296,25 +325,31 @@ export const CallOverlay: React.FC = () => {
 
       const generation = callGenerationRef.current + 1;
       callGenerationRef.current = generation;
-      markCallContext(targetPubKey, 'outgoing', video);
-      setLastRetryTarget({ peerPubKey: targetPubKey, video });
-      presentStatus(video ? 'Starting video call...' : 'Starting audio call...', 'neutral', false);
+      markCallContext(targetPubKey, 'outgoing', mode);
+      setLastRetryTarget({ peerPubKey: targetPubKey, mode });
+      presentStatus(
+        mode === 'screen' ? 'Starting screen share...' : `Starting ${mode} call...`,
+        'neutral',
+        false
+      );
       setCallState('outgoing');
       void logCallEvent({
         peerPubKey: targetPubKey,
         direction: 'outgoing',
-        media: video ? 'video' : 'audio',
+        media: mode,
         outcome: 'started',
       });
       
       rtcManagerRef.current = createRtcManager(generation);
 
-      const stream = await rtcManagerRef.current.startCall(targetPubKey, video);
+      const stream = await rtcManagerRef.current.startCall(targetPubKey, mode);
       if (callGenerationRef.current !== generation) {
         rtcManagerRef.current?.endCall();
         return;
       }
       await attachStream(localVideoRef.current, stream);
+      setIsVideoOn(mode === 'video' && stream.getVideoTracks().length > 0);
+      setIsScreenSharing(mode === 'screen' && stream.getVideoTracks().length > 0);
       presentStatus('Ringing...', 'neutral', false);
       clearCallTimeout();
       callTimeoutRef.current = setTimeout(() => {
@@ -373,13 +408,13 @@ export const CallOverlay: React.FC = () => {
       const generation = callGenerationRef.current + 1;
       callGenerationRef.current = generation;
       clearCallTimeout();
-      markCallContext(callerPubKey, 'incoming', isVideo);
+      markCallContext(callerPubKey, 'incoming', callMedia);
       setCallState('active');
       presentStatus('Connecting...', 'neutral', false);
 
       rtcManagerRef.current = createRtcManager(generation);
 
-      const stream = await rtcManagerRef.current.handleOffer(callerPubKey, incomingSDP, isVideo);
+      const stream = await rtcManagerRef.current.handleOffer(callerPubKey, incomingSDP, callMedia);
       if (callGenerationRef.current !== generation) {
         rtcManagerRef.current?.endCall();
         return;
@@ -394,6 +429,8 @@ export const CallOverlay: React.FC = () => {
         await rtcManagerRef.current.handleCandidate(entry.candidate);
       }
       await attachStream(localVideoRef.current, stream);
+      setIsVideoOn(callMedia === 'video' && stream.getVideoTracks().length > 0);
+      setIsScreenSharing(false);
       clearConnectTimeout();
       connectTimeoutRef.current = setTimeout(() => {
         if (callGenerationRef.current !== generation) {
@@ -433,6 +470,8 @@ export const CallOverlay: React.FC = () => {
     const { type, sender_pub_key, data } = e.detail;
     const parsedData = JSON.parse(data || '{}') as RTCIceCandidateInit & {
       isVideo?: boolean;
+      isScreenShare?: boolean;
+      mediaMode?: CallMediaMode;
       sdp?: RTCSessionDescriptionInit;
       reason?: string;
       accepted?: boolean;
@@ -445,22 +484,27 @@ export const CallOverlay: React.FC = () => {
         socketManager.sendSignal(sender_pub_key, 'call_reject', { reason: 'busy' });
         return;
       }
-      markCallContext(sender_pub_key, 'incoming', Boolean(parsedData.isVideo));
+      const incomingMode: CallMediaMode = parsedData.mediaMode === 'screen' || parsedData.isScreenShare
+        ? 'screen'
+        : parsedData.isVideo
+          ? 'video'
+          : 'audio';
+      markCallContext(sender_pub_key, 'incoming', incomingMode);
       clearCallTimeout();
       setCallState('incoming');
       setIncomingSDP(parsedData.sdp ?? null);
       setSignalOnlyCall(!parsedData.sdp || parsedData.supportsMedia === false);
       presentStatus(
         !parsedData.sdp || parsedData.supportsMedia === false
-          ? `Incoming ${parsedData.isVideo ? 'video' : 'audio'} call request`
-          : `Incoming ${parsedData.isVideo ? 'video' : 'audio'} call`,
+          ? `Incoming ${callMediaLabel(incomingMode)} request`
+          : `Incoming ${callMediaLabel(incomingMode)}`,
         'success',
         false
       );
       void logCallEvent({
         peerPubKey: sender_pub_key,
         direction: 'incoming',
-        media: parsedData.isVideo ? 'video' : 'audio',
+        media: incomingMode,
         outcome: 'started',
       });
       callTimeoutRef.current = setTimeout(() => {
@@ -531,7 +575,8 @@ export const CallOverlay: React.FC = () => {
 
   const onStartCallEvent = useEffectEvent(async (event: Event) => {
     const e = event as CustomEvent<StartCallDetail>;
-    await handleStartCallAction(Boolean(e.detail.video), e.detail.peerPubKey);
+    const mode = e.detail.mode ?? (e.detail.video ? 'video' : 'audio');
+    await handleStartCallAction(mode, e.detail.peerPubKey);
   });
 
   const onSocketDisconnect = useEffectEvent(() => {
@@ -577,11 +622,32 @@ export const CallOverlay: React.FC = () => {
     rtcManagerRef.current?.setVideoEnabled(nextValue);
   };
 
+  const handleToggleScreenShare = async () => {
+    if (!rtcManagerRef.current || callState !== 'active') {
+      return;
+    }
+    try {
+      if (isScreenSharing) {
+        await rtcManagerRef.current.stopScreenShare();
+        presentStatus('Screen sharing stopped', 'neutral');
+      } else {
+        const stream = await rtcManagerRef.current.startScreenShare();
+        setIsScreenSharing(true);
+        window.requestAnimationFrame(() => {
+          void attachStream(localVideoRef.current, stream);
+        });
+        presentStatus('Sharing your screen', 'success');
+      }
+    } catch (error) {
+      presentStatus(errorToStatus(error) ?? 'Screen sharing could not be started', 'danger', false);
+    }
+  };
+
   const handleRetryLastCall = () => {
     if (!lastRetryTarget) {
       return;
     }
-    void handleStartCallAction(lastRetryTarget.video, lastRetryTarget.peerPubKey);
+    void handleStartCallAction(lastRetryTarget.mode, lastRetryTarget.peerPubKey);
   };
 
   const statusToneClass = statusTone === 'success'
@@ -603,7 +669,7 @@ export const CallOverlay: React.FC = () => {
             className="mt-2 inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] font-medium text-white transition-all hover:bg-white/10"
           >
             <RotateCcw className="h-3.5 w-3.5" />
-            Retry {lastRetryTarget.video ? 'video' : 'audio'} call
+            Retry {callMediaLabel(lastRetryTarget.mode)}
           </button>
         ) : null}
       </div>
@@ -633,11 +699,37 @@ export const CallOverlay: React.FC = () => {
       </button>
 
       <div className="relative w-full max-w-4xl aspect-video bg-slate-900 rounded-3xl overflow-hidden shadow-2xl border border-slate-800">
-        <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
-        
+        <video
+          ref={remoteVideoRef}
+          autoPlay
+          playsInline
+          className={`${hasRemoteVideo ? 'block' : 'hidden'} h-full w-full bg-black object-contain`}
+        />
+        {!hasRemoteVideo && callState === 'active' ? (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#111b26]">
+            <div className="flex h-24 w-24 items-center justify-center overflow-hidden rounded-full border border-white/10 bg-white/5">
+              {displayAvatar ? (
+                <img src={displayAvatar} alt={displayName} className="h-full w-full object-cover" />
+              ) : (
+                <span className="text-4xl font-semibold text-white">{displayName.charAt(0).toUpperCase()}</span>
+              )}
+            </div>
+            <p className="mt-5 text-sm text-slate-300">{displayName}</p>
+            <p className="mt-2 text-xs text-slate-500">Audio connected</p>
+          </div>
+        ) : null}
+
+        {(isVideoOn || isScreenSharing) ? (
           <div className="absolute bottom-4 right-4 aspect-video w-28 overflow-hidden rounded-2xl border-2 border-slate-700 bg-black shadow-xl sm:bottom-6 sm:right-6 sm:w-48">
-          <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
-        </div>
+            <video
+              ref={localVideoRef}
+              autoPlay
+              playsInline
+              muted
+              className={`h-full w-full ${isScreenSharing ? 'object-contain' : 'object-cover'}`}
+            />
+          </div>
+        ) : null}
 
         {callState === 'outgoing' && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm">
@@ -694,6 +786,10 @@ export const CallOverlay: React.FC = () => {
                 <span className="text-slate-400">Camera</span>
                 <span className="text-white">{isVideoOn ? 'enabled' : 'disabled'}</span>
               </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400">Screen</span>
+                <span className="text-white">{isScreenSharing ? 'sharing' : 'not shared'}</span>
+              </div>
               {!appConfig.rtcRelayConfigured ? (
                 <div className="rounded-xl border border-amber-400/20 bg-amber-500/10 px-3 py-2 text-[11px] leading-5 text-amber-100">
                   TURN relay is not configured. Calls may fail on strict NATs, mobile networks, or corporate Wi-Fi even when messaging works.
@@ -719,11 +815,33 @@ export const CallOverlay: React.FC = () => {
           <PhoneOff className="w-8 h-8 text-white" />
         </button>
 
-        <button 
-          onClick={handleToggleVideo}
-          className={`p-5 rounded-full transition-all ${isVideoOn ? 'bg-slate-800 hover:bg-slate-700' : 'bg-red-500/20 text-red-400'}`}
+        {callMedia === 'video' ? (
+          <button
+            type="button"
+            onClick={handleToggleVideo}
+            className={`p-5 rounded-full transition-all ${isVideoOn ? 'bg-slate-800 hover:bg-slate-700' : 'bg-red-500/20 text-red-400'}`}
+            aria-label={isVideoOn ? 'Disable camera' : 'Enable camera'}
+            title={isVideoOn ? 'Disable camera' : 'Enable camera'}
+          >
+            {isVideoOn ? <Video className="w-6 h-6" /> : <VideoOff className="w-6 h-6" />}
+          </button>
+        ) : null}
+
+        <button
+          type="button"
+          onClick={() => void handleToggleScreenShare()}
+          disabled={callState !== 'active'}
+          className={`p-5 rounded-full transition-all ${
+            isScreenSharing
+              ? 'bg-accent/20 text-accent'
+              : callState === 'active'
+                ? 'bg-slate-800 hover:bg-slate-700'
+                : 'cursor-not-allowed bg-slate-900 text-slate-600'
+          }`}
+          aria-label={isScreenSharing ? 'Stop screen sharing' : 'Share screen'}
+          title={isScreenSharing ? 'Stop screen sharing' : 'Share screen'}
         >
-          {isVideoOn ? <Video className="w-6 h-6" /> : <VideoOff className="w-6 h-6" />}
+          {isScreenSharing ? <ScreenShareOff className="w-6 h-6" /> : <MonitorUp className="w-6 h-6" />}
         </button>
       </div>
 
@@ -736,7 +854,7 @@ export const CallOverlay: React.FC = () => {
                 <span className="text-5xl font-bold text-white">{displayName.charAt(0).toUpperCase()}</span>
               )}
            </div>
-           <h2 className="text-3xl font-bold mb-2">Incoming {isVideo ? 'Video' : 'Audio'} Call</h2>
+           <h2 className="text-3xl font-bold mb-2">Incoming {callMedia === 'screen' ? 'Screen Share' : callMedia === 'video' ? 'Video Call' : 'Audio Call'}</h2>
            <p className="text-slate-400 mb-12">{displayName}</p>
            <p className="mb-8 max-w-md text-center text-xs text-slate-500">
              {signalOnlyCall

@@ -10,6 +10,7 @@ pub const CALL_ICE: &str = "ice_candidate";
 pub enum CallMediaKind {
     Audio,
     Video,
+    Screen,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,5 +148,11 @@ mod tests {
         let mut call = CallSession::outgoing("peer".to_string(), CallMediaKind::Audio);
         call.reject("busy");
         assert_eq!(call.state, CallState::Busy);
+    }
+
+    #[test]
+    fn audio_and_screen_calls_do_not_enable_camera_implicitly() {
+        assert!(!CallSession::outgoing("peer".to_string(), CallMediaKind::Audio).camera_enabled);
+        assert!(!CallSession::outgoing("peer".to_string(), CallMediaKind::Screen).camera_enabled);
     }
 }

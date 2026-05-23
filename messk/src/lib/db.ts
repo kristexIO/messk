@@ -139,7 +139,7 @@ export interface CallHistoryEntry {
   id: string;
   peerPubKey: string;
   direction: 'incoming' | 'outgoing';
-  media: 'audio' | 'video';
+  media: 'audio' | 'video' | 'screen';
   outcome: 'started' | 'connected' | 'missed' | 'declined' | 'ended' | 'failed';
   createdAt: number;
   endedAt?: number;

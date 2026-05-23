@@ -4,7 +4,7 @@ import { socketManager } from '../lib/socket';
 import { clearThreadStats, db, syncThreadStats, type StoredMessage } from '../lib/db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import Dexie from 'dexie';
-import { ArrowLeft, ShieldCheck, Trash2, Phone, Video, Pencil, Search, X, Archive, Bell, BellOff, ArrowDownCircle, Users, Crown, WifiOff, Clock3, UserPlus, UserMinus, Shield, Megaphone, Pin, AtSign, Link2 } from 'lucide-react';
+import { ArrowLeft, ShieldCheck, Trash2, Phone, Video, MonitorUp, Pencil, Search, X, Archive, Bell, BellOff, ArrowDownCircle, Users, Crown, WifiOff, Clock3, UserPlus, UserMinus, Shield, Megaphone, Pin, AtSign, Link2 } from 'lucide-react';
 import { UserIdentityModal } from '../components/UserIdentityModal';
 import { Sidebar } from '../components/Sidebar';
 import { encryptFile, decryptFile } from '../lib/attachments';
@@ -1344,8 +1344,8 @@ export const Chat: React.FC = () => {
 
   const contactName = activeContact?.name || (activePeerKey ? activePeerKey.substring(0, 8) + '...' : '');
   const isSelfCallTarget = Boolean(activePeerKey && myPublicKey && activePeerKey === myPublicKey);
-  const triggerCallStart = (video: boolean) => {
-    window.dispatchEvent(new CustomEvent('start_call', { detail: { video } }));
+  const triggerCallStart = (mode: 'audio' | 'video' | 'screen') => {
+    window.dispatchEvent(new CustomEvent('start_call', { detail: { mode } }));
   };
 
   const handleInitEdit = (msg: StoredMessage) => {
@@ -1825,7 +1825,7 @@ export const Chat: React.FC = () => {
                 <button
                   type="button"
                   disabled={isSelfCallTarget}
-                  onClick={() => triggerCallStart(false)}
+                  onClick={() => triggerCallStart('audio')}
                   className={`rounded-xl p-2 transition-all sm:p-2.5 ${
                     isSelfCallTarget
                       ? 'cursor-not-allowed text-text-muted/40'
@@ -1839,7 +1839,7 @@ export const Chat: React.FC = () => {
                 <button
                   type="button"
                   disabled={isSelfCallTarget}
-                  onClick={() => triggerCallStart(true)}
+                  onClick={() => triggerCallStart('video')}
                   className={`rounded-xl p-2 transition-all sm:p-2.5 ${
                     isSelfCallTarget
                       ? 'cursor-not-allowed text-text-muted/40'
@@ -1849,6 +1849,20 @@ export const Chat: React.FC = () => {
                   title={isSelfCallTarget ? 'You cannot call your own identity on the same device' : 'Start video call'}
                 >
                   <Video className="w-5 h-5" />
+                </button>
+                <button
+                  type="button"
+                  disabled={isSelfCallTarget}
+                  onClick={() => triggerCallStart('screen')}
+                  className={`rounded-xl p-2 transition-all sm:p-2.5 ${
+                    isSelfCallTarget
+                      ? 'cursor-not-allowed text-text-muted/40'
+                      : 'text-text-muted hover:bg-white/5 hover:text-white'
+                  }`}
+                  aria-label="Share screen"
+                  title={isSelfCallTarget ? 'You cannot call your own identity on the same device' : 'Share screen'}
+                >
+                  <MonitorUp className="w-5 h-5" />
                 </button>
                 <button
                   onClick={isIdentityVerified ? handleClearIdentityVerification : handleVerifyIdentity}
