@@ -168,7 +168,7 @@ export class WebRTCManager {
 
     await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
     this.remoteDescriptionReady = true;
-    this.videoSender = this.findVideoSender();
+    this.videoSender = this.prepareVideoSenderForSharing();
     await this.flushPendingCandidates();
     const answer = await this.peerConnection.createAnswer();
     await this.peerConnection.setLocalDescription(answer);
@@ -261,9 +261,26 @@ export class WebRTCManager {
   }
 
   private findVideoSender() {
+    return this.findVideoTransceiver()?.sender ?? null;
+  }
+
+  private prepareVideoSenderForSharing() {
+    const transceiver = this.findVideoTransceiver();
+    if (!transceiver) {
+      return null;
+    }
+
+    if (transceiver.direction !== 'sendrecv') {
+      transceiver.direction = 'sendrecv';
+    }
+
+    return transceiver.sender;
+  }
+
+  private findVideoTransceiver() {
     return this.peerConnection?.getTransceivers().find(
       (transceiver) => transceiver.receiver.track.kind === 'video'
-    )?.sender ?? null;
+    ) ?? null;
   }
 
   private createPeerConnection(peerPubKey: string) {

@@ -58,11 +58,18 @@ class FakeTrack {
   }
 }
 
+type FakeTransceiver = {
+  receiver: { track: FakeTrack };
+  sender: RTCRtpSender;
+  direction: RTCRtpTransceiverDirection;
+};
+
 class FakePeerConnection {
   static latest: FakePeerConnection | null = null;
   addedTracks: FakeTrack[] = [];
   addedTransceivers: string[] = [];
   replacedTracks: Array<FakeTrack | null> = [];
+  transceivers: FakeTransceiver[] = [];
   connectionState: RTCPeerConnectionState = 'new';
   iceConnectionState: RTCIceConnectionState = 'new';
   onicecandidate: ((event: RTCPeerConnectionIceEvent) => void) | null = null;
@@ -76,26 +83,57 @@ class FakePeerConnection {
 
   addTrack(track: FakeTrack) {
     this.addedTracks.push(track);
-    return {
-      replaceTrack: vi.fn(async (replacement: FakeTrack | null) => {
-        this.replacedTracks.push(replacement);
-      }),
-    } as unknown as RTCRtpSender;
+    const existing = this.transceivers.find((transceiver) => transceiver.receiver.track.kind === track.kind);
+    if (existing) {
+      return existing.sender;
+    }
+
+    const transceiver = this.makeTransceiver(track.kind);
+    this.transceivers.push(transceiver);
+    return transceiver.sender;
   }
 
-  addTransceiver(kind: string) {
+  addTransceiver(kind: string, init?: RTCRtpTransceiverInit) {
     this.addedTransceivers.push(kind);
+    const transceiver = this.makeTransceiver(
+      kind as 'audio' | 'video',
+      init?.direction ?? 'sendrecv'
+    );
+    this.transceivers.push(transceiver);
+    return transceiver as unknown as RTCRtpTransceiver;
+  }
+
+  getTransceivers() {
+    return this.transceivers as unknown as RTCRtpTransceiver[];
+  }
+
+  private makeTransceiver(
+    kind: 'audio' | 'video',
+    direction: RTCRtpTransceiverDirection = 'sendrecv'
+  ): FakeTransceiver {
     return {
+      receiver: { track: new FakeTrack(kind) },
+      direction,
       sender: {
         replaceTrack: vi.fn(async (replacement: FakeTrack | null) => {
           this.replacedTracks.push(replacement);
         }),
-      },
-    } as unknown as RTCRtpTransceiver;
+      } as unknown as RTCRtpSender,
+    };
   }
 
   async createOffer() {
     return { type: 'offer' as RTCSdpType, sdp: 'offer-sdp' };
+  }
+
+  async createAnswer() {
+    return { type: 'answer' as RTCSdpType, sdp: 'answer-sdp' };
+  }
+
+  async setRemoteDescription() {
+    if (!this.transceivers.some((transceiver) => transceiver.receiver.track.kind === 'video')) {
+      this.transceivers.push(this.makeTransceiver('video', 'recvonly'));
+    }
   }
 
   async setLocalDescription() {}
@@ -119,6 +157,14 @@ describe('WebRTCManager call media modes', () => {
     Object.defineProperty(globalThis, 'RTCPeerConnection', {
       configurable: true,
       value: FakePeerConnection,
+    });
+    Object.defineProperty(globalThis, 'RTCSessionDescription', {
+      configurable: true,
+      value: class {
+        constructor(init: RTCSessionDescriptionInit) {
+          Object.assign(this, init);
+        }
+      },
     });
     Object.defineProperty(navigator, 'mediaDevices', {
       configurable: true,
@@ -164,6 +210,21 @@ describe('WebRTCManager call media modes', () => {
 
     expect(getUserMedia).toHaveBeenCalledTimes(1);
     expect(getDisplayMedia).toHaveBeenCalledOnce();
+    expect(FakePeerConnection.latest?.replacedTracks).toEqual([screenTrack]);
+  });
+
+  it('can publish a screen track after answering an audio call', async () => {
+    const manager = new WebRTCManager(() => undefined);
+
+    await manager.handleOffer('peer', { type: 'offer', sdp: 'offer-sdp' }, 'audio');
+    const videoTransceiver = FakePeerConnection.latest?.transceivers.find(
+      (transceiver) => transceiver.receiver.track.kind === 'video'
+    );
+
+    expect(videoTransceiver?.direction).toBe('sendrecv');
+
+    await manager.startScreenShare();
+
     expect(FakePeerConnection.latest?.replacedTracks).toEqual([screenTrack]);
   });
 

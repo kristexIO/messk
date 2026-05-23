@@ -133,6 +133,13 @@ export const CallOverlay: React.FC = () => {
     }
   };
 
+  const revealRemoteVideoIfReady = () => {
+    const video = remoteVideoRef.current;
+    if (video && video.videoWidth > 0 && video.videoHeight > 0) {
+      setHasRemoteVideo(true);
+    }
+  };
+
   const clearCallTimeout = () => {
     if (callTimeoutRef.current) {
       clearTimeout(callTimeoutRef.current);
@@ -298,8 +305,8 @@ export const CallOverlay: React.FC = () => {
         }
       },
       (visible) => {
-        if (callGenerationRef.current === generation) {
-          setHasRemoteVideo(visible);
+        if (callGenerationRef.current === generation && !visible) {
+          setHasRemoteVideo(false);
         }
       }
     );
@@ -703,6 +710,9 @@ export const CallOverlay: React.FC = () => {
           ref={remoteVideoRef}
           autoPlay
           playsInline
+          onLoadedData={revealRemoteVideoIfReady}
+          onPlaying={revealRemoteVideoIfReady}
+          onResize={revealRemoteVideoIfReady}
           className={`${hasRemoteVideo ? 'block' : 'hidden'} h-full w-full bg-black object-contain`}
         />
         {!hasRemoteVideo && callState === 'active' ? (
