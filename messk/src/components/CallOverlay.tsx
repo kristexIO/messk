@@ -719,17 +719,20 @@ export const CallOverlay: React.FC = () => {
           </div>
         ) : null}
 
-        {(isVideoOn || isScreenSharing) ? (
-          <div className="absolute bottom-4 right-4 aspect-video w-28 overflow-hidden rounded-2xl border-2 border-slate-700 bg-black shadow-xl sm:bottom-6 sm:right-6 sm:w-48">
-            <video
-              ref={localVideoRef}
-              autoPlay
-              playsInline
-              muted
-              className={`h-full w-full ${isScreenSharing ? 'object-contain' : 'object-cover'}`}
-            />
-          </div>
-        ) : null}
+        <div
+          aria-hidden={!isVideoOn && !isScreenSharing}
+          className={`absolute bottom-4 right-4 aspect-video w-28 overflow-hidden rounded-2xl border-2 border-slate-700 bg-black shadow-xl sm:bottom-6 sm:right-6 sm:w-48 ${
+            isVideoOn || isScreenSharing ? 'block' : 'hidden'
+          }`}
+        >
+          <video
+            ref={localVideoRef}
+            autoPlay
+            playsInline
+            muted
+            className={`h-full w-full ${isScreenSharing ? 'object-contain' : 'object-cover'}`}
+          />
+        </div>
 
         {callState === 'outgoing' && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm">

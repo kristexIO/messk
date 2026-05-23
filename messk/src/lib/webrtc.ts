@@ -281,7 +281,17 @@ export class WebRTCManager {
     };
 
     pc.ontrack = (event) => {
-      this.remoteStream = event.streams[0] ?? this.remoteStream ?? new MediaStream([event.track]);
+      const associatedStream = event.streams[0];
+      this.remoteStream = this.remoteStream ?? associatedStream ?? new MediaStream();
+      const incomingTracks = associatedStream?.getTracks() ?? [event.track];
+      incomingTracks.forEach((track) => {
+        if (!this.remoteStream?.getTracks().includes(track)) {
+          this.remoteStream?.addTrack(track);
+        }
+      });
+      if (!this.remoteStream.getTracks().includes(event.track)) {
+        this.remoteStream.addTrack(event.track);
+      }
       this.onRemoteStream(this.remoteStream);
       if (event.track.kind === 'video') {
         const updateVideoState = () => {

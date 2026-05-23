@@ -42,8 +42,11 @@ class FakeMediaStream {
 
 class FakeTrack {
   enabled = true;
+  muted = false;
   readyState: MediaStreamTrackState = 'live';
   onended: (() => void) | null = null;
+  onmute: (() => void) | null = null;
+  onunmute: (() => void) | null = null;
   readonly kind: 'audio' | 'video';
 
   constructor(kind: 'audio' | 'video') {
@@ -162,5 +165,28 @@ describe('WebRTCManager call media modes', () => {
     expect(getUserMedia).toHaveBeenCalledTimes(1);
     expect(getDisplayMedia).toHaveBeenCalledOnce();
     expect(FakePeerConnection.latest?.replacedTracks).toEqual([screenTrack]);
+  });
+
+  it('adds a streamless incoming screen track to the existing remote audio stream', async () => {
+    const displayedStreams: FakeMediaStream[] = [];
+    const manager = new WebRTCManager((stream) => {
+      displayedStreams.push(stream as unknown as FakeMediaStream);
+    });
+    const incomingAudio = new FakeTrack('audio');
+    const incomingScreen = new FakeTrack('video');
+
+    await manager.startCall('peer', 'audio');
+    FakePeerConnection.latest?.ontrack?.({
+      track: incomingAudio,
+      streams: [new FakeMediaStream([incomingAudio])],
+    } as unknown as RTCTrackEvent);
+    FakePeerConnection.latest?.ontrack?.({
+      track: incomingScreen,
+      streams: [],
+    } as unknown as RTCTrackEvent);
+
+    const displayedStream = displayedStreams.at(-1);
+    expect(displayedStream?.getAudioTracks()).toEqual([incomingAudio]);
+    expect(displayedStream?.getVideoTracks()).toEqual([incomingScreen]);
   });
 });
