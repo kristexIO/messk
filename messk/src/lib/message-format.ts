@@ -1,4 +1,4 @@
-import { displayMessageText } from './protocolContract';
+import { coerceMessageText, displayMessageText } from './protocolContract';
 
 export type MessageMention = {
   pubKey: string;
@@ -20,15 +20,16 @@ export type RichTextMessagePayload = {
   replyTo?: ReplyPreview;
 };
 
-export function parseRichTextMessage(value: string): { text: string; mentions: MessageMention[]; replyTo?: ReplyPreview; hasRichPayload: boolean } {
-  if (!value.startsWith('{"type":"text"')) {
-    return { text: value, mentions: [], hasRichPayload: false };
+export function parseRichTextMessage(value: unknown): { text: string; mentions: MessageMention[]; replyTo?: ReplyPreview; hasRichPayload: boolean } {
+  const rawValue = coerceMessageText(value);
+  if (!rawValue.startsWith('{"type":"text"')) {
+    return { text: rawValue, mentions: [], hasRichPayload: false };
   }
 
   try {
-    const parsed = JSON.parse(value) as Partial<RichTextMessagePayload>;
+    const parsed = JSON.parse(rawValue) as Partial<RichTextMessagePayload>;
     if (parsed.type !== 'text' || typeof parsed.text !== 'string') {
-      return { text: value, mentions: [], hasRichPayload: false };
+      return { text: rawValue, mentions: [], hasRichPayload: false };
     }
     const mentions = Array.isArray(parsed.mentions)
       ? parsed.mentions.filter((mention): mention is MessageMention =>
@@ -44,7 +45,7 @@ export function parseRichTextMessage(value: string): { text: string; mentions: M
     const replyTo = normalizeReplyPreview(parsed.replyTo);
     return { text: parsed.text, mentions, replyTo, hasRichPayload: true };
   } catch {
-    return { text: value, mentions: [], hasRichPayload: false };
+    return { text: rawValue, mentions: [], hasRichPayload: false };
   }
 }
 
@@ -107,11 +108,11 @@ export function extractMentions(text: string, handleDirectory: Record<string, st
   return mentions;
 }
 
-export function getMessageNotificationPreview(rawMessage: string): string {
+export function getMessageNotificationPreview(rawMessage: unknown): string {
   return displayMessageText(rawMessage).slice(0, 80) || 'New message';
 }
 
-export function isMentioningPubKey(rawMessage: string, pubKey: string): boolean {
+export function isMentioningPubKey(rawMessage: unknown, pubKey: string): boolean {
   const parsed = parseRichTextMessage(rawMessage);
   return parsed.mentions.some((mention) => mention.pubKey === pubKey);
 }

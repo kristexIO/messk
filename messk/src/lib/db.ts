@@ -1,7 +1,7 @@
 import Dexie, { type Table } from 'dexie';
 import { randomBytes, secretbox } from 'tweetnacl';
 import { decodeBase64, encodeBase64 } from 'tweetnacl-util';
-import { parseRichTextMessage } from './message-format';
+import { getMessageNotificationPreview } from './message-format';
 import { DEFAULT_DB_NAME } from './storage';
 
 export interface MyKeyPair {
@@ -675,13 +675,7 @@ function previewThreadMessage(message: Pick<StoredMessage, 'text' | 'deletedAt'>
   if (message.deletedAt) {
     return 'Message deleted';
   }
-  if (message.text.startsWith('{"type":"file"')) {
-    return 'Attachment';
-  }
-  if (message.text.startsWith('{"type":"voice"')) {
-    return 'Voice message';
-  }
-  return parseRichTextMessage(message.text).text;
+  return getMessageNotificationPreview(message.text);
 }
 
 async function getCurrentIdentityPublicKey(database: MessengerDatabase = db) {

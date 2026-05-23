@@ -119,6 +119,13 @@ describe('protocolContract', () => {
     expect(isDeletedMessagePayload('{"type":"deleted"}')).toBe(true);
   });
 
+  it('does not throw on malformed local message text', () => {
+    expect(displayMessageText(undefined)).toBe('');
+    expect(displayMessageText(null)).toBe('');
+    expect(displayMessageText({ type: 'file', name: 'broken.bin', size: 10 })).toBe('broken.bin - 10 B');
+    expect(messagePayloadPreview(undefined)).toBeNull();
+  });
+
   it('exposes payload kind for UI rendering', () => {
     expect(messagePayloadPreview('{"type":"voice"}')?.kind).toBe('voice');
     expect(messagePayloadPreview('{"type":"video_call","status":"missed"}')).toMatchObject({

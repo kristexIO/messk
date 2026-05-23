@@ -4,6 +4,7 @@ import { toast } from 'react-hot-toast';
 import { decryptFile } from '../../lib/attachments';
 import { type StoredMessage } from '../../lib/db';
 import { parseRichTextMessage, type MessageMention, type ReplyPreview } from '../../lib/message-format';
+import { coerceMessageText } from '../../lib/protocolContract';
 import { VoiceWaveform } from '../VoiceWaveform';
 import { normalizeReactionValue } from './messageUtils';
 
@@ -30,8 +31,8 @@ type ParsedMessageContent =
 
 const QUICK_REACTIONS = ['\u{1F44D}', '\u2764\uFE0F', '\u{1F525}'];
 
-function parseJsonObject(text: string): Record<string, unknown> | null {
-  const trimmed = text.trim();
+function parseJsonObject(text: unknown): Record<string, unknown> | null {
+  const trimmed = coerceMessageText(text).trim();
   if (!trimmed.startsWith('{')) return null;
   try {
     const parsed = JSON.parse(trimmed) as unknown;
@@ -73,7 +74,8 @@ function normalizeVoicePayload(value: Record<string, unknown>): VoicePayload | n
   return { url, key, duration };
 }
 
-function parseMessageContent(text: string): ParsedMessageContent {
+function parseMessageContent(text: unknown): ParsedMessageContent {
+  const safeText = coerceMessageText(text);
   const json = parseJsonObject(text);
   const payloadType = typeof json?.type === 'string' ? json.type.toLowerCase() : '';
   if (json && ['file', 'attachment', 'image', 'video', 'document'].includes(payloadType)) {
@@ -84,7 +86,7 @@ function parseMessageContent(text: string): ParsedMessageContent {
         payload,
       };
     }
-    return { kind: 'text', text, mentions: [] };
+    return { kind: 'text', text: safeText, mentions: [] };
   }
 
   if (json && ['voice', 'audio', 'voice_message'].includes(payloadType)) {
@@ -95,10 +97,10 @@ function parseMessageContent(text: string): ParsedMessageContent {
         payload,
       };
     }
-    return { kind: 'text', text, mentions: [] };
+    return { kind: 'text', text: safeText, mentions: [] };
   }
 
-  const parsedRichText = parseRichTextMessage(text);
+  const parsedRichText = parseRichTextMessage(safeText);
   return { kind: 'text', text: parsedRichText.text, mentions: parsedRichText.mentions, replyTo: parsedRichText.replyTo };
 }
 

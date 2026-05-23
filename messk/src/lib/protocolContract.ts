@@ -214,8 +214,25 @@ export type MessagePayloadPreview = {
   detail: string;
 };
 
-export function messagePayloadPreview(raw: string): MessagePayloadPreview | null {
-  const trimmed = raw.trim();
+export function coerceMessageText(raw: unknown): string {
+  if (typeof raw === 'string') {
+    return raw;
+  }
+  if (raw === null || raw === undefined) {
+    return '';
+  }
+  if (typeof raw === 'object') {
+    try {
+      return JSON.stringify(raw);
+    } catch {
+      return '';
+    }
+  }
+  return String(raw);
+}
+
+export function messagePayloadPreview(raw: unknown): MessagePayloadPreview | null {
+  const trimmed = coerceMessageText(raw).trim();
   if (!trimmed) return null;
 
   let parsed: unknown;
@@ -272,8 +289,8 @@ export function messagePayloadPreview(raw: string): MessagePayloadPreview | null
   }
 }
 
-export function displayMessageText(raw: string): string {
-  const trimmed = raw.trim();
+export function displayMessageText(raw: unknown): string {
+  const trimmed = coerceMessageText(raw).trim();
   if (!trimmed) return '';
 
   const preview = messagePayloadPreview(trimmed);
@@ -290,7 +307,7 @@ export function displayMessageText(raw: string): string {
   return trimmed;
 }
 
-export function isDeletedMessagePayload(raw: string): boolean {
+export function isDeletedMessagePayload(raw: unknown): boolean {
   return messagePayloadPreview(raw)?.kind === 'deleted';
 }
 

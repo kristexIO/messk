@@ -13,6 +13,7 @@ import { toast } from 'react-hot-toast';
 import { appConfig } from '../lib/config';
 import { fetchWithTimeout, toNetworkErrorMessage, UPLOAD_REQUEST_TIMEOUT_MS } from '../lib/http';
 import { encodeRichTextMessage, getMessageNotificationPreview, isMentioningPubKey, parseRichTextMessage, type ReplyPreview } from '../lib/message-format';
+import { coerceMessageText } from '../lib/protocolContract';
 import { deriveMentionHandle, getPublicKeyFingerprint } from '../lib/identity';
 import { useI18n } from '../lib/i18n';
 import {
@@ -259,7 +260,7 @@ export const Chat: React.FC = () => {
         matches = isMentioningPubKey(msg.text, myPublicKey);
       }
       if (matches && deferredMessageSearch) {
-        matches = msg.text.toLowerCase().includes(deferredMessageSearch);
+        matches = coerceMessageText(msg.text).toLowerCase().includes(deferredMessageSearch);
       }
       return matches;
     });
@@ -2392,11 +2393,7 @@ export const Chat: React.FC = () => {
                       Pinned post
                     </div>
                     <div className="mt-1 text-xs text-white/80">
-                      {pinnedChannelMessage.text.startsWith('{"type":"file"')
-                        ? 'Attachment'
-                        : pinnedChannelMessage.text.startsWith('{"type":"voice"')
-                          ? 'Voice message'
-                          : pinnedChannelMessage.text}
+                      {getThreadMessagePreview(pinnedChannelMessage)}
                     </div>
                   </div>
                 ) : null}
