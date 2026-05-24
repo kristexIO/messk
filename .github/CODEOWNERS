@@ -1,0 +1,12 @@
+# Critical boundaries require an explicit repository owner review.
+/mess/ @kristexIO
+/messk/src/lib/crypto.ts @kristexIO
+/messk/src/lib/ratchet.ts @kristexIO
+/messk/src/lib/security.ts @kristexIO
+/clients/core/ @kristexIO
+/clients/windows/src/crypto.rs @kristexIO
+/clients/windows/src/ratchet.rs @kristexIO
+/clients/windows/src/vault.rs @kristexIO
+/scripts/ @kristexIO
+/SECURITY.md @kristexIO
+/.github/workflows/ @kristexIO

@@ -15,7 +15,11 @@ param(
   [int]$KeepReleases = 3,
   [string]$TurnHost = "",
   [string]$TurnUsername = "",
-  [string]$TurnPassword = ""
+  [string]$TurnPassword = "",
+  [ValidateSet("staging", "production")]
+  [string]$Environment = "production",
+  [string]$StagingReportPath = "",
+  [int]$MaxStagingEvidenceAgeHours = 24
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,6 +28,30 @@ $temporaryKnownHostsPath = ""
 if ([string]::IsNullOrWhiteSpace($Password) -and [string]::IsNullOrWhiteSpace($KeyFile)) {
   throw "Provide -KeyFile for SSH-key deploys, or -Password only for one-time bootstrap."
 }
+if ($Environment -eq "production" -and [string]::IsNullOrWhiteSpace($StagingReportPath)) {
+  throw "Production deploy requires -StagingReportPath from a successful staging verification of this commit."
+}
+if ($Environment -eq "staging" -and [string]::IsNullOrWhiteSpace($StagingReportPath)) {
+  throw "Staging deploy requires -StagingReportPath so the verified evidence can gate production."
+}
+
+if ([string]::IsNullOrWhiteSpace($LocalRoot)) {
+  $LocalRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+}
+$LocalRoot = (Resolve-Path $LocalRoot).Path
+$dirtyPaths = @(& git -C $LocalRoot status --porcelain --untracked-files=normal 2>$null)
+if ($LASTEXITCODE -ne 0) {
+  throw "VPS deploy requires a readable git worktree so the deployed bundle can be bound to a commit."
+}
+if ($dirtyPaths.Count -gt 0) {
+  throw "VPS deploy requires a clean git worktree so the deployed bundle matches its commit identity."
+}
+$resolvedCommit = (& git -C $LocalRoot rev-parse HEAD 2>$null | Select-Object -First 1)
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$resolvedCommit)) {
+  throw "VPS deploy requires a resolvable git commit so staging evidence and production promotion identify the same source."
+}
+$sourceCommit = ([string]$resolvedCommit).Trim()
+$commitSHA = $sourceCommit.Substring(0, [Math]::Min(12, $sourceCommit.Length))
 
 if (-not [string]::IsNullOrWhiteSpace($KeyFile)) {
   $KeyFile = (Resolve-Path $KeyFile).Path
@@ -53,22 +81,28 @@ if (-not [string]::IsNullOrWhiteSpace($HostPublicKey)) {
   throw "Provide -HostPublicKey or -KnownHostsFile so the VPS SSH host key is verified before deploy."
 }
 
-if ([string]::IsNullOrWhiteSpace($LocalRoot)) {
-  $LocalRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-}
-
-$LocalRoot = (Resolve-Path $LocalRoot).Path
 $archivePath = Join-Path ([System.IO.Path]::GetTempPath()) "messan_deploy_bundle.tar.gz"
 $remoteArchivePath = "/root/messan_deploy_bundle.tar.gz"
 $remoteScriptPath = "/root/messan_run_deploy.sh"
-$commitSHA = "archive-deploy"
-try {
-  $resolvedCommit = (& git -C $LocalRoot rev-parse --short=12 HEAD 2>$null).Trim()
-  if (-not [string]::IsNullOrWhiteSpace($resolvedCommit)) {
-    $commitSHA = $resolvedCommit
+
+$publicOrigin = if (-not [string]::IsNullOrWhiteSpace($Domain)) {
+  "https://$Domain"
+} else {
+  "http://$ServerHost"
+}
+if ($Environment -eq "production") {
+  try {
+    & (Join-Path $PSScriptRoot "assert-staging-evidence.ps1") `
+      -ReportPath $StagingReportPath `
+      -Commit $sourceCommit `
+      -ProductionOrigin $publicOrigin `
+      -MaxAgeHours $MaxStagingEvidenceAgeHours
+  } catch {
+    if (-not [string]::IsNullOrWhiteSpace($temporaryKnownHostsPath)) {
+      Remove-Item -LiteralPath $temporaryKnownHostsPath -Force -ErrorAction SilentlyContinue
+    }
+    throw
   }
-} catch {
-  $commitSHA = "archive-deploy"
 }
 
 & python -m pip install paramiko
@@ -697,6 +731,11 @@ server {
         include /etc/nginx/snippets/messan-proxy.conf;
     }
 
+    location = /protocol {
+        limit_req zone=messan_api burst=30 nodelay;
+        include /etc/nginx/snippets/messan-proxy.conf;
+    }
+
     location = /bootstrap {
         limit_req zone=messan_api burst=30 nodelay;
         include /etc/nginx/snippets/messan-proxy.conf;
@@ -871,6 +910,14 @@ if ! curl -fsS http://127.0.0.1:8080/version; then
   fi
   exit 1
 fi
+if ! curl -fsS http://127.0.0.1:8080/protocol; then
+  if [ -n "\$PREVIOUS_RELEASE" ] && [ -d "\$PREVIOUS_RELEASE" ]; then
+    ln -sfn "\$PREVIOUS_RELEASE" "\$CURRENT_LINK"
+    systemctl restart messan || true
+    systemctl restart nginx || true
+  fi
+  exit 1
+fi
 if ! curl -fsS http://127.0.0.1:8080/relay/health; then
   if [ -n "\$PREVIOUS_RELEASE" ] && [ -d "\$PREVIOUS_RELEASE" ]; then
     ln -sfn "\$PREVIOUS_RELEASE" "\$CURRENT_LINK"
@@ -991,15 +1038,19 @@ if ($deployExitCode -ne 0) {
   throw "Remote deploy failed"
 }
 
-$publicOrigin = if (-not [string]::IsNullOrWhiteSpace($Domain)) {
-  "https://$Domain"
+if ($Environment -eq "staging") {
+  & (Join-Path $PSScriptRoot "staging-verify.ps1") `
+    -BackendOrigin $publicOrigin `
+    -ExpectedCommit $sourceCommit `
+    -ReportPath $StagingReportPath
+  if ($LASTEXITCODE -ne 0) {
+    throw "Staging verification failed"
+  }
 } else {
-  "http://$ServerHost"
+  & (Join-Path $PSScriptRoot "production-smoke.ps1") -BackendOrigin $publicOrigin -ExpectedCommitPrefix $commitSHA
+  if ($LASTEXITCODE -ne 0) {
+    throw "Production smoke failed"
+  }
 }
 
-& (Join-Path $PSScriptRoot "production-smoke.ps1") -BackendOrigin $publicOrigin -ExpectedCommitPrefix $commitSHA
-if ($LASTEXITCODE -ne 0) {
-  throw "Production smoke failed"
-}
-
-Write-Host "Deploy completed successfully."
+Write-Host "$Environment deploy completed successfully."

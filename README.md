@@ -142,11 +142,22 @@ Deploy to a VPS:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\deploy-vps.ps1 `
+  -Environment staging `
+  -ServerHost <staging-server-host> `
+  -User root `
+  -KeyFile $env:USERPROFILE\.ssh\messk_prod_ed25519 `
+  -HostPublicKey 'ssh-ed25519 <staging-server-host-public-key>' `
+  -Domain staging.<domain> `
+  -StagingReportPath C:\secure\messk-staging-report.json
+
+powershell -ExecutionPolicy Bypass -File scripts\deploy-vps.ps1 `
+  -Environment production `
   -ServerHost <server-host> `
   -User root `
   -KeyFile $env:USERPROFILE\.ssh\messk_prod_ed25519 `
   -HostPublicKey 'ssh-ed25519 <server-host-public-key>' `
-  -Domain <domain>
+  -Domain <domain> `
+  -StagingReportPath C:\secure\messk-staging-report.json
 ```
 
 The deploy script builds the backend and web client on the server, creates a new
@@ -155,12 +166,19 @@ release directory, switches `/opt/messan/current`, restarts services, verifies
 releases. It also applies production hardening for nginx, UFW, fail2ban, sysctl,
 swap, service limits, and systemd sandboxing.
 
+Production deployment is gated by a recent successful staging report for the
+same source commit. Store that report outside the repository because deploys
+require a clean committed worktree. `scripts\release-build.ps1` also produces
+`dist\release-manifest.json` and `dist\SHA256SUMS.txt`; verify them with
+`scripts\verify-release-manifest.ps1` before distribution.
+
 Password-based SSH is only acceptable for a one-time bootstrap before key
 rotation. Production deploys should use `-KeyFile` plus `-HostPublicKey` or
 `-KnownHostsFile`, with private keys, tokens, and `.env` files kept outside the
 repository.
 
-Run `scripts\secret-scan.ps1` before release work. Operational counters are
+`release-build.ps1` injects its requested backend origin only into that build;
+it does not rewrite tracked example configuration. Run `scripts\secret-scan.ps1` before release work. Operational counters are
 available only from `/admin/health`; use `scripts\ops-health-check.ps1` through
 an SSH tunnel to the VPS loopback endpoint. To return to the previous stored
 release, use `scripts\rollback-vps.ps1` with the same verified SSH host key.
@@ -199,6 +217,10 @@ the operational contract.
 - [Main release report](docs/MAIN_RELEASE_REPORT.md)
 - [Mesh/libp2p release report](docs/MESH_LIBP2P_RELEASE_REPORT.md)
 - [Security obligations](docs/SECURITY_OBLIGATIONS.md)
+- [Privacy guide](docs/PRIVACY_GUIDE.md)
+- [Supported versions and channels](docs/SUPPORTED_VERSIONS.md)
+- [Independent security review plan](docs/SECURITY_REVIEW_PLAN.md)
+- [ADR: release and protocol gates](docs/adr/0001-release-and-protocol-gates.md)
 - [Operator tutorial RU](docs/OPERATOR_TUTORIAL_RU.md)
 - [Release checklist](RELEASE_CHECKLIST.md)
 

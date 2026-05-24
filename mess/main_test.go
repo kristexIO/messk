@@ -845,6 +845,36 @@ func TestAdminHealthAllowsLoopbackWhenTokenNotConfigured(t *testing.T) {
 	}
 }
 
+func TestAdminHealthIncludesPrivacyBoundedOperationalEvents(t *testing.T) {
+	originalCounter := defaultOperationalEventCounter
+	defaultOperationalEventCounter = newOperationalEventCounter()
+	t.Cleanup(func() {
+		defaultOperationalEventCounter = originalCounter
+	})
+	t.Setenv("ADMIN_TOKEN", "")
+	logEvent("rate_limit_exceeded", map[string]any{"remote": "redacted-in-metric"})
+	logEvent("upload_succeeded", map[string]any{"size": 42})
+
+	mux := http.NewServeMux()
+	registerAdminRoutes(mux, nil, NewHub(nil, nil, nil), nil)
+	req := httptest.NewRequest(http.MethodGet, "/admin/health", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	var body struct {
+		Stats struct {
+			OperationalEvents map[string]uint64 `json:"operationalEvents"`
+		} `json:"stats"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to decode admin health: %v", err)
+	}
+	if body.Stats.OperationalEvents["rateLimitExceeded"] != 1 || body.Stats.OperationalEvents["uploadSucceeded"] != 1 {
+		t.Fatalf("unexpected operational event counters: %#v", body.Stats.OperationalEvents)
+	}
+}
+
 func TestDirectoryResolveRequiresSessionAndReturnsProfile(t *testing.T) {
 	ctx := context.Background()
 	db := InitDB(ctx, filepath.Join(t.TempDir(), "directory.db"))
@@ -1037,6 +1067,44 @@ func TestVersionHandlerRejectsNonGet(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/version", nil)
 	rec := httptest.NewRecorder()
 	versionHandler(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+}
+
+func TestProtocolCompatibilityHandler(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/protocol", nil)
+	rec := httptest.NewRecorder()
+	protocolCompatibilityHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var body struct {
+		ProtocolVersion              int      `json:"protocolVersion"`
+		RequiredClientStateVersion   string   `json:"requiredClientStateVersion"`
+		SupportedClientStateVersions []string `json:"supportedClientStateVersions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if body.ProtocolVersion != wireProtocolVersion {
+		t.Fatalf("unexpected protocol version: %d", body.ProtocolVersion)
+	}
+	if body.RequiredClientStateVersion != requiredClientStateVersion {
+		t.Fatalf("unexpected required client state version: %q", body.RequiredClientStateVersion)
+	}
+	if len(body.SupportedClientStateVersions) != 1 || body.SupportedClientStateVersions[0] != requiredClientStateVersion {
+		t.Fatalf("unexpected supported client state versions: %#v", body.SupportedClientStateVersions)
+	}
+}
+
+func TestProtocolCompatibilityHandlerRejectsNonGet(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/protocol", nil)
+	rec := httptest.NewRecorder()
+	protocolCompatibilityHandler(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", rec.Code)

@@ -31,4 +31,5 @@ Current milestone:
 Next milestones:
 
 - Backend-synced room membership, invites, permissions, and room messages.
+- Realtime media engine for audio/video/screen-share calls; current native call signaling advertises `supportsMedia: false`.
 - Signed installer polish.

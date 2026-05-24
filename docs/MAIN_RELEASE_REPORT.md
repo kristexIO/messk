@@ -26,7 +26,7 @@ The project is now shaped as a resilient E2EE messenger platform:
 | Web client | Green | Lint, tests, production build. |
 | Windows client | Green | Tests, clippy, debug build. |
 | CI | Green | GitHub Actions success on merged branch. |
-| VPS deployment | Needs operator key access | Script supports `-KeyFile`; password mode is bootstrap-only. |
+| VPS deployment | Needs operator key and staging access | Host-key pinning, staging evidence gate, verified backup and rollback scripts are implemented. |
 
 ## System Architecture
 
@@ -125,7 +125,7 @@ sequenceDiagram
 | Phase 5 | Metadata resistance | Padding, batching, dummy envelope policies. |
 | Phase 6 | Fallback transports | Priority-based transport policy and configured fallback origins. |
 | Phase 7 | Groups, channels, calls parity | Foundations exist; Windows parity still needs product polish. |
-| Phase 8 | Audit and release | External audit, signed installer, production monitoring remain future work. |
+| Phase 8 | Audit and release | Release manifests, staged promotion gates and protected process counters are implemented; external audit and signed installer remain future work. |
 
 ## Verification Matrix
 
@@ -172,7 +172,7 @@ pie title Release Risk Split
 | Password-based VPS access remains enabled | High | Add SSH key, deploy with `-KeyFile`, then disable password login. |
 | Mesh prototype enabled too early | High | Keep `mesh-prototype` disabled in production until staged abuse controls pass. |
 | Relay abuse or Sybil pressure | High | Signed capabilities, invite/token issuance, revocation epochs, rate limits. |
-| Queue growth under outage | Medium | Monitor `/admin/health`, queue metrics, Redis degraded mode, backups. |
+| Queue growth or operational failures under outage | Medium | Monitor protected `/admin/health` queue and event counters, Redis degraded mode, and backups. |
 | Windows parity gaps | Medium | Keep moving shared behavior into `clients/core`; Windows remains a shell over core. |
 
 ## Production Readiness Gates
@@ -183,8 +183,7 @@ Before a production release is marked ready:
 2. `scripts/check-all.ps1` must pass locally on the release machine.
 3. VPS access must be SSH-key based.
 4. DNS must point to the VPS and HTTPS must be configured.
-5. `/health`, `/version`, `/relay/health`, and `/bootstrap` must pass after deploy.
-6. Backup and rollback must be tested once on staging.
+5. `/health`, `/version`, `/protocol`, `/relay/health`, and `/bootstrap` must pass after deploy.
+6. The exact commit must have a recent staging smoke report; backup and rollback must be tested once on staging.
 7. No production secrets may appear in git, logs, screenshots, reports, or PR text.
 8. Mesh prototype must remain disabled unless the release is explicitly a staging mesh test.
-

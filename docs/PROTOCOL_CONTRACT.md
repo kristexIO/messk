@@ -318,9 +318,17 @@ counts.
 
 `GET /admin/health` returns protected operational status plus database counts,
 upload storage stats, hub queue sizes, relay registry stats, and active socket
-counts. It requires
+counts. It also reports process-lifetime counters for rate-limit hits,
+authentication failures, stale-client rejection, websocket disconnects, and
+upload outcomes without user identifiers or message contents. It requires
 `X-Admin-Token` when `ADMIN_TOKEN` is configured; without a configured token it
 only allows loopback requests. Nginx deploy config exposes it to localhost only.
+
+`GET /protocol` is a public compatibility contract. It returns the wire
+`protocolVersion`, `requiredClientStateVersion`, and the explicitly supported
+client-state versions. Web and Windows clients query this endpoint before
+opening a websocket, and surface an update-required state rather than retrying
+an incompatible socket indefinitely.
 
 The database stats include direct history delivery buckets:
 

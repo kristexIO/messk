@@ -34,15 +34,16 @@ The compose file stores SQLite data and uploads in Docker volumes.
 ## HTTP API
 
 - `GET /health`: service health for DB/cache/Redis.
-- `GET /admin/health`: operator-only queue, upload, relay, and socket counters.
+- `GET /admin/health`: operator-only queue, upload, relay, socket, and privacy-bounded process event counters.
 - `GET /version`: build metadata.
+- `GET /protocol`: public protocol and supported local-state compatibility contract.
 - `GET/POST /profile`: save and load public profile data (`nickname`, `avatar`).
 - `GET/POST /groups`: list your groups or create a new group.
 - `GET/POST /groups/{groupId}/members`: list or add group members.
 - `GET/POST /channels`: list your channels or create a new channel.
 - `GET/POST /channels/{channelId}/subscribers`: list or add channel subscribers.
 
-All endpoints except `/health` and `/version` require `X-Session-Token` or `Authorization: Bearer <token>`.
+All endpoints except `/health`, `/version`, and `/protocol` require `X-Session-Token` or `Authorization: Bearer <token>`.
 
 ## Manual Deploy
 

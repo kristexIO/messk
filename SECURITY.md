@@ -44,7 +44,10 @@ owner directly and include:
 
 The VPS deploy script pins the SSH host key, configures nginx
 request/connection limits, UFW, fail2ban, sysctl TCP hardening, systemd
-sandboxing, swap, and verified release backups. This helps with common
+sandboxing, swap, and verified release backups. A production deployment also
+requires a fresh successful staging report for the same commit. Release builds
+emit SHA-256 manifests for tamper detection; these do not replace signed
+artifacts. This helps with common
 HTTP/WebSocket abuse, but it does not replace upstream volumetric DDoS
 protection from a hosting provider or a dedicated edge service.
 

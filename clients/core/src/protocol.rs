@@ -24,6 +24,7 @@ pub const WIRE_CALL_ANSWER: &str = "call_answer";
 pub const WIRE_CALL_REJECT: &str = "call_reject";
 pub const WIRE_CALL_END: &str = "call_end";
 pub const WIRE_CALL_ICE: &str = "ice_candidate";
+pub const WIRE_PROTOCOL_VERSION: u32 = 1;
 
 pub const DIRECT_HISTORY_DEFAULT_LIMIT: usize = 100;
 pub const DIRECT_HISTORY_MAX_LIMIT: usize = 500;
@@ -177,5 +178,10 @@ mod tests {
             assert!(requires_message_id(kind));
             assert!(!requires_target_message_id(kind));
         }
+    }
+
+    #[test]
+    fn wire_protocol_version_is_explicit() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 1);
     }
 }

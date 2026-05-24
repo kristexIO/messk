@@ -21,17 +21,22 @@ evidence in the repository. It is a status record, not an independent audit.
 | Secrets outside git and release artifacts | `scripts/secret-scan.ps1` runs from local preflight/check-all and CI. It blocks private key material, high-confidence access tokens, tracked private-key filenames, and non-placeholder sensitive assignments. |
 | VPS host authenticity | `scripts/deploy-vps.ps1` and `scripts/rollback-vps.ps1` require `-HostPublicKey` or a trusted `-KnownHostsFile`; unknown SSH host keys are rejected. |
 | Restricted operational metrics | Public `/health` omits counters; `/admin/health` holds queue/upload/socket metrics behind token or loopback policy. |
-| Queue-growth monitoring | `scripts/ops-health-check.ps1` validates protected metrics against operator thresholds. |
+| Queue and process-event monitoring | `scripts/ops-health-check.ps1` validates protected queue thresholds and surfaces privacy-bounded rate-limit, disconnect, and upload failure counters. |
 | Backup integrity | VPS deploy and the scheduled backup task fail when SQLite `PRAGMA quick_check` does not validate the fresh backup. |
 | One-command rollback | `scripts/rollback-vps.ps1` activates a previous retained release through verified SSH and re-runs health smoke. |
+| Staging-before-production enforcement | `scripts/staging-verify.ps1` records smoke evidence for a commit; production `scripts/deploy-vps.ps1` rejects missing, expired, production-origin, or mismatched evidence. |
+| Protocol compatibility visibility | `/protocol` advertises the supported client state; web and Windows clients reject incompatible websocket connection attempts with an actionable upgrade message. |
+| Artifact tamper detection and source binding | `scripts/release-build.ps1` emits a SHA-256 release manifest and rejects dirty release sources by default; `scripts/verify-release-manifest.ps1` verifies packaged payloads. VPS deploy rejects dirty worktrees. |
+| Release governance and privacy disclosure | `.github/CODEOWNERS`, `.github/release.yml`, `docs/PRIVACY_GUIDE.md`, `docs/SECURITY_REVIEW_PLAN.md`, and ADR 0001 establish an ownership map, generated release-note categories, user disclosure, and independent-review scope. Requiring owner approval still depends on GitHub branch protection settings. |
+| Stable/beta and EOL contract | `scripts/release-build.ps1 -Channel <stable|beta>` records the channel in manifests; `docs/SUPPORTED_VERSIONS.md` publishes compatibility and retirement rules. |
 
 ## Still Blocking A Production Claim
 
 | Obligation | Required evidence before marking done |
 | --- | --- |
-| Staging before production | Deploy to a separate staging node, run smoke and rollback rehearsal, and retain the report. |
+| Staging exercise evidence | The automated gate is implemented; deploy to a separate staging node, run smoke and rollback rehearsal, and retain its generated report before production. |
 | Signed Windows installer | Obtain a code-signing certificate, sign artifacts in a protected release workflow, and verify signatures on a clean machine. |
-| Native audio and screen-share parity | Complete and test real Windows media transport, not only protocol/UI foundations. |
+| Native audio and screen-share parity | Voice-message recording exists, but the Windows client still advertises `supportsMedia: false` for realtime calls. Complete and test actual audio/video/screen media transport, not only protocol/UI foundations. |
 | External cryptographic/security review | Obtain an independent review; Messk must not be represented as audited before that result. |
 | Live production deploy | Confirm VPS address/DNS, key-based SSH access, verified server host key, relay/admin configuration, and post-deploy smoke results. |
 
@@ -43,6 +48,13 @@ Run before a release candidate:
 powershell -ExecutionPolicy Bypass -File scripts\secret-scan.ps1
 powershell -ExecutionPolicy Bypass -File scripts\check-all.ps1
 powershell -ExecutionPolicy Bypass -File scripts\release-preflight.ps1 -BackendOrigin https://messk.online
+```
+
+Build artifacts with their checksum manifest:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\release-build.ps1 -BackendOrigin https://staging.example
+powershell -ExecutionPolicy Bypass -File scripts\verify-release-manifest.ps1 -ArtifactRoot dist
 ```
 
 For production metrics, tunnel the protected loopback endpoint and evaluate

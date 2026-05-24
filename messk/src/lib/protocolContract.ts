@@ -29,6 +29,7 @@ export const DEFAULT_TRANSPORT_PRIORITY: TransportKind[] = [
 ];
 
 export const MESH_PROTOCOL_VERSION = 1;
+export const WIRE_PROTOCOL_VERSION = 1;
 export const MESH_TOPIC_PREFIX = 'messk/v1';
 export const MESH_THREAD_KINDS = ['direct', 'group', 'channel'] as const;
 export const MESH_DEFAULT_HOP_LIMIT = 3;

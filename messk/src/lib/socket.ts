@@ -60,6 +60,7 @@ import {
 } from './socketGroups';
 import { LOCAL_STATE_VERSION } from './storage';
 import { DEFAULT_METADATA_BATCH_POLICY, metadataBatchDelayMs } from './protocolContract';
+import { verifyWebSocketProtocol } from './protocolCompatibility';
 import { resolveWebSocketUrls } from './transportDiscovery';
 
 const WS_URL = appConfig.wsUrl;
@@ -335,6 +336,9 @@ export class SocketManager {
   private directBatchTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private transportUrls: string[] = appConfig.wsUrls;
   private transportDiscoveryInFlight: Promise<void> | null = null;
+  private compatibleTransportUrls = new Set<string>();
+  private protocolChecks = new Map<string, Promise<void>>();
+  private lastProtocolCompatibilityMessage = '';
   private activeWsUrl = appConfig.wsUrl;
   private lastRateLimitedToastAt = 0;
   private lastSessionResetNoticeAt = new Map<string, number>();
@@ -437,6 +441,39 @@ export class SocketManager {
 
     this.refreshTransportDiscovery();
     const wsBaseUrl = this.transportUrls[this.reconnectAttempts % this.transportUrls.length] ?? WS_URL;
+    if (!this.compatibleTransportUrls.has(wsBaseUrl)) {
+      if (!this.protocolChecks.has(wsBaseUrl)) {
+        const check = verifyWebSocketProtocol(wsBaseUrl, LOCAL_STATE_VERSION)
+          .then((result) => {
+            if (!result.compatible) {
+              useAppStore.getState().setConnectionStatus('offline');
+              if (result.message !== this.lastProtocolCompatibilityMessage) {
+                this.lastProtocolCompatibilityMessage = result.message;
+                toast.error(result.message);
+              }
+              if (!this.manualDisconnect && !this.reconnectTimer) {
+                const delay = this.getReconnectDelay();
+                this.reconnectAttempts += 1;
+                this.reconnectTimer = setTimeout(() => {
+                  this.reconnectTimer = null;
+                  this.connect(pubKey);
+                }, delay);
+              }
+              return;
+            }
+            this.compatibleTransportUrls.add(wsBaseUrl);
+            this.lastProtocolCompatibilityMessage = '';
+            if (!this.manualDisconnect) {
+              this.connect(pubKey);
+            }
+          })
+          .finally(() => {
+            this.protocolChecks.delete(wsBaseUrl);
+          });
+        this.protocolChecks.set(wsBaseUrl, check);
+      }
+      return;
+    }
     this.activeWsUrl = wsBaseUrl;
     const url = `${wsBaseUrl}?pub=${encodeURIComponent(pubKey)}&state=${encodeURIComponent(LOCAL_STATE_VERSION)}`;
     if (this.reconnectAttempts === 0) {
@@ -448,7 +485,10 @@ export class SocketManager {
 
     this.ws.onopen = () => {
       console.log('WebSocket connection opened. Awaiting auth challenge...');
-      if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
     };
 
     this.ws.onmessage = async (event) => {
@@ -1019,7 +1059,10 @@ export class SocketManager {
 
   disconnect() {
     this.manualDisconnect = true;
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     this.stopOutboxLoop();
     this.releaseAuthWaiters();
     if (this.ws) {

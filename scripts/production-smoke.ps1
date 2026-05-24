@@ -57,6 +57,14 @@ if (-not [string]::IsNullOrWhiteSpace($ExpectedCommitPrefix) -and -not $version.
   throw "/version returned commit '$($version.commit)', expected prefix '$ExpectedCommitPrefix'."
 }
 
+$protocol = Invoke-JsonEndpoint $origin "/protocol" "protocolVersion"
+if ($protocol.protocolVersion -lt 1 -or [string]::IsNullOrWhiteSpace($protocol.requiredClientStateVersion)) {
+  throw "/protocol returned an incomplete compatibility contract."
+}
+if ($null -eq $protocol.supportedClientStateVersions -or $protocol.supportedClientStateVersions.Count -lt 1) {
+  throw "/protocol did not declare compatible client state versions."
+}
+
 $relayHealth = Invoke-JsonEndpoint $origin "/relay/health" "status"
 if ($relayHealth.status -ne "ok") {
   throw "/relay/health returned status '$($relayHealth.status)'."

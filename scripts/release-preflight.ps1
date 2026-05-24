@@ -2,7 +2,8 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$BackendOrigin,
 
-  [switch]$AllowLocalhost
+  [switch]$AllowLocalhost,
+  [switch]$BuildTimeFrontendConfig
 )
 
 $ErrorActionPreference = "Stop"
@@ -44,6 +45,9 @@ $frontendPackagePath = Join-Path $root "messk\package.json"
 $windowsCargoPath = Join-Path $root "clients\windows\Cargo.toml"
 $windowsBuildScriptPath = Join-Path $root "scripts\build-windows-client.ps1"
 $secretScanScriptPath = Join-Path $root "scripts\secret-scan.ps1"
+$manifestWriterPath = Join-Path $root "scripts\write-release-manifest.ps1"
+$manifestVerifierPath = Join-Path $root "scripts\verify-release-manifest.ps1"
+$stagingEvidenceValidatorPath = Join-Path $root "scripts\assert-staging-evidence.ps1"
 
 Assert-File $backendEnvPath
 Assert-File $frontendEnvPath
@@ -51,10 +55,21 @@ Assert-File $frontendPackagePath
 Assert-File $windowsCargoPath
 Assert-File $windowsBuildScriptPath
 Assert-File $secretScanScriptPath
+Assert-File $manifestWriterPath
+Assert-File $manifestVerifierPath
+Assert-File $stagingEvidenceValidatorPath
 
 & $secretScanScriptPath
 if ($LASTEXITCODE -ne 0) {
   Fail "secret scan failed"
+}
+& (Join-Path $root "scripts\release-manifest-test.ps1")
+if ($LASTEXITCODE -ne 0) {
+  Fail "release manifest tamper test failed"
+}
+& (Join-Path $root "scripts\staging-gate-test.ps1")
+if ($LASTEXITCODE -ne 0) {
+  Fail "staging evidence gate test failed"
 }
 
 try {
@@ -130,7 +145,7 @@ $frontendPackage = Get-Content -Raw $frontendPackagePath | ConvertFrom-Json
 
 $httpOrigin = $backendUri.GetLeftPart([UriPartial]::Authority)
 
-if (-not $AllowLocalhost -and $frontendEnv["VITE_BACKEND_URL"] -ne $httpOrigin) {
+if (-not $AllowLocalhost -and -not $BuildTimeFrontendConfig -and $frontendEnv["VITE_BACKEND_URL"] -ne $httpOrigin) {
   Fail "messk\.env.example VITE_BACKEND_URL must match '$httpOrigin'"
 }
 

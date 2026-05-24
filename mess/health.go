@@ -83,6 +83,7 @@ func collectHealthReport(ctx context.Context, db *DB, hub *Hub, rdb *redis.Clien
 			"hub":                       hub.Stats(),
 			"relay":                     hub.RelayStats(time.Now().UTC()),
 			"uploads":                   collectUploadStats(getUploadDir()),
+			"operationalEvents":         defaultOperationalEventCounter.Snapshot(),
 			"offlineDeliveryBatchLimit": offlineDeliveryBatchLimit,
 		}
 	}

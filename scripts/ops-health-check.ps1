@@ -39,11 +39,17 @@ if ($health.status -eq "degraded" -and -not $AllowDegraded) {
 if ($null -eq $health.stats -or $null -eq $health.stats.database -or $null -eq $health.stats.hub) {
   throw "Operator health response does not include protected operational metrics."
 }
+if ($null -eq $health.stats.operationalEvents) {
+  throw "Operator health response does not include operational event counters."
+}
 
 $offlineMessages = [int64]$health.stats.database.offlineMessages
 $waitingDelivery = [int64]$health.stats.database.messageHistoryWaitingDelivery
 $routeQueue = [int64]$health.stats.hub.routeQueue
 $redisQueue = [int64]$health.stats.hub.redisQueue
+$rateLimitExceeded = [int64]$health.stats.operationalEvents.rateLimitExceeded
+$wsDisconnected = [int64]$health.stats.operationalEvents.wsDisconnected
+$uploadStoreFailed = [int64]$health.stats.operationalEvents.uploadStoreFailed
 $alerts = [System.Collections.Generic.List[string]]::new()
 
 if ($offlineMessages -gt $MaxOfflineMessages) {
@@ -63,4 +69,4 @@ if ($alerts.Count -gt 0) {
   throw ("Operational alert: " + ($alerts -join "; "))
 }
 
-Write-Host "Operator health passed: status=$($health.status) offline=$offlineMessages waiting_delivery=$waitingDelivery route_queue=$routeQueue redis_queue=$redisQueue"
+Write-Host "Operator health passed: status=$($health.status) offline=$offlineMessages waiting_delivery=$waitingDelivery route_queue=$routeQueue redis_queue=$redisQueue rate_limited=$rateLimitExceeded ws_disconnected=$wsDisconnected upload_store_failed=$uploadStoreFailed"

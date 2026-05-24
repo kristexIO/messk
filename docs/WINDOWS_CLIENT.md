@@ -64,3 +64,10 @@ Metadata resistance:
   network send, without removing messages from the retry outbox until ack.
 - Incoming `dummy` envelopes are ignored by the Windows shell and are not shown
   as chat events.
+
+Current realtime media limitation:
+
+- Native voice-message capture and playback are available for encrypted messages.
+- Realtime Windows call signaling remains intentionally marked `supportsMedia: false`;
+  live audio, video, and screen sharing still require a media engine implementation
+  and end-to-end verification before they can be represented as shipped.

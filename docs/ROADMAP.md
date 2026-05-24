@@ -78,6 +78,10 @@ Exit criteria:
   plus composable swarm parts must remain opt-in until the swarm runner and
   abuse controls are reviewed.
 - Add staging release flow before production deploy.
+- Require staging smoke evidence for the exact production commit and publish a
+  SHA-256 release manifest for packaged artifacts.
+- Advertise protocol/client-state compatibility and fail clients with an
+  explicit upgrade-required message before websocket authentication.
 - Add monitoring for websocket disconnects, failed decrypts, queue growth,
   upload failures, relay churn, and rate-limit hits.
 - Keep rollback and DB backup mandatory for VPS deploys.

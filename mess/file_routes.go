@@ -25,39 +25,46 @@ func registerFileRoutes(mux *http.ServeMux, hub *Hub, db *DB) {
 		}
 
 		if err := r.ParseMultipartForm(getMaxUploadBytes()); err != nil {
+			logEvent("upload_rejected", map[string]any{"reason": "multipart"})
 			http.Error(w, "File too large", http.StatusBadRequest)
 			return
 		}
 		file, header, err := r.FormFile("file")
 		if err != nil {
+			logEvent("upload_rejected", map[string]any{"reason": "missing_file"})
 			http.Error(w, "Missing file", http.StatusBadRequest)
 			return
 		}
 		defer file.Close()
 
 		if header.Size <= 0 || header.Size > getMaxUploadBytes() {
+			logEvent("upload_rejected", map[string]any{"reason": "size"})
 			http.Error(w, "Invalid file size", http.StatusBadRequest)
 			return
 		}
 		if !isAllowedUploadContentType(header.Header.Get("Content-Type")) {
+			logEvent("upload_rejected", map[string]any{"reason": "mime"})
 			http.Error(w, "Unsupported file type", http.StatusBadRequest)
 			return
 		}
 
 		allowedPubKeys, accessErr := resolveUploadAccess(r.Context(), db, uploaderPubKey, r.FormValue("recipient_pub_key"), r.FormValue("group_id"))
 		if accessErr != nil {
+			logEvent("upload_rejected", map[string]any{"reason": "access"})
 			http.Error(w, accessErr.message, accessErr.status)
 			return
 		}
 
 		filename, err := newUploadFilename(header.Filename)
 		if err != nil {
+			logEvent("upload_store_failed", map[string]any{"stage": "filename"})
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 			return
 		}
 		path := filepath.Join(getUploadDir(), filename)
 		out, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 		if err != nil {
+			logEvent("upload_store_failed", map[string]any{"stage": "create"})
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 			return
 		}
@@ -65,17 +72,20 @@ func registerFileRoutes(mux *http.ServeMux, hub *Hub, db *DB) {
 		written, err := io.Copy(out, file)
 		if err != nil {
 			_ = os.Remove(path)
+			logEvent("upload_store_failed", map[string]any{"stage": "write"})
 			http.Error(w, "Failed to store file", http.StatusInternalServerError)
 			return
 		}
 		if written == 0 {
 			_ = os.Remove(path)
+			logEvent("upload_rejected", map[string]any{"reason": "empty"})
 			http.Error(w, "Empty file", http.StatusBadRequest)
 			return
 		}
 
 		downloadTokenBytes := make([]byte, 32)
 		if _, err := crypto_rand.Read(downloadTokenBytes); err != nil {
+			logEvent("upload_store_failed", map[string]any{"stage": "token"})
 			http.Error(w, "Internal error", http.StatusInternalServerError)
 			return
 		}
@@ -83,6 +93,7 @@ func registerFileRoutes(mux *http.ServeMux, hub *Hub, db *DB) {
 		hub.StoreFileToken(downloadToken, filename)
 		hub.StoreFileAccess(filename, allowedPubKeys...)
 
+		logEvent("upload_succeeded", map[string]any{"size": written})
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"url": "/download/" + filename + "?token=" + downloadToken})
 	}))

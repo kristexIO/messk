@@ -713,6 +713,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                 </div>
               )}
             </div>
+            <div className="settings-card rounded-2xl p-4 space-y-3">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <Shield className="w-4 h-4 text-accent" />
+                Privacy boundaries
+              </div>
+              <p className="text-xs leading-5 text-text-muted">
+                Message text, file contents and your identity seed stay encrypted on your devices. The service still observes delivery metadata such as connection timing, public identity keys, recipients needed for routing and encrypted payload sizes.
+              </p>
+              <p className="text-xs leading-5 text-text-muted">
+                Verify contact fingerprints outside Messk, protect your seed phrase and backup password, and never share secrets in issue reports. Messk has not completed an independent security audit.
+              </p>
+            </div>
             <div className="settings-card rounded-2xl p-4 space-y-4">
               <div className="flex items-center gap-2 text-sm font-medium">
                 <Lock className="w-4 h-4 text-accent" />

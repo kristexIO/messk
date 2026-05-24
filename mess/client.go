@@ -134,6 +134,7 @@ type Envelope struct {
 
 func (c *Client) readPump() {
 	defer func() {
+		logEvent("ws_disconnected", map[string]any{})
 		c.hub.unregister <- c
 		c.conn.Close()
 		c.cancel()

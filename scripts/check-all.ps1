@@ -14,6 +14,14 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
   throw "Secret scan negative test failed"
 }
+& (Join-Path $root "scripts\release-manifest-test.ps1")
+if ($LASTEXITCODE -ne 0) {
+  throw "Release manifest tamper test failed"
+}
+& (Join-Path $root "scripts\staging-gate-test.ps1")
+if ($LASTEXITCODE -ne 0) {
+  throw "Staging gate test failed"
+}
 
 Push-Location (Join-Path $root "mess")
 try {

@@ -95,6 +95,7 @@ func main() {
 		writePublicHealthReport(w, r, db, hub, rdb)
 	})
 	mux.HandleFunc("/version", versionHandler)
+	mux.HandleFunc("/protocol", protocolCompatibilityHandler)
 	registerSessionRoutes(mux, hub)
 	registerProfileRoutes(mux, hub, db)
 	registerHistoryRoutes(mux, hub, db)
@@ -1329,6 +1330,7 @@ func (r *statusRecorder) Flush() {
 }
 
 func logEvent(event string, fields map[string]any) {
+	defaultOperationalEventCounter.Record(event)
 	payload := map[string]any{
 		"event": event,
 		"time":  time.Now().UTC().Format(time.RFC3339),

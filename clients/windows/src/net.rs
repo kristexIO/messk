@@ -92,6 +92,14 @@ struct BootstrapResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct ProtocolCompatibilityResponse {
+    #[serde(rename = "protocolVersion")]
+    protocol_version: u32,
+    #[serde(rename = "supportedClientStateVersions", default)]
+    supported_client_state_versions: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct BootstrapRelayCapability {
     #[serde(rename = "endpointOrigins", default)]
     endpoint_origins: Vec<String>,
@@ -231,6 +239,46 @@ pub async fn fetch_health_with_fallback(origins: Vec<String>) -> Result<HealthSt
         "all backend health checks failed: {}",
         errors.join(" | ")
     ))
+}
+
+async fn require_protocol_compatibility(origin: &str) -> Result<()> {
+    let url = config::protocol_url(origin);
+    let response = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("failed to reach compatibility endpoint {url}"))?;
+    let status_code = response.status();
+    let raw = response.text().await.unwrap_or_default();
+    if !status_code.is_success() {
+        return Err(anyhow!(
+            "server compatibility contract is unavailable ({status_code}); server upgrade required"
+        ));
+    }
+    let descriptor: ProtocolCompatibilityResponse =
+        serde_json::from_str(&raw).context("server compatibility response JSON is invalid")?;
+    validate_protocol_compatibility(&descriptor)
+}
+
+fn validate_protocol_compatibility(descriptor: &ProtocolCompatibilityResponse) -> Result<()> {
+    if descriptor.protocol_version != core_protocol::WIRE_PROTOCOL_VERSION {
+        return Err(anyhow!(
+            "incompatible server protocol version {}; client requires {}",
+            descriptor.protocol_version,
+            core_protocol::WIRE_PROTOCOL_VERSION
+        ));
+    }
+    if !descriptor
+        .supported_client_state_versions
+        .iter()
+        .any(|state| state == config::CLIENT_STATE_VERSION)
+    {
+        return Err(anyhow!(
+            "client update required; server does not support local state {}",
+            config::CLIENT_STATE_VERSION
+        ));
+    }
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -1890,6 +1938,7 @@ fn send_realtime_event(events: &UnboundedSender<RealtimeEvent>, event: RealtimeE
 }
 
 async fn connect_authenticated(origin: String, identity: &Identity) -> Result<(WsStream, String)> {
+    require_protocol_compatibility(&origin).await?;
     let url = config::websocket_url(&origin, &identity.public_key);
     let (mut socket, _) = connect_async(&url)
         .await
@@ -2228,5 +2277,26 @@ mod tests {
             normalize_bootstrap_endpoint_origin("wss://relay.example"),
             None
         );
+    }
+
+    #[test]
+    fn protocol_compatibility_rejects_stale_or_unknown_clients() {
+        let compatible = ProtocolCompatibilityResponse {
+            protocol_version: core_protocol::WIRE_PROTOCOL_VERSION,
+            supported_client_state_versions: vec![config::CLIENT_STATE_VERSION.to_string()],
+        };
+        assert!(validate_protocol_compatibility(&compatible).is_ok());
+
+        let stale = ProtocolCompatibilityResponse {
+            protocol_version: core_protocol::WIRE_PROTOCOL_VERSION,
+            supported_client_state_versions: vec!["clean_future".to_string()],
+        };
+        assert!(validate_protocol_compatibility(&stale).is_err());
+
+        let unknown_protocol = ProtocolCompatibilityResponse {
+            protocol_version: core_protocol::WIRE_PROTOCOL_VERSION + 1,
+            supported_client_state_versions: vec![config::CLIENT_STATE_VERSION.to_string()],
+        };
+        assert!(validate_protocol_compatibility(&unknown_protocol).is_err());
     }
 }

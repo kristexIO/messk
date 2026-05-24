@@ -88,8 +88,12 @@ try {
           throw "Peer discovery endpoints returned incomplete payloads."
         }
         $adminHealth = Assert-JsonEndpoint "/admin/health" "stats"
-        if ($null -eq $adminHealth.stats.database -or $null -eq $adminHealth.stats.hub) {
+        if ($null -eq $adminHealth.stats.database -or $null -eq $adminHealth.stats.hub -or $null -eq $adminHealth.stats.operationalEvents) {
           throw "Backend /admin/health omitted protected operational metrics."
+        }
+        $protocol = Assert-JsonEndpoint "/protocol" "protocolVersion"
+        if ([string]::IsNullOrWhiteSpace($protocol.requiredClientStateVersion) -or $protocol.supportedClientStateVersions.Count -lt 1) {
+          throw "Backend /protocol returned an incomplete compatibility contract."
         }
 
         & (Join-Path $PSScriptRoot "ops-health-check.ps1") -BackendOrigin "http://127.0.0.1:$port" -AllowDegraded

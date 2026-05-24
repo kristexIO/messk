@@ -127,7 +127,7 @@ powershell -ExecutionPolicy Bypass -File scripts\configure-release.ps1 -BackendO
 Собрать release artifacts:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\release-build.ps1 -BackendOrigin https://your-domain.example
+powershell -ExecutionPolicy Bypass -File scripts\release-build.ps1 -BackendOrigin https://your-domain.example -Channel stable
 ```
 
 ## Шаг 6. Deploy на VPS
@@ -136,26 +136,35 @@ powershell -ExecutionPolicy Bypass -File scripts\release-build.ps1 -BackendOrigi
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\deploy-vps.ps1 `
-  -ServerHost <server-host> `
+  -Environment staging `
+  -ServerHost <staging-server-host> `
   -User root `
   -KeyFile $env:USERPROFILE\.ssh\messk_prod_ed25519 `
   -HostPublicKey 'ssh-ed25519 <server-host-public-key>' `
-  -Domain your-domain.example
+  -Domain staging.your-domain.example `
+  -StagingReportPath C:\secure\messk-staging-report.json
 ```
 
 Если нужен TURN для звонков:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\deploy-vps.ps1 `
+  -Environment production `
   -ServerHost <server-host> `
   -User root `
   -KeyFile $env:USERPROFILE\.ssh\messk_prod_ed25519 `
   -HostPublicKey 'ssh-ed25519 <server-host-public-key>' `
   -Domain your-domain.example `
+  -StagingReportPath C:\secure\messk-staging-report.json `
   -TurnHost turn.your-domain.example `
   -TurnUsername <turn-user> `
   -TurnPassword <turn-password>
 ```
+
+Production deploy принимает только свежий отчет staging smoke на тот же commit.
+Отчет создается автоматически при `-Environment staging`; он не содержит
+секретов, но его следует сохранять вместе с release evidence вне репозитория,
+чтобы deploy выполнялся из чистого committed worktree.
 
 `TurnPassword` не коммитить и не вставлять в документы.
 
@@ -165,6 +174,7 @@ powershell -ExecutionPolicy Bypass -File scripts\deploy-vps.ps1 `
 | --- | --- | --- |
 | Backend health | `https://your-domain.example/health` | `ok` или ожидаемый `degraded`. |
 | Version | `https://your-domain.example/version` | Нужный commit/build time. |
+| Protocol contract | `https://your-domain.example/protocol` | Wire version и client state совместимы с release. |
 | Relay health | `https://your-domain.example/relay/health` | Relay mode отвечает. |
 | Bootstrap | `https://your-domain.example/bootstrap` | Клиент получает origins/capabilities. |
 | Web login | Открыть домен в браузере | Логин/регистрация работают. |
@@ -179,6 +189,13 @@ powershell -ExecutionPolicy Bypass -File scripts\deploy-vps.ps1 `
 ```powershell
 ssh -L 18080:127.0.0.1:8080 -i $env:USERPROFILE\.ssh\messk_prod_ed25519 root@<server-host>
 powershell -ExecutionPolicy Bypass -File scripts\ops-health-check.ps1 -BackendOrigin http://127.0.0.1:18080
+```
+
+Release build выпускает `dist\release-manifest.json` и `dist\SHA256SUMS.txt`.
+До публикации пакетов проверьте целостность:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\verify-release-manifest.ps1 -ArtifactRoot dist
 ```
 
 ## Шаг 8. Rollback

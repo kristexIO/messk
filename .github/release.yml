@@ -1,0 +1,19 @@
+changelog:
+  categories:
+    - title: Security And Privacy
+      labels:
+        - security
+        - privacy
+    - title: Reliability And Operations
+      labels:
+        - reliability
+        - deploy
+        - ops
+    - title: Client Changes
+      labels:
+        - web
+        - windows
+        - ux
+    - title: Other Changes
+      labels:
+        - "*"
