@@ -13,6 +13,7 @@ Copy `.env.example` into your deployment environment and set these values:
 - `FILE_TOKEN_TTL_MINUTES`: lifetime for per-file download links, default `60`.
 - `SESSION_TOKEN_TTL_MINUTES`: lifetime for websocket-issued session tokens, default `1440`.
 - `RATE_LIMIT_PER_MINUTE`: upload/proxy request limit per client IP, default `200`.
+- `ADMIN_TOKEN`: token for detailed `/admin/health`; leave empty only for loopback-only local use.
 - `REDIS_ADDR`: optional Redis address for multi-instance routing.
 - `ENABLE_METADATA_PROXY`: keep `false` for production unless the proxy is explicitly reviewed and needed.
 
@@ -33,6 +34,7 @@ The compose file stores SQLite data and uploads in Docker volumes.
 ## HTTP API
 
 - `GET /health`: service health for DB/cache/Redis.
+- `GET /admin/health`: operator-only queue, upload, relay, and socket counters.
 - `GET /version`: build metadata.
 - `GET/POST /profile`: save and load public profile data (`nickname`, `avatar`).
 - `GET/POST /groups`: list your groups or create a new group.
@@ -67,7 +69,7 @@ If you want a simple reverse proxy, put Nginx in front of it and proxy:
 
 ## Release Notes
 
-- `/health` reports database, cache, and Redis status.
+- `/health` reports public service status without operational counters; `/admin/health` is protected and carries diagnostic metrics.
 - `/version` reports the backend version, commit, and build timestamp embedded at build time.
 - Upload/download endpoints require an authenticated session or per-file token.
 - `/proxy` is disabled by default and blocks private, loopback, link-local, multicast, unspecified, and unresolved targets.

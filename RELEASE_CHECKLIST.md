@@ -3,6 +3,7 @@
 ## Before Shipping
 - Set `VITE_BACKEND_URL`, `PORT`, `ALLOWED_ORIGINS`, `DB_PATH`, `MAX_UPLOAD_MB`, `ALLOWED_UPLOAD_MIME_TYPES`, and optional `REDIS_ADDR` for the target environment.
 - Set `VITE_FALLBACK_BACKEND_URLS` when the web release should try static relay/bootstrap origins before relying on dynamic `/bootstrap` discovery.
+- Run `powershell -ExecutionPolicy Bypass -File scripts/secret-scan.ps1`; the gate must pass before packaging or deploying.
 - Run `powershell -ExecutionPolicy Bypass -File scripts/configure-release.ps1 -BackendOrigin https://your-production-backend.example` to sync `VITE_BACKEND_URL` with the production backend origin.
 - Keep `ENABLE_METADATA_PROXY` disabled unless there is a reviewed production use case.
 - Verify `powershell -ExecutionPolicy Bypass -File scripts/check-all.ps1` is green on the release commit.
@@ -12,10 +13,10 @@
 - Run `powershell -ExecutionPolicy Bypass -File scripts/backend-health-smoke.ps1` when validating a backend-only deploy.
 - Run `powershell -ExecutionPolicy Bypass -File scripts/production-smoke.ps1 -BackendOrigin https://your-production-backend.example -ExpectedCommitPrefix <release-commit>` after DNS and nginx are live.
 - Run `powershell -ExecutionPolicy Bypass -File scripts/docker-check.ps1` before shipping a containerized backend.
-- Use `scripts/deploy-vps.ps1 -KeyFile <ssh-key>` for VPS deploys; `-Password` is only acceptable for one-time bootstrap before key rotation.
+- Use `scripts/deploy-vps.ps1 -KeyFile <ssh-key> -HostPublicKey '<verified server host public key>'` (or `-KnownHostsFile <trusted-known-hosts>`) for VPS deploys; `-Password` is only acceptable for one-time bootstrap before key rotation.
 - Confirm `clients/core` tests pass through `scripts/check-all.ps1`; native client protocol changes must not live only in the Windows UI shell.
-- Confirm `/health` returns `status: ok` or an explicitly accepted `status: degraded`.
-- Confirm `/admin/health` is reachable only from loopback or with the configured `ADMIN_TOKEN`.
+- Confirm public `/health` returns `status: ok` or an explicitly accepted `status: degraded` and does not return protected operational counters.
+- Confirm `/admin/health` is reachable only from loopback or with the configured `ADMIN_TOKEN`, then run `scripts/ops-health-check.ps1` through a loopback SSH tunnel.
 - Confirm relay/bootstrap mode is intentional: `/relay/health` is reachable, `RELAY_ANNOUNCE_TOKEN` is configured for public announce, and `/relay/peers` contains only expected signed relay capabilities.
 - Publish staging relay capabilities with `go run ./tools/relay-announce` using a signing key file outside the repository; use `-refresh-interval` or a systemd timer so registrations refresh before TTL expiry.
 - For VPS deploys, confirm `messan-relay-announce.service` is active and `/bootstrap` plus `/relay/health` pass through nginx.
@@ -42,5 +43,5 @@
 ## Ops Checks
 - Monitor backend logs for `request_start`, `request_end`, auth failures, and offline message saves during staging smoke tests.
 - Verify Redis is either healthy or intentionally absent with acceptable degraded behavior.
-- Keep a tested rollback artifact for backend, web, and native Windows packages.
-- Verify the VPS deploy script created a fresh SQLite backup before switching `/opt/messan/current`.
+- Keep a tested rollback artifact for backend, web, and native Windows packages; rehearse `scripts/rollback-vps.ps1` in staging.
+- Verify the VPS deploy script created and integrity-checked a fresh SQLite backup before switching `/opt/messan/current`.

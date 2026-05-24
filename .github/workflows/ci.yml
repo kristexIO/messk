@@ -8,6 +8,16 @@ on:
       - master
 
 jobs:
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - shell: pwsh
+        run: ./scripts/secret-scan.ps1 -TrackedOnly
+      - shell: pwsh
+        run: ./scripts/secret-scan-test.ps1
+
   release-preflight:
     name: Release Preflight
     runs-on: ubuntu-latest

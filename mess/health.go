@@ -9,17 +9,25 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-func writeHealthReport(w http.ResponseWriter, r *http.Request, db *DB, hub *Hub, rdb *redis.Client) {
+func writePublicHealthReport(w http.ResponseWriter, r *http.Request, db *DB, hub *Hub, rdb *redis.Client) {
+	writeHealthReport(w, r, db, hub, rdb, false)
+}
+
+func writeAdminHealthReport(w http.ResponseWriter, r *http.Request, db *DB, hub *Hub, rdb *redis.Client) {
+	writeHealthReport(w, r, db, hub, rdb, true)
+}
+
+func writeHealthReport(w http.ResponseWriter, r *http.Request, db *DB, hub *Hub, rdb *redis.Client, includeStats bool) {
 	healthCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 
-	report, statusCode := collectHealthReport(healthCtx, db, hub, rdb)
+	report, statusCode := collectHealthReport(healthCtx, db, hub, rdb, includeStats)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(report)
 }
 
-func collectHealthReport(ctx context.Context, db *DB, hub *Hub, rdb *redis.Client) (map[string]any, int) {
+func collectHealthReport(ctx context.Context, db *DB, hub *Hub, rdb *redis.Client, includeStats bool) (map[string]any, int) {
 	dbStatus := "disabled"
 	var dbStats DBStats
 	var dbStatsErr error
@@ -28,9 +36,11 @@ func collectHealthReport(ctx context.Context, db *DB, hub *Hub, rdb *redis.Clien
 		if err := db.Ping(ctx); err != nil {
 			dbStatus = "error"
 		}
-		dbStats, dbStatsErr = db.Stats(ctx)
-		if dbStatsErr != nil && dbStatus == "ok" {
-			dbStatus = "degraded"
+		if includeStats {
+			dbStats, dbStatsErr = db.Stats(ctx)
+			if dbStatsErr != nil && dbStatus == "ok" {
+				dbStatus = "degraded"
+			}
 		}
 	}
 
@@ -52,7 +62,7 @@ func collectHealthReport(ctx context.Context, db *DB, hub *Hub, rdb *redis.Clien
 		overallStatus = "degraded"
 	}
 
-	return map[string]any{
+	report := map[string]any{
 		"status": overallStatus,
 		"version": map[string]string{
 			"version": appVersion,
@@ -64,14 +74,17 @@ func collectHealthReport(ctx context.Context, db *DB, hub *Hub, rdb *redis.Clien
 			"cache":    "ok",
 			"redis":    redisStatus,
 		},
-		"stats": map[string]any{
+		"time": time.Now().UTC().Format(time.RFC3339),
+	}
+	if includeStats {
+		report["stats"] = map[string]any{
 			"database":                  dbStats,
 			"databaseStatsError":        errorString(dbStatsErr),
 			"hub":                       hub.Stats(),
 			"relay":                     hub.RelayStats(time.Now().UTC()),
 			"uploads":                   collectUploadStats(getUploadDir()),
 			"offlineDeliveryBatchLimit": offlineDeliveryBatchLimit,
-		},
-		"time": time.Now().UTC().Format(time.RFC3339),
-	}, statusCode
+		}
+	}
+	return report, statusCode
 }

@@ -92,7 +92,7 @@ func main() {
 		serveWs(hub, w, r, ctx)
 	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		writeHealthReport(w, r, db, hub, rdb)
+		writePublicHealthReport(w, r, db, hub, rdb)
 	})
 	mux.HandleFunc("/version", versionHandler)
 	registerSessionRoutes(mux, hub)

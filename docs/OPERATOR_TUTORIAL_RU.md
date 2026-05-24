@@ -20,6 +20,7 @@
 | --- | --- | --- |
 | Доступ к панели VPS | Личный кабинет провайдера | Чтобы добавить SSH public key без передачи пароля. |
 | SSH public key | Генерируется локально | Без него нельзя безопасно деплоить. |
+| SSH host public key сервера | Панель VPS или проверенный out-of-band источник | Чтобы deploy отклонял подмененный SSH-сервер. |
 | Домен | DNS-панель домена | Нужен нормальный HTTPS origin для web/backend. |
 | A-record домена | DNS-панель | Должен указывать на VPS. |
 | Admin token | Генерируется локально | Для `/admin/health` и операционных проверок. |
@@ -138,6 +139,7 @@ powershell -ExecutionPolicy Bypass -File scripts\deploy-vps.ps1 `
   -ServerHost <server-host> `
   -User root `
   -KeyFile $env:USERPROFILE\.ssh\messk_prod_ed25519 `
+  -HostPublicKey 'ssh-ed25519 <server-host-public-key>' `
   -Domain your-domain.example
 ```
 
@@ -148,6 +150,7 @@ powershell -ExecutionPolicy Bypass -File scripts\deploy-vps.ps1 `
   -ServerHost <server-host> `
   -User root `
   -KeyFile $env:USERPROFILE\.ssh\messk_prod_ed25519 `
+  -HostPublicKey 'ssh-ed25519 <server-host-public-key>' `
   -Domain your-domain.example `
   -TurnHost turn.your-domain.example `
   -TurnUsername <turn-user> `
@@ -169,6 +172,15 @@ powershell -ExecutionPolicy Bypass -File scripts\deploy-vps.ps1 `
 | Uploads | Файл в чат | Файл хранится зашифрованным. |
 | Logout wipe | Logout в клиенте | Локальное состояние очищается. |
 
+Публичный `/health` показывает только статус сервиса. Операционные счетчики
+очередей и сокетов доступны через `/admin/health` на loopback VPS. Для проверки
+с рабочей машины откройте туннель и выполните threshold-check:
+
+```powershell
+ssh -L 18080:127.0.0.1:8080 -i $env:USERPROFILE\.ssh\messk_prod_ed25519 root@<server-host>
+powershell -ExecutionPolicy Bypass -File scripts\ops-health-check.ps1 -BackendOrigin http://127.0.0.1:18080
+```
+
 ## Шаг 8. Rollback
 
 Deploy script хранит предыдущие релизы. Если после deploy health плохой:
@@ -178,6 +190,17 @@ Deploy script хранит предыдущие релизы. Если посл�
 3. Переключить `/opt/messan/current` на предыдущий release.
 4. Перезапустить сервис.
 5. Проверить `/health` и `/version`.
+
+Повторяемый rollback на предыдущий сохраненный релиз:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\rollback-vps.ps1 `
+  -ServerHost <server-host> `
+  -User root `
+  -KeyFile $env:USERPROFILE\.ssh\messk_prod_ed25519 `
+  -HostPublicKey 'ssh-ed25519 <server-host-public-key>' `
+  -Domain your-domain.example
+```
 
 ## Минимальный smoke checklist
 
@@ -204,4 +227,3 @@ flowchart LR
 | Secrets absent from git | Обязательно перед каждым push. |
 | Backups tested | Обязательно перед production. |
 | Mesh disabled in production | Да, пока это R&D/staging feature. |
-

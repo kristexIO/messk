@@ -18,7 +18,7 @@ func registerAdminRoutes(mux *http.ServeMux, db *DB, hub *Hub, rdb *redis.Client
 		if !authorizeAdminRequest(w, r) {
 			return
 		}
-		writeHealthReport(w, r, db, hub, rdb)
+		writeAdminHealthReport(w, r, db, hub, rdb)
 	}))
 }
 

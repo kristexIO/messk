@@ -311,11 +311,14 @@ to `/opt/messan/shared/relay-ed25519.b64`.
 
 ## Health And Admin Signals
 
-`GET /health` returns service status plus database counts, upload storage stats,
-hub queue sizes, relay registry stats, active sockets, and release version
-metadata. It is the smoke check endpoint for local release and VPS deploy gates.
+`GET /health` returns service status and release version metadata only. It is
+the public smoke check endpoint for local release and VPS deploy gates and must
+not expose database counts, upload storage stats, queue sizes, or active socket
+counts.
 
-`GET /admin/health` returns the same report for operators. It requires
+`GET /admin/health` returns protected operational status plus database counts,
+upload storage stats, hub queue sizes, relay registry stats, and active socket
+counts. It requires
 `X-Admin-Token` when `ADMIN_TOKEN` is configured; without a configured token it
 only allows loopback requests. Nginx deploy config exposes it to localhost only.
 

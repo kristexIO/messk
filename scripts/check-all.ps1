@@ -6,6 +6,15 @@ $ErrorActionPreference = "Stop"
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
+& (Join-Path $root "scripts\secret-scan.ps1")
+if ($LASTEXITCODE -ne 0) {
+  throw "Secret scan failed"
+}
+& (Join-Path $root "scripts\secret-scan-test.ps1")
+if ($LASTEXITCODE -ne 0) {
+  throw "Secret scan negative test failed"
+}
+
 Push-Location (Join-Path $root "mess")
 try {
   go test ./...

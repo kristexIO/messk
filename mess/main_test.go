@@ -770,7 +770,7 @@ func TestHealthEndpointReportsServiceStatus(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		writeHealthReport(w, r, db, hub, nil)
+		writePublicHealthReport(w, r, db, hub, nil)
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -784,6 +784,7 @@ func TestHealthEndpointReportsServiceStatus(t *testing.T) {
 	var body struct {
 		Status   string            `json:"status"`
 		Services map[string]string `json:"services"`
+		Stats    json.RawMessage   `json:"stats"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("failed to decode body: %v", err)
@@ -793,6 +794,9 @@ func TestHealthEndpointReportsServiceStatus(t *testing.T) {
 	}
 	if body.Services["database"] != "ok" {
 		t.Fatalf("unexpected database status: %s", body.Services["database"])
+	}
+	if len(body.Stats) != 0 {
+		t.Fatal("public health must not expose operational counters")
 	}
 }
 
@@ -816,6 +820,13 @@ func TestAdminHealthRequiresTokenForRemoteRequests(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 with token, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to decode admin health: %v", err)
+	}
+	if len(body["stats"]) == 0 {
+		t.Fatal("expected operator health report to include metrics")
 	}
 }
 

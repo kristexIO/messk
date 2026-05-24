@@ -145,18 +145,25 @@ powershell -ExecutionPolicy Bypass -File scripts\deploy-vps.ps1 `
   -ServerHost <server-host> `
   -User root `
   -KeyFile $env:USERPROFILE\.ssh\messk_prod_ed25519 `
+  -HostPublicKey 'ssh-ed25519 <server-host-public-key>' `
   -Domain <domain>
 ```
 
 The deploy script builds the backend and web client on the server, creates a new
 release directory, switches `/opt/messan/current`, restarts services, verifies
-`/health` and `/version`, and keeps rollback releases. It also applies production
-hardening for nginx, UFW, fail2ban, sysctl, swap, service limits, and systemd
-sandboxing.
+`/health` and `/version`, verifies the SQLite release backup, and keeps rollback
+releases. It also applies production hardening for nginx, UFW, fail2ban, sysctl,
+swap, service limits, and systemd sandboxing.
 
 Password-based SSH is only acceptable for a one-time bootstrap before key
-rotation. Production deploys should use `-KeyFile`, with private keys, tokens,
-and `.env` files kept outside the repository.
+rotation. Production deploys should use `-KeyFile` plus `-HostPublicKey` or
+`-KnownHostsFile`, with private keys, tokens, and `.env` files kept outside the
+repository.
+
+Run `scripts\secret-scan.ps1` before release work. Operational counters are
+available only from `/admin/health`; use `scripts\ops-health-check.ps1` through
+an SSH tunnel to the VPS loopback endpoint. To return to the previous stored
+release, use `scripts\rollback-vps.ps1` with the same verified SSH host key.
 
 ## Security Model
 
@@ -191,6 +198,7 @@ the operational contract.
 - [Roadmap](docs/ROADMAP.md)
 - [Main release report](docs/MAIN_RELEASE_REPORT.md)
 - [Mesh/libp2p release report](docs/MESH_LIBP2P_RELEASE_REPORT.md)
+- [Security obligations](docs/SECURITY_OBLIGATIONS.md)
 - [Operator tutorial RU](docs/OPERATOR_TUTORIAL_RU.md)
 - [Release checklist](RELEASE_CHECKLIST.md)
 

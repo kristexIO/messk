@@ -60,6 +60,9 @@ try {
       $healthResponse = Invoke-WebRequest -Uri "http://127.0.0.1:$port/health" -TimeoutSec 2
       $health = $healthResponse.Content | ConvertFrom-Json
       if ($health.status -eq "ok" -or $health.status -eq "degraded") {
+        if ($null -ne $health.stats) {
+          throw "Public /health exposed protected operational metrics."
+        }
         foreach ($header in @("X-Content-Type-Options", "X-Frame-Options", "Referrer-Policy", "Permissions-Policy")) {
           if ([string]::IsNullOrWhiteSpace((Get-ResponseHeader $healthResponse $header))) {
             throw "Missing security header on /health: $header"
@@ -83,6 +86,15 @@ try {
         $peers = Assert-JsonEndpoint "/peers" "peers"
         if ($null -eq $relayPeers.count -or $null -eq $peers.count) {
           throw "Peer discovery endpoints returned incomplete payloads."
+        }
+        $adminHealth = Assert-JsonEndpoint "/admin/health" "stats"
+        if ($null -eq $adminHealth.stats.database -or $null -eq $adminHealth.stats.hub) {
+          throw "Backend /admin/health omitted protected operational metrics."
+        }
+
+        & (Join-Path $PSScriptRoot "ops-health-check.ps1") -BackendOrigin "http://127.0.0.1:$port" -AllowDegraded
+        if ($LASTEXITCODE -ne 0) {
+          throw "Operator health check failed."
         }
 
         Write-Host "Backend health smoke passed with status: $($health.status)"

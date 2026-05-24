@@ -45,6 +45,9 @@ $health = Invoke-JsonEndpoint $origin "/health" "status"
 if ($health.status -ne "ok" -and $health.status -ne "degraded") {
   throw "/health returned status '$($health.status)'."
 }
+if ($null -ne $health.stats) {
+  throw "Public /health exposed protected operational metrics."
+}
 
 $version = Invoke-JsonEndpoint $origin "/version" "version"
 if ([string]::IsNullOrWhiteSpace($version.commit) -or [string]::IsNullOrWhiteSpace($version.builtAt)) {

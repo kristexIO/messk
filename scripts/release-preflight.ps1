@@ -43,12 +43,19 @@ $frontendEnvPath = Join-Path $root "messk\.env.example"
 $frontendPackagePath = Join-Path $root "messk\package.json"
 $windowsCargoPath = Join-Path $root "clients\windows\Cargo.toml"
 $windowsBuildScriptPath = Join-Path $root "scripts\build-windows-client.ps1"
+$secretScanScriptPath = Join-Path $root "scripts\secret-scan.ps1"
 
 Assert-File $backendEnvPath
 Assert-File $frontendEnvPath
 Assert-File $frontendPackagePath
 Assert-File $windowsCargoPath
 Assert-File $windowsBuildScriptPath
+Assert-File $secretScanScriptPath
+
+& $secretScanScriptPath
+if ($LASTEXITCODE -ne 0) {
+  Fail "secret scan failed"
+}
 
 try {
   $backendUri = [Uri]$BackendOrigin

@@ -199,6 +199,9 @@ export class SocketApiClient {
           draft: existingContact?.draft,
           archived: existingContact?.archived,
           mutedUntil: existingContact?.mutedUntil,
+          verifiedIdentityFingerprint: existingContact?.verifiedIdentityFingerprint,
+          verifiedIdentityAt: existingContact?.verifiedIdentityAt,
+          pinnedMsgId: existingContact?.pinnedMsgId,
         });
         this.profileRefreshAt.set(pubKey, Date.now());
       } catch (error) {

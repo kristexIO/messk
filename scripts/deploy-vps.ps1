@@ -6,6 +6,8 @@ param(
   [string]$Password = "",
   [string]$KeyFile = "",
   [int]$Port = 22,
+  [string]$KnownHostsFile = "",
+  [string]$HostPublicKey = "",
 
   [string]$User = "root",
   [string]$Domain = "",
@@ -17,6 +19,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$temporaryKnownHostsPath = ""
 
 if ([string]::IsNullOrWhiteSpace($Password) -and [string]::IsNullOrWhiteSpace($KeyFile)) {
   throw "Provide -KeyFile for SSH-key deploys, or -Password only for one-time bootstrap."
@@ -26,6 +29,28 @@ if (-not [string]::IsNullOrWhiteSpace($KeyFile)) {
   $KeyFile = (Resolve-Path $KeyFile).Path
 } elseif (-not [string]::IsNullOrWhiteSpace($Password)) {
   Write-Warning "Password deploy is intended only for initial bootstrap. Prefer -KeyFile and disable SSH password login after rotation."
+}
+
+if (-not [string]::IsNullOrWhiteSpace($KnownHostsFile) -and -not [string]::IsNullOrWhiteSpace($HostPublicKey)) {
+  throw "Provide either -KnownHostsFile or -HostPublicKey, not both."
+}
+if (-not [string]::IsNullOrWhiteSpace($HostPublicKey)) {
+  $HostPublicKey = $HostPublicKey.Trim()
+  if ($HostPublicKey -notmatch '^ssh-ed25519\s+[A-Za-z0-9+/]+={0,2}(?:\s+\S+)?$') {
+    throw "HostPublicKey must be an ssh-ed25519 public host key line."
+  }
+  $knownHostsHost = if ($Port -eq 22) { $ServerHost } else { "[$ServerHost]:$Port" }
+  $temporaryKnownHostsPath = Join-Path ([System.IO.Path]::GetTempPath()) "messan_known_hosts_$([Guid]::NewGuid().ToString('N'))"
+  [System.IO.File]::WriteAllText(
+    $temporaryKnownHostsPath,
+    "$knownHostsHost $HostPublicKey`n",
+    [System.Text.UTF8Encoding]::new($false)
+  )
+  $KnownHostsFile = $temporaryKnownHostsPath
+} elseif (-not [string]::IsNullOrWhiteSpace($KnownHostsFile)) {
+  $KnownHostsFile = (Resolve-Path $KnownHostsFile).Path
+} else {
+  throw "Provide -HostPublicKey or -KnownHostsFile so the VPS SSH host key is verified before deploy."
 }
 
 if ([string]::IsNullOrWhiteSpace($LocalRoot)) {
@@ -168,6 +193,7 @@ ALLOWED_UPLOAD_MIME_TYPES=application/octet-stream
 FILE_TOKEN_TTL_MINUTES=60
 SESSION_TOKEN_TTL_MINUTES=1440
 RATE_LIMIT_PER_MINUTE=200
+ADMIN_TOKEN=
 REDIS_ADDR=127.0.0.1:6379
 RELAY_ANNOUNCE_TOKEN=
 RELAY_MAX_TTL_MINUTES=1440
@@ -228,6 +254,7 @@ fi
 
 python3 - <<'PY'
 from pathlib import Path
+import secrets
 
 path = Path("/opt/messan/shared/backend.env")
 updates = {
@@ -289,6 +316,15 @@ for line in out:
 for key, value in operator_defaults.items():
     if key not in existing_keys:
         out.append(f"{key}={value}")
+admin_token_set = False
+for index, line in enumerate(out):
+    if line.startswith("ADMIN_TOKEN="):
+        admin_token_set = True
+        if not line.split("=", 1)[1].strip():
+            out[index] = "ADMIN_TOKEN=" + secrets.token_urlsafe(32)
+        break
+if not admin_token_set:
+    out.append("ADMIN_TOKEN=" + secrets.token_urlsafe(32))
 path.write_text("\n".join(out) + "\n", encoding="utf-8")
 PY
 
@@ -335,7 +371,12 @@ apt-get update
 apt-get install -y curl ca-certificates build-essential rsync nginx redis-server certbot python3-certbot-nginx coturn sqlite3 ufw fail2ban
 
 if [ -s "\$DB_PATH" ]; then
-  sqlite3 "\$DB_PATH" ".backup '\$BACKUP_DIR/messenger-\$RELEASE_ID.db'" || cp "\$DB_PATH" "\$BACKUP_DIR/messenger-\$RELEASE_ID.db"
+  RELEASE_BACKUP="\$BACKUP_DIR/messenger-\$RELEASE_ID.db"
+  sqlite3 "\$DB_PATH" ".backup '\$RELEASE_BACKUP'"
+  if [ "\$(sqlite3 "\$RELEASE_BACKUP" 'PRAGMA quick_check;')" != "ok" ]; then
+    echo "SQLite release backup verification failed." >&2
+    exit 1
+  fi
 fi
 if [ -f "\$SHARED_DIR/backend.env" ]; then
   cp "\$SHARED_DIR/backend.env" "\$BACKUP_DIR/backend-\$RELEASE_ID.env"
@@ -490,10 +531,26 @@ ReadWritePaths=/opt/messan/shared
 WantedBy=multi-user.target
 EOF
 
+cat > \$APP_ROOT/bin/backup-and-verify.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+BACKUP_DIR=/opt/messan/backups
+DB_PATH=/var/lib/messan/messenger.db
+mkdir -p "$BACKUP_DIR"
+BACKUP_PATH="$BACKUP_DIR/messenger-$(date -u +%Y%m%dT%H%M%SZ).db"
+sqlite3 "$DB_PATH" ".backup '$BACKUP_PATH'"
+if [ "$(sqlite3 "$BACKUP_PATH" 'PRAGMA quick_check;')" != "ok" ]; then
+  echo "Scheduled SQLite backup verification failed." >&2
+  exit 1
+fi
+find "$BACKUP_DIR" -name 'messenger-*.db' -mtime +14 -delete
+EOF
+chmod 0755 \$APP_ROOT/bin/backup-and-verify.sh
+
 cat > /etc/cron.d/messan-backup <<'EOF'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-17 3 * * * root mkdir -p /opt/messan/backups && sqlite3 /var/lib/messan/messenger.db ".backup '/opt/messan/backups/messenger-$(date -u +\%Y\%m\%dT\%H\%M\%SZ).db'" && find /opt/messan/backups -name 'messenger-*.db' -mtime +14 -delete
+17 3 * * * root /opt/messan/bin/backup-and-verify.sh
 EOF
 
 python3 - <<'PY'
@@ -859,13 +916,15 @@ user = r'''__USER__'''
 port = int(r'''__PORT__''')
 password = r'''__PASSWORD__'''
 key_file = r'''__KEY_FILE__'''
+known_hosts_file = r'''__KNOWN_HOSTS_FILE__'''
 local_archive = r'''__LOCAL_ARCHIVE__'''
 remote_archive = r'''__REMOTE_ARCHIVE__'''
 remote_script = r'''__REMOTE_SCRIPT__'''
 remote_script_body = base64.b64decode(r'''__SCRIPT_B64__''').decode('utf-8')
 
 client = paramiko.SSHClient()
-client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+client.load_host_keys(known_hosts_file)
+client.set_missing_host_key_policy(paramiko.RejectPolicy())
 connect_kwargs = {
     "hostname": host,
     "username": user,
@@ -907,6 +966,7 @@ $pythonDeploy = (
   Replace("__PORT__", [string]$Port).
   Replace("__PASSWORD__", $Password).
   Replace("__KEY_FILE__", $KeyFile).
+  Replace("__KNOWN_HOSTS_FILE__", $KnownHostsFile).
   Replace("__LOCAL_ARCHIVE__", $archivePath).
   Replace("__REMOTE_ARCHIVE__", $remoteArchivePath).
   Replace("__REMOTE_SCRIPT__", $remoteScriptPath).
@@ -922,6 +982,9 @@ try {
 } finally {
   Remove-Item -LiteralPath $pythonDeployPath -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+  if (-not [string]::IsNullOrWhiteSpace($temporaryKnownHostsPath)) {
+    Remove-Item -LiteralPath $temporaryKnownHostsPath -Force -ErrorAction SilentlyContinue
+  }
 }
 
 if ($deployExitCode -ne 0) {

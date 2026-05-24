@@ -32,6 +32,9 @@ owner directly and include:
 - Session tokens and file tokens must not be logged or committed.
 - Production `.env` files, certificates, private keys, databases, and uploads
   must stay outside git.
+- Public health endpoints must not expose database, queue, socket, upload, or
+  session-count metrics; those belong on authenticated or loopback-only admin
+  surfaces.
 - Protocol changes must update backend validation, web contract tests, and
   `clients/core` mirrors together.
 - Deploy changes must preserve health checks, backups, rollback, UFW, nginx
@@ -39,10 +42,11 @@ owner directly and include:
 
 ## Production Notes
 
-The VPS deploy script configures nginx request/connection limits, UFW, fail2ban,
-sysctl TCP hardening, systemd sandboxing, swap, and release backups. This helps
-with common HTTP/WebSocket abuse, but it does not replace upstream volumetric
-DDoS protection from a hosting provider or a dedicated edge service.
+The VPS deploy script pins the SSH host key, configures nginx
+request/connection limits, UFW, fail2ban, sysctl TCP hardening, systemd
+sandboxing, swap, and verified release backups. This helps with common
+HTTP/WebSocket abuse, but it does not replace upstream volumetric DDoS
+protection from a hosting provider or a dedicated edge service.
 
 Messk has not been independently audited. Do not present it as audited
 cryptographic infrastructure until a qualified external review has happened.
