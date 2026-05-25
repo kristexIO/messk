@@ -132,13 +132,6 @@ struct EditDraft {
     original: String,
 }
 
-#[derive(Debug, Clone)]
-struct PendingCall {
-    peer_public_key: String,
-    incoming: bool,
-    media: call::CallMediaKind,
-}
-
 pub struct MesskApp {
     runtime: tokio::runtime::Runtime,
     tx: mpsc::Sender<UiEvent>,
@@ -157,7 +150,6 @@ pub struct MesskApp {
     health_status: String,
     realtime_status: String,
     call_status: String,
-    pending_call: Option<PendingCall>,
     active_call: Option<call::CallSession>,
     voice_recorder: Option<voice::VoiceRecorder>,
     voice_playback: Option<playback::VoicePlayback>,
@@ -241,7 +233,6 @@ impl MesskApp {
             health_status: "not checked".to_string(),
             realtime_status: "offline".to_string(),
             call_status: String::new(),
-            pending_call: None,
             active_call: None,
             voice_recorder: None,
             voice_playback: None,
@@ -448,7 +439,6 @@ impl MesskApp {
                         short_key(&peer_public_key)
                     ));
                     self.call_status = format!("Call signaling failed: {error}");
-                    self.pending_call = None;
                     if let Some(call) = &mut self.active_call {
                         call.fail();
                     }
@@ -1331,79 +1321,17 @@ impl MesskApp {
                 .push("open a direct chat before starting a call".to_string());
             return;
         }
-        let (media_mode, is_video) = match media {
-            call::CallMediaKind::Audio => ("audio", false),
-            call::CallMediaKind::Video => ("video", true),
-            call::CallMediaKind::Screen => ("screen", true),
-        };
-        let payload = serde_json::json!({
-            "isVideo": is_video,
-            "isScreenShare": media == call::CallMediaKind::Screen,
-            "mediaMode": media_mode,
-            "nativeClient": true,
-            "client": "messk-windows",
-            "supportsMedia": false,
-            "mediaEngine": "native_webrtc_pending",
-        })
-        .to_string();
-        self.pending_call = Some(PendingCall {
-            peer_public_key: peer.clone(),
-            incoming: false,
-            media,
-        });
-        self.active_call = Some(call::CallSession::outgoing(peer.clone(), media));
+        self.active_call = None;
         self.call_status = format!(
-            "Requesting {} with {} - native media engine unavailable",
+            "{} calls are unavailable in Windows - use web for live media with {}",
             call_media_label(media),
             short_key(&peer),
         );
-        self.send_call_signal(peer, call::CALL_OFFER, payload);
-    }
-
-    fn accept_pending_call(&mut self) {
-        let Some(call) = self.pending_call.clone() else {
-            return;
-        };
-        let payload = serde_json::json!({
-            "accepted": true,
-            "nativeClient": true,
-            "client": "messk-windows",
-            "supportsMedia": false,
-            "reason": "native_media_engine_pending",
-        })
-        .to_string();
-        self.call_status =
-            "Call signaling accepted - native media engine is still pending".to_string();
-        if let Some(active_call) = &mut self.active_call {
-            active_call.accept();
-        }
-        self.pending_call = None;
-        self.send_call_signal(call.peer_public_key, call::CALL_ANSWER, payload);
-    }
-
-    fn reject_or_end_pending_call(&mut self) {
-        let Some(call) = self.pending_call.clone() else {
-            self.call_status.clear();
-            self.active_call = None;
-            return;
-        };
-        let kind = if call.incoming {
-            call::CALL_REJECT
-        } else {
-            call::CALL_END
-        };
-        let reason = if call.incoming { "declined" } else { "ended" };
-        let payload = serde_json::json!({ "reason": reason }).to_string();
-        if let Some(active_call) = &mut self.active_call {
-            if call.incoming {
-                active_call.reject(reason);
-            } else {
-                active_call.end();
-            }
-        }
-        self.pending_call = None;
-        self.call_status.clear();
-        self.send_call_signal(call.peer_public_key, kind, payload);
+        self.logs.push(format!(
+            "blocked native {} call to {}: realtime media engine unavailable",
+            call_media_label(media),
+            short_key(&peer)
+        ));
     }
 
     fn send_call_signal(&mut self, peer_public_key: String, kind: &str, data: String) {
@@ -1454,36 +1382,35 @@ impl MesskApp {
         };
         match kind.as_str() {
             call::CALL_OFFER => {
-                self.pending_call = Some(PendingCall {
-                    peer_public_key: sender_public_key.clone(),
-                    incoming: true,
-                    media,
-                });
-                self.active_call = Some(call::CallSession::incoming(
-                    sender_public_key.clone(),
-                    media,
-                ));
+                let mut rejected_call =
+                    call::CallSession::incoming(sender_public_key.clone(), media);
+                rejected_call.reject(NATIVE_MEDIA_UNAVAILABLE_REASON);
+                self.active_call = Some(rejected_call);
                 self.call_status = format!(
-                    "Incoming {} from {} - open the web app for media",
+                    "Rejected incoming {} from {}: Windows live media is unavailable",
                     call_media_label(media),
                     short_key(&sender_public_key)
                 );
                 self.logs.push(format!(
-                    "incoming {} signal from {}",
+                    "rejected incoming {} signal from {}: native media unavailable",
                     call_media_label(media),
                     short_key(&sender_public_key)
                 ));
+                self.send_call_signal(
+                    sender_public_key,
+                    call::CALL_REJECT,
+                    native_media_unavailable_payload(),
+                );
             }
             call::CALL_ANSWER => {
                 if let Some(active_call) = &mut self.active_call {
-                    active_call.answer_received();
+                    active_call.reject(NATIVE_MEDIA_UNAVAILABLE_REASON);
                 }
-                self.pending_call = None;
                 self.call_status =
-                    "Peer answered signaling - native media engine is still pending".to_string();
+                    "Legacy call answer received, but Windows live media is unavailable"
+                        .to_string();
             }
             call::CALL_REJECT => {
-                self.pending_call = None;
                 let reason = parsed
                     .get("reason")
                     .and_then(|value| value.as_str())
@@ -1494,7 +1421,6 @@ impl MesskApp {
                 self.call_status = format!("Call {reason}");
             }
             call::CALL_END => {
-                self.pending_call = None;
                 if let Some(active_call) = &mut self.active_call {
                     active_call.end();
                 }
@@ -1904,7 +1830,6 @@ impl MesskApp {
         self.message_search.clear();
         self.show_message_search = false;
         self.call_status.clear();
-        self.pending_call = None;
         self.active_call = None;
         self.voice_playback = None;
         if let Some(recorder) = self.voice_recorder.take() {
@@ -1929,7 +1854,6 @@ impl MesskApp {
             self.message_search.clear();
             self.show_message_search = false;
             self.call_status.clear();
-            self.pending_call = None;
             self.active_call = None;
             self.voice_playback = None;
             if let Some(recorder) = self.voice_recorder.take() {
@@ -2260,7 +2184,6 @@ impl MesskApp {
         self.message_search.clear();
         self.show_message_search = false;
         self.call_status.clear();
-        self.pending_call = None;
         self.active_call = None;
         self.voice_playback = None;
         if let Some(recorder) = self.voice_recorder.take() {
@@ -2310,7 +2233,6 @@ impl MesskApp {
         self.message_search.clear();
         self.show_message_search = false;
         self.call_status.clear();
-        self.pending_call = None;
         self.active_call = None;
         self.voice_playback = None;
         if let Some(recorder) = self.voice_recorder.take() {
@@ -3957,7 +3879,6 @@ impl MesskApp {
                                     self.message_search.clear();
                                     self.show_message_search = false;
                                     self.call_status.clear();
-                                    self.pending_call = None;
                                     self.active_call = None;
                                     self.voice_playback = None;
                                     if let Some(recorder) = self.voice_recorder.take() {
@@ -3983,7 +3904,6 @@ impl MesskApp {
                                         self.message_search.clear();
                                         self.show_message_search = false;
                                         self.call_status.clear();
-                                        self.pending_call = None;
                                         self.active_call = None;
                                         self.voice_playback = None;
                                         if let Some(recorder) = self.voice_recorder.take() {
@@ -4324,85 +4244,16 @@ impl MesskApp {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            if let Some(call) = self.pending_call.clone() {
-                                                let secondary_label =
-                                                    if call.incoming { "Reject" } else { "End" };
-                                                if ui
-                                                    .add_sized(
-                                                        [72.0, 28.0],
-                                                        neutral_button_widget(secondary_label),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    self.reject_or_end_pending_call();
-                                                }
-                                                ui.add_space(8.0);
-                                                if call.incoming
-                                                    && ui
-                                                        .add_sized(
-                                                            [76.0, 28.0],
-                                                            primary_button_widget("Accept"),
-                                                        )
-                                                        .clicked()
-                                                {
-                                                    self.accept_pending_call();
-                                                }
-                                                ui.add_space(8.0);
-                                                ui.label(
-                                                    egui::RichText::new(call_media_label(
-                                                        call.media,
-                                                    ))
-                                                    .size(11.0)
-                                                    .strong()
-                                                    .color(COL_MUTED),
-                                                );
-                                            } else {
-                                                if ui
-                                                    .add_sized(
-                                                        [72.0, 28.0],
-                                                        neutral_button_widget("Close"),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    self.call_status.clear();
-                                                    self.pending_call = None;
-                                                    self.active_call = None;
-                                                    self.voice_playback = None;
-                                                }
-                                                if let Some(active_call) = &mut self.active_call {
-                                                    ui.add_space(8.0);
-                                                    let mute_label = if active_call.muted {
-                                                        "Unmute"
-                                                    } else {
-                                                        "Mute"
-                                                    };
-                                                    if ui
-                                                        .add_sized(
-                                                            [76.0, 28.0],
-                                                            neutral_button_widget(mute_label),
-                                                        )
-                                                        .clicked()
-                                                    {
-                                                        active_call.toggle_mute();
-                                                    }
-                                                    if active_call.media
-                                                        == call::CallMediaKind::Video
-                                                        && ui
-                                                            .add_sized(
-                                                                [76.0, 28.0],
-                                                                neutral_button_widget(
-                                                                    if active_call.camera_enabled {
-                                                                        "Cam off"
-                                                                    } else {
-                                                                        "Cam on"
-                                                                    },
-                                                                ),
-                                                            )
-                                                            .clicked()
-                                                    {
-                                                        active_call.toggle_camera();
-                                                    }
-                                                }
+                                            if ui
+                                                .add_sized(
+                                                    [72.0, 28.0],
+                                                    neutral_button_widget("Close"),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.call_status.clear();
+                                                self.active_call = None;
+                                                self.voice_playback = None;
                                             }
                                         },
                                     );
@@ -6572,6 +6423,19 @@ fn call_media_label(media: call::CallMediaKind) -> &'static str {
     }
 }
 
+const NATIVE_MEDIA_UNAVAILABLE_REASON: &str = "native_media_unavailable";
+
+fn native_media_unavailable_payload() -> String {
+    serde_json::json!({
+        "reason": NATIVE_MEDIA_UNAVAILABLE_REASON,
+        "nativeClient": true,
+        "client": "messk-windows",
+        "supportsMedia": false,
+        "mediaEngine": "unavailable",
+    })
+    .to_string()
+}
+
 fn call_state_label(state: call::CallState) -> &'static str {
     match state {
         call::CallState::Idle => "idle",
@@ -6682,6 +6546,23 @@ mod tests {
         assert_eq!(
             normalize_seed_phrase("  Alpha   BRAVO\ncharlie  "),
             "alpha bravo charlie"
+        );
+    }
+
+    #[test]
+    fn native_call_rejection_explicitly_disables_media() {
+        let payload: serde_json::Value =
+            serde_json::from_str(&native_media_unavailable_payload()).unwrap();
+
+        assert_eq!(
+            payload.get("reason").and_then(serde_json::Value::as_str),
+            Some(NATIVE_MEDIA_UNAVAILABLE_REASON)
+        );
+        assert_eq!(
+            payload
+                .get("supportsMedia")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
         );
     }
 }

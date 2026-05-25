@@ -69,6 +69,17 @@ payloads without `padding` remain valid.
 - `dummy`: encrypted online-only cover envelope; never stored in history or offline queues.
 - `offline_ack`: client acknowledgement that an offline message with `msg_id` was processed.
 
+## Calls
+
+Realtime call signaling uses `call_offer`, `call_answer`, `call_reject`,
+`call_end`, and `ice_candidate`. A client must not advertise or accept a live
+call unless it can negotiate media for that call. The Windows native client
+currently rejects incoming call offers with
+`{"reason":"native_media_unavailable","supportsMedia":false}` and does not
+initiate signal-only offers until its realtime media engine is implemented.
+The web client rejects an offer with missing SDP or `supportsMedia: false`
+instead of presenting it as an answerable call.
+
 ## Offline Delivery
 
 When a recipient is offline, the server stores the normalized ciphertext

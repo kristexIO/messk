@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { socketManager } from './socket';
-import { WebRTCManager } from './webrtc';
+import { canNegotiateIncomingMedia, WebRTCManager } from './webrtc';
 
 vi.mock('./socket', () => ({
   socketManager: {
@@ -249,5 +249,21 @@ describe('WebRTCManager call media modes', () => {
     const displayedStream = displayedStreams.at(-1);
     expect(displayedStream?.getAudioTracks()).toEqual([incomingAudio]);
     expect(displayedStream?.getVideoTracks()).toEqual([incomingScreen]);
+  });
+});
+
+describe('incoming live media capability', () => {
+  it('accepts a media-capable WebRTC offer', () => {
+    expect(canNegotiateIncomingMedia({
+      sdp: { type: 'offer', sdp: 'offer-sdp' },
+    })).toBe(true);
+  });
+
+  it('rejects signal-only and explicitly unsupported offers', () => {
+    expect(canNegotiateIncomingMedia({})).toBe(false);
+    expect(canNegotiateIncomingMedia({
+      sdp: { type: 'offer', sdp: 'offer-sdp' },
+      supportsMedia: false,
+    })).toBe(false);
   });
 });

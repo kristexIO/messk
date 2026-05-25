@@ -1,6 +1,6 @@
 import React, { useEffect, useEffectEvent, useState, useRef } from 'react';
 import { useAppStore } from '../store';
-import { type CallMediaMode, type LocalVideoSource, WebRTCManager } from '../lib/webrtc';
+import { canNegotiateIncomingMedia, type CallMediaMode, type LocalVideoSource, WebRTCManager } from '../lib/webrtc';
 import { appConfig } from '../lib/config';
 import { Phone, PhoneOff, Video, Mic, MicOff, VideoOff, ShieldCheck, RotateCcw, Activity, MonitorUp, ScreenShareOff } from 'lucide-react';
 import { socketManager } from '../lib/socket';
@@ -98,7 +98,6 @@ export const CallOverlay: React.FC = () => {
   const [peerConnectionState, setPeerConnectionState] = useState<RTCPeerConnectionState>('new');
   const [iceConnectionState, setIceConnectionState] = useState<RTCIceConnectionState>('new');
   const [showDiagnostics, setShowDiagnostics] = useState(false);
-  const [signalOnlyCall, setSignalOnlyCall] = useState(false);
   const [lastRetryTarget, setLastRetryTarget] = useState<{ peerPubKey: string; mode: CallMediaMode } | null>(null);
   const [callDirection, setCallDirection] = useState<'incoming' | 'outgoing'>('outgoing');
   const [callMedia, setCallMedia] = useState<CallMediaMode>('audio');
@@ -233,7 +232,6 @@ export const CallOverlay: React.FC = () => {
     setPeerConnectionState('new');
     setIceConnectionState('new');
     setShowDiagnostics(false);
-    setSignalOnlyCall(false);
     setCallDirection('outgoing');
     setCallMedia('audio');
     callPeerRef.current = null;
@@ -390,14 +388,9 @@ export const CallOverlay: React.FC = () => {
   const handleAccept = async () => {
     if (!callerPubKey) return;
     if (!incomingSDP) {
-      socketManager.sendSignal(callerPubKey, 'call_answer', {
-        accepted: true,
-        nativeClient: false,
-        supportsMedia: false,
-        reason: 'media_negotiation_unavailable',
-      });
+      socketManager.sendSignal(callerPubKey, 'call_reject', { reason: 'native_media_unavailable' });
       logTerminalOutcome('failed');
-      resetCallState('Call signaling accepted. Media is not available for this client pair yet.', {
+      resetCallState('Call rejected. The peer did not provide live media negotiation.', {
         tone: 'warning',
         autoResetStatus: false,
       });
@@ -496,18 +489,20 @@ export const CallOverlay: React.FC = () => {
         : parsedData.isVideo
           ? 'video'
           : 'audio';
+      if (!canNegotiateIncomingMedia(parsedData)) {
+        socketManager.sendSignal(sender_pub_key, 'call_reject', { reason: 'native_media_unavailable' });
+        presentStatus(
+          `Rejected ${callMediaLabel(incomingMode)}: peer client has no live media support.`,
+          'warning',
+          false
+        );
+        return;
+      }
       markCallContext(sender_pub_key, 'incoming', incomingMode);
       clearCallTimeout();
       setCallState('incoming');
       setIncomingSDP(parsedData.sdp ?? null);
-      setSignalOnlyCall(!parsedData.sdp || parsedData.supportsMedia === false);
-      presentStatus(
-        !parsedData.sdp || parsedData.supportsMedia === false
-          ? `Incoming ${callMediaLabel(incomingMode)} request`
-          : `Incoming ${callMediaLabel(incomingMode)}`,
-        'success',
-        false
-      );
+      presentStatus(`Incoming ${callMediaLabel(incomingMode)}`, 'success', false);
       void logCallEvent({
         peerPubKey: sender_pub_key,
         direction: 'incoming',
@@ -870,9 +865,7 @@ export const CallOverlay: React.FC = () => {
            <h2 className="text-3xl font-bold mb-2">Incoming {callMedia === 'screen' ? 'Screen Share' : callMedia === 'video' ? 'Video Call' : 'Audio Call'}</h2>
            <p className="text-slate-400 mb-12">{displayName}</p>
            <p className="mb-8 max-w-md text-center text-xs text-slate-500">
-             {signalOnlyCall
-               ? 'This client can exchange call signaling, but full native media negotiation is not available yet.'
-               : 'If you do not answer within 30 seconds, the call will be marked as missed.'}
+             If you do not answer within 30 seconds, the call will be marked as missed.
            </p>
            <div className="flex gap-8">
               <button onClick={handleRejectCall} className="w-20 h-20 bg-red-600 rounded-full flex items-center justify-center"><PhoneOff className="w-8 h-8 text-white" /></button>

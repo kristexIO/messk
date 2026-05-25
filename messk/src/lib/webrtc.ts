@@ -6,6 +6,16 @@ const ICE_SERVERS: RTCIceServer[] = appConfig.rtcIceServers;
 export type CallMediaMode = 'audio' | 'video' | 'screen';
 export type LocalVideoSource = 'camera' | 'screen' | null;
 
+export function canNegotiateIncomingMedia(offer: {
+  sdp?: RTCSessionDescriptionInit;
+  supportsMedia?: boolean;
+}) {
+  return offer.supportsMedia !== false
+    && offer.sdp?.type === 'offer'
+    && typeof offer.sdp.sdp === 'string'
+    && offer.sdp.sdp.trim().length > 0;
+}
+
 export class WebRTCManager {
   private peerConnection: RTCPeerConnection | null = null;
   private localStream: MediaStream | null = null;

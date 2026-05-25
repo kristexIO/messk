@@ -40,6 +40,8 @@ Exit criteria:
 - Implement Windows call state machine and call overlay first.
 - Add audio-only calls before video.
 - Add timeout, reject, busy, missed, and lost-connection states.
+- Until native realtime media exists, fail closed: Windows must not initiate
+  signal-only calls and must reject incoming offers explicitly.
 
 Exit criteria:
 

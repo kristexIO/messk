@@ -37,7 +37,7 @@ evidence in the repository. It is a status record, not an independent audit.
 | --- | --- |
 | Staging exercise evidence | The automated gate is implemented; deploy to a separate staging node, run smoke and rollback rehearsal, and retain its generated report before production. |
 | Signed Windows installer | Obtain a code-signing certificate, sign artifacts in a protected release workflow, and verify signatures on a clean machine. |
-| Native audio and screen-share parity | Voice-message recording exists, but the Windows client still advertises `supportsMedia: false` for realtime calls. Complete and test actual audio/video/screen media transport, not only protocol/UI foundations. |
+| Native audio and screen-share parity | Voice-message recording exists, but realtime Windows media is not implemented. Windows now fails closed instead of initiating signal-only calls and rejects incoming offers with `native_media_unavailable`; complete and test actual audio/video/screen media transport before claiming parity. |
 | External cryptographic/security review | Obtain an independent review; Messk must not be represented as audited before that result. |
 | Live production deploy | Confirm VPS address/DNS, key-based SSH access, verified server host key, relay/admin configuration, and post-deploy smoke results. |
 

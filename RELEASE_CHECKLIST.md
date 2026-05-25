@@ -44,6 +44,7 @@
 ## UX Checks
 - Confirm chat list search, message search, drafts, pins, reactions, edit/delete, and read receipts all behave correctly.
 - Confirm call overlay handles reject, timeout, reconnect loss, and remote end cleanly.
+- Confirm Windows without a realtime media engine does not initiate call offers and rejects incoming offers with `native_media_unavailable`.
 - Confirm connection status banners are visible and understandable when the socket is not fully connected.
 
 ## Ops Checks

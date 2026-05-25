@@ -68,6 +68,8 @@ Metadata resistance:
 Current realtime media limitation:
 
 - Native voice-message capture and playback are available for encrypted messages.
-- Realtime Windows call signaling remains intentionally marked `supportsMedia: false`;
-  live audio, video, and screen sharing still require a media engine implementation
+- Realtime Windows calls are fail-closed: the native app does not initiate an
+  unusable call offer and rejects incoming offers with
+  `reason: native_media_unavailable`.
+- Live audio, video, and screen sharing still require a media engine implementation
   and end-to-end verification before they can be represented as shipped.
