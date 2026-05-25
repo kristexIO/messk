@@ -23,6 +23,11 @@ const Chat = lazy(async () => {
   return { default: module.Chat };
 });
 
+const TrustCenter = lazy(async () => {
+  const module = await import('./pages/TrustCenter');
+  return { default: module.TrustCenter };
+});
+
 type AppErrorBoundaryState = {
   errorMessage: string | null;
 };
@@ -238,6 +243,11 @@ function App() {
       }} />
       <AppErrorBoundary>
         <Routes>
+          <Route path="/trust" element={
+            <Suspense fallback={<div className="min-h-screen bg-[#020617]" />}>
+              <TrustCenter />
+            </Suspense>
+          } />
           <Route path="*" element={
             <Suspense fallback={<div className="min-h-screen bg-[#020617]" />}>
               <>

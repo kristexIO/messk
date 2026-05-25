@@ -1,0 +1,110 @@
+export type TrustStatus = 'implemented' | 'experimental' | 'release-blocker';
+
+export type TrustItem = {
+  title: string;
+  status: TrustStatus;
+  summary: string;
+  evidence: string;
+};
+
+export type ThreatModelItem = {
+  title: string;
+  description: string;
+};
+
+export const publicTrustDisclosure =
+  'Messk is alpha software and has not been independently audited. Do not treat it as production-ready security software.';
+
+export const implementedTrustControls: TrustItem[] = [
+  {
+    title: 'Encrypted direct message contents',
+    status: 'implemented',
+    summary: 'Direct message bodies and message attachments are encrypted on the client before relay delivery.',
+    evidence: 'Client crypto, ratchet, attachment and protocol tests are required by the release gate.',
+  },
+  {
+    title: 'Locally held identity secret',
+    status: 'implemented',
+    summary: 'A seed phrase derives the account identity locally. The relay is not given the seed phrase.',
+    evidence: 'Identity setup, backup and remembered-identity paths are covered by client tests.',
+  },
+  {
+    title: 'Reduced temporary secret lifetime',
+    status: 'implemented',
+    summary: 'Mutable secret buffers used for message, attachment, backup, seed and PIN operations are cleared after use where the runtime permits it.',
+    evidence: 'Web and native zeroization regression tests run in the release gate.',
+  },
+  {
+    title: 'Release and compatibility gates',
+    status: 'implemented',
+    summary: 'Stable artifacts identify their source commit and incompatible protocol or disabled-feature calls fail closed.',
+    evidence: 'Manifest, protocol and staging-gate checks run before release promotion.',
+  },
+];
+
+export const experimentalTrustControls: TrustItem[] = [
+  {
+    title: 'Relay and bootstrap operation',
+    status: 'experimental',
+    summary: 'Relay-backed delivery is implemented for testing, but remains in staged promotion until deployment evidence is collected.',
+    evidence: 'The release process requires smoke verification against a separate staging origin.',
+  },
+  {
+    title: 'Metadata resistance',
+    status: 'experimental',
+    summary: 'Padding and identifier controls reduce some exposure, but relay-visible routing and timing metadata remains.',
+    evidence: 'Metadata limitations are documented and are not presented as full anonymity.',
+  },
+  {
+    title: 'Mesh transport prototype',
+    status: 'experimental',
+    summary: 'Mesh transport is a research path and is disabled for supported production builds.',
+    evidence: 'Production feature policy and protocol negotiation reject unsupported mesh use.',
+  },
+];
+
+export const productionTrustBlockers: TrustItem[] = [
+  {
+    title: 'Independent security review',
+    status: 'release-blocker',
+    summary: 'No independent security audit has been completed.',
+    evidence: 'A completed review report and remediation record are required before a production security claim.',
+  },
+  {
+    title: 'Signed Windows distribution',
+    status: 'release-blocker',
+    summary: 'A trusted signed installer and verification path are not yet delivered.',
+    evidence: 'Signed build artifacts and install verification evidence remain mandatory release work.',
+  },
+  {
+    title: 'Native realtime media support',
+    status: 'release-blocker',
+    summary: 'The native Windows client deliberately rejects unsupported realtime media behavior.',
+    evidence: 'Fail-closed native tests keep the unsupported path disabled.',
+  },
+  {
+    title: 'Staged production promotion',
+    status: 'release-blocker',
+    summary: 'Production deployment must not proceed without fresh evidence from the exact commit on a distinct staging origin.',
+    evidence: 'Deployment scripts enforce staging evidence and pinned SSH host trust.',
+  },
+];
+
+export const publicThreatModel: ThreatModelItem[] = [
+  {
+    title: 'What encryption protects',
+    description: 'A functioning client is designed to keep direct message and attachment plaintext away from the relay server and network observers.',
+  },
+  {
+    title: 'What the relay can still observe',
+    description: 'Delivery timing, account identifiers, connection information and other routing metadata may remain visible to service operators.',
+  },
+  {
+    title: 'What a lost secret exposes',
+    description: 'Anyone who obtains your seed phrase or an unlocked device can act as you and may read locally accessible conversations.',
+  },
+  {
+    title: 'What users must verify',
+    description: 'Protect the seed phrase offline and confirm contact identity changes through a trusted channel before continuing sensitive chats.',
+  },
+];

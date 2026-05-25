@@ -13,6 +13,7 @@ evidence in the repository. It is a status record, not an independent audit.
 | Auth-bound sender normalization and protected admin endpoints | Implemented | Backend validation and tests in `mess/main_test.go`; `/admin/health` authorization. |
 | Signed relay capabilities and revocation controls | Implemented for staging | `mess/relay_routes.go`, tests, and operator relay announcer. |
 | Metadata-resistance foundations and gated mesh work | Implemented as staged foundations | `clients/core/src/metadata.rs`, `clients/core/src/mesh.rs`; mesh remains feature-gated. |
+| Public security claims and plain-language threat model | Implemented | Pre-auth web route `/trust` separates implemented controls, experimental work, production blockers, and relay-visible metadata; its contract is regression-tested in `messk/src/lib/trustCenter.test.ts`. |
 
 ## Release Hardening Added
 

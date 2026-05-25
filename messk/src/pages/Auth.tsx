@@ -8,6 +8,7 @@ import { prepareAvatarDataUrl } from '../lib/images';
 import { appConfig } from '../lib/config';
 import { fetchWithTimeout } from '../lib/http';
 import { useI18n } from '../lib/i18n';
+import { Link } from 'react-router-dom';
 
 type RemoteProfile = {
   nickname?: string;
@@ -53,10 +54,10 @@ export const Auth: React.FC = () => {
     { id: 'de', code: 'DE', label: t('german') },
   ];
   const trustLabels: Record<Language, string[]> = {
-    en: ['E2EE', 'Local keys', 'No tracking'],
-    ru: ['E2EE', 'Ключи локально', 'Без трекинга'],
-    fr: ['E2EE', 'Cles locales', 'Sans suivi'],
-    de: ['E2EE', 'Lokale Schlussel', 'Kein Tracking'],
+    en: ['E2EE', 'Local keys', 'Metadata visible'],
+    ru: ['E2EE', 'Ключи локально', 'Метаданные видны'],
+    fr: ['E2EE', 'Cles locales', 'Metadonnees visibles'],
+    de: ['E2EE', 'Lokale Schlussel', 'Metadaten sichtbar'],
   };
 
   const handleGenerate = async () => {
@@ -255,6 +256,12 @@ export const Auth: React.FC = () => {
               {t('haveSeed')}
             </button>
           </div>
+          <Link
+            to="/trust"
+            className="mt-7 text-center text-sm text-text-muted underline decoration-white/20 underline-offset-4 transition-colors hover:text-white"
+          >
+            Security claims, limitations and release status
+          </Link>
         </div>
       )}
 

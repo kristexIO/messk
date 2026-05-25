@@ -12,6 +12,10 @@ Messk is a full-stack end-to-end encrypted messenger built around a simple
 principle: the server routes ciphertext, while clients own identity, message
 plaintext, device state, and local recovery.
 
+Before identity creation, the web client exposes `/trust`: a public security
+claims page that distinguishes implemented controls from experimental work and
+explicit production blockers, including missing independent audit evidence.
+
 The platform includes a production Go backend, a React/Vite web client, a
 shared Rust protocol core, and a native Rust/egui Windows client. The Windows
 app is intentionally native: no Electron, no Tauri, no embedded WebView.
@@ -45,6 +49,7 @@ survive real usage:
 | Backend | HTTP/WebSocket router, SQLite persistence, Redis fanout option, uploads, health/version/admin endpoints. |
 | Relay/bootstrap | Signed relay announcements, peer registry, relay health, bootstrap discovery. |
 | Mesh prototype | Feature-gated libp2p builders and simulator for Gossipsub, Kademlia, AutoNAT, DCUtR, Relay v2. |
+| Public trust center | Pre-auth `/trust` disclosure of threat model, metadata limits, staged work, and release blockers. |
 | Operations | PowerShell release gates, smoke checks, backups, key-based VPS deploy, nginx/ufw/fail2ban/sysctl hardening. |
 
 ## Main Branch Release State
@@ -56,7 +61,8 @@ survive real usage:
 | Backend tests | `go test ./...` passes. |
 | Shared Rust core | Default and `mesh-prototype` tests pass. |
 | Native Windows client | Tests, clippy, and build pass. |
-| VPS deploy | Ready for key-based staging deploy after operator SSH key setup. |
+| Public claims disclosure | `/trust` marks security review, signed distribution, native media, and staged promotion as production blockers. |
+| VPS deploy | Code-gated behind distinct staging verification and pinned SSH host trust; production evidence is not yet recorded. |
 
 ## Architecture
 
