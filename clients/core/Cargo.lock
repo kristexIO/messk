@@ -1827,6 +1827,7 @@ dependencies = [
  "libp2p",
  "serde",
  "serde_json",
+ "url",
 ]
 
 [[package]]

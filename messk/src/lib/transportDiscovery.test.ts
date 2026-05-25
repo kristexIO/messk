@@ -16,6 +16,7 @@ describe('transportDiscovery', () => {
             'ftp://bad.example',
             'https://bad.example/path',
             'https://user:pass@bad.example',
+            'http://downgrade.example',
             'HTTP://127.0.0.1:8080/',
           ],
           transports: ['fallback_wss'],

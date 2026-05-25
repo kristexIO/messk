@@ -297,6 +297,18 @@ mod tests {
     }
 
     #[test]
+    fn file_secretbox_rejects_modified_ciphertext() {
+        let (mut payload, key) = encrypt_file_secretbox(b"authenticated attachment").unwrap();
+        let last = payload.len() - 1;
+        payload[last] ^= 1;
+
+        assert!(matches!(
+            decrypt_file_secretbox(&payload, &key),
+            Err(CryptoError::DecryptFailed)
+        ));
+    }
+
+    #[test]
     fn x3dh_initiator_and_responder_derive_same_secret_with_prekey() {
         let alice = generate_box_keypair().unwrap();
         let bob = generate_box_keypair().unwrap();

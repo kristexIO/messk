@@ -31,6 +31,8 @@
 ## Security Checks
 - Confirm upload/download access works only for authorized session holders or per-file tokens.
 - Confirm encrypted uploads use an allowed MIME type, usually `application/octet-stream`.
+- Confirm configured and bootstrap-discovered remote backend origins use HTTPS; only loopback may use HTTP for local tests.
+- Confirm an attachment URL outside the trusted backend `/download/` route is rejected before any session header is sent.
 - Confirm local logout clears IndexedDB and in-memory keys.
 - Confirm backup export does not contain secret keys or ratchet session secrets.
 - Confirm rate limiting and proxy restrictions are enabled in the deployed backend config.

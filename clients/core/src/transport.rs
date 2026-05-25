@@ -212,12 +212,36 @@ impl TransportPolicy {
 }
 
 pub fn normalize_origin(value: &str) -> Option<String> {
-    let value = value.trim().trim_end_matches('/');
-    if value.starts_with("https://") || value.starts_with("http://") {
-        Some(value.to_string())
-    } else {
-        None
+    let parsed = url::Url::parse(value.trim()).ok()?;
+    let scheme = parsed.scheme().to_ascii_lowercase();
+    let host = parsed
+        .host_str()?
+        .trim_matches(|character| character == '[' || character == ']')
+        .to_ascii_lowercase();
+    if scheme != "https" && !(scheme == "http" && is_loopback_host(&host)) {
+        return None;
     }
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || (parsed.path() != "" && parsed.path() != "/")
+    {
+        return None;
+    }
+    let authority_host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    let authority = parsed.port().map_or(authority_host.clone(), |port| {
+        format!("{authority_host}:{port}")
+    });
+    Some(format!("{scheme}://{authority}"))
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 pub fn ordered_origins(primary: &str, fallbacks: &[String]) -> Vec<String> {
@@ -341,16 +365,34 @@ mod tests {
                 "https://messk.online/",
                 &[
                     "https://relay.example/".to_string(),
-                    "bad".to_string(),
+                    "http://downgrade.example".to_string(),
+                    "http://localhost:8080/".to_string(),
                     "https://relay.example".to_string(),
                 ],
             ),
-            vec!["https://messk.online", "https://relay.example"]
+            vec![
+                "https://messk.online",
+                "https://relay.example",
+                "http://localhost:8080"
+            ]
         );
         assert_eq!(
-            parse_origin_list("https://a.example\nhttps://b.example/;bad,https://a.example"),
-            vec!["https://a.example", "https://b.example"]
+            parse_origin_list(
+                "https://a.example\nhttps://b.example/;http://bad.example,http://127.0.0.1:8080,https://a.example"
+            ),
+            vec![
+                "https://a.example",
+                "https://b.example",
+                "http://127.0.0.1:8080"
+            ]
         );
+        assert_eq!(
+            normalize_origin("http://[::1]:8080/"),
+            Some("http://[::1]:8080".to_string())
+        );
+        assert_eq!(normalize_origin("http://relay.example"), None);
+        assert_eq!(normalize_origin("https://user:pass@relay.example"), None);
+        assert_eq!(normalize_origin("https://relay.example/path"), None);
     }
 
     #[test]

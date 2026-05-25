@@ -82,6 +82,8 @@ Exit criteria:
   SHA-256 release manifest for packaged artifacts.
 - Advertise protocol/client-state compatibility and fail clients with an
   explicit upgrade-required message before websocket authentication.
+- Reject remote plaintext fallback/bootstrap origins while retaining loopback
+  HTTP for local verification, and regression-test attachment tamper rejection.
 - Add monitoring for websocket disconnects, failed decrypts, queue growth,
   upload failures, relay churn, and rate-limit hits.
 - Keep rollback and DB backup mandatory for VPS deploys.

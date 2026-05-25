@@ -22,6 +22,9 @@ export function normalizeBackendOrigin(value: string | undefined | null): string
   if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
     return undefined;
   }
+  if (parsed.protocol === 'http:' && !isLoopbackHost(parsed.hostname)) {
+    return undefined;
+  }
   if (parsed.username || parsed.password || parsed.search || parsed.hash) {
     return undefined;
   }

@@ -496,7 +496,7 @@ pub async fn upload_direct_file_with_fallback(
     }
 
     let payload = EncryptedFilePayload {
-        url: absolute_url(&origin, &body.url),
+        url: authenticated_download_url(&origin, &body.url)?,
         key,
         name: file_name,
         size: original_size,
@@ -571,8 +571,9 @@ pub async fn download_encrypted_file_with_fallback(
     if session_token.trim().is_empty() {
         return Err(anyhow!("server did not return a session token"));
     }
+    let download_url = authenticated_download_url(&origin, &payload.url)?;
     let response = reqwest::Client::new()
-        .get(absolute_url(&origin, &payload.url))
+        .get(download_url)
         .header("X-Session-Token", session_token)
         .send()
         .await
@@ -2086,45 +2087,25 @@ fn relay_supports_websocket_endpoint(transports: &[String]) -> bool {
 }
 
 fn normalize_bootstrap_endpoint_origin(value: &str) -> Option<String> {
-    let parsed = Url::parse(value.trim()).ok()?;
-    let scheme = parsed.scheme().to_ascii_lowercase();
-    if scheme != "https" && scheme != "http" {
-        return None;
-    }
-    if !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-    {
-        return None;
-    }
-    if parsed.path() != "" && parsed.path() != "/" {
-        return None;
-    }
-    let host = parsed.host_str()?.to_ascii_lowercase();
-    let host = if host.contains(':') && !host.starts_with('[') {
-        format!("[{host}]")
-    } else {
-        host
-    };
-    let authority = if let Some(port) = parsed.port() {
-        format!("{host}:{port}")
-    } else {
-        host
-    };
-    Some(format!("{scheme}://{authority}"))
+    transport::normalize_origin(value)
 }
 
-fn absolute_url(origin: &str, value: &str) -> String {
-    let value = value.trim();
-    if value.starts_with("https://") || value.starts_with("http://") {
-        return value.to_string();
+fn authenticated_download_url(origin: &str, value: &str) -> Result<String> {
+    let trusted_origin = transport::normalize_origin(origin)
+        .ok_or_else(|| anyhow!("authenticated backend origin is invalid"))?;
+    let base = Url::parse(&format!("{trusted_origin}/"))
+        .context("authenticated backend origin URL is invalid")?;
+    let parsed = base
+        .join(value.trim())
+        .context("attachment download URL is invalid")?;
+    let candidate_origin = transport::normalize_origin(&parsed.origin().ascii_serialization())
+        .ok_or_else(|| anyhow!("attachment download origin is insecure"))?;
+    if candidate_origin != trusted_origin || !parsed.path().starts_with("/download/") {
+        return Err(anyhow!(
+            "attachment download URL is not an authenticated backend download route"
+        ));
     }
-    format!(
-        "{}/{}",
-        origin.trim().trim_end_matches('/'),
-        value.trim_start_matches('/')
-    )
+    Ok(parsed.to_string())
 }
 
 fn safe_file_name(path: &Path) -> String {
@@ -2251,6 +2232,7 @@ mod tests {
                     "ftp://bad.example".to_string(),
                     "https://bad.example/path".to_string(),
                     "https://user:pass@bad.example".to_string(),
+                    "http://downgrade.example".to_string(),
                     "HTTP://127.0.0.1:8080/".to_string(),
                 ],
                 transports: vec!["fallback_wss".to_string()],
@@ -2274,8 +2256,30 @@ mod tests {
             None
         );
         assert_eq!(
+            normalize_bootstrap_endpoint_origin("http://relay.example"),
+            None
+        );
+        assert_eq!(
             normalize_bootstrap_endpoint_origin("wss://relay.example"),
             None
+        );
+    }
+
+    #[test]
+    fn attachment_download_urls_are_bound_to_authenticated_backend() {
+        assert_eq!(
+            authenticated_download_url("https://messk.online", "/download/file.bin?token=test")
+                .unwrap(),
+            "https://messk.online/download/file.bin?token=test"
+        );
+        assert!(
+            authenticated_download_url("https://messk.online", "https://attacker.example/collect")
+                .is_err()
+        );
+        assert!(authenticated_download_url("https://messk.online", "/profile").is_err());
+        assert_eq!(
+            authenticated_download_url("http://127.0.0.1:8080", "/download/local.bin").unwrap(),
+            "http://127.0.0.1:8080/download/local.bin"
         );
     }
 

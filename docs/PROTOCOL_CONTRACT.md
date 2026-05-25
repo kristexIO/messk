@@ -151,7 +151,11 @@ but new clients should use `/directory/resolve`.
 Attachments are encrypted by the client before upload. The server stores opaque
 bytes, validates access control, and returns a download URL/token. The
 `attachment` event carries only encrypted metadata needed by clients to locate
-and decrypt the file.
+and decrypt the file. Clients use authenticated secretbox payloads and must
+reject modified ciphertext instead of rendering it as a valid attachment.
+Before sending a session token, clients also require the URL to resolve to
+their trusted backend `/download/` route; encrypted content from a peer cannot
+redirect authenticated download requests to an external origin.
 
 ## Relay And Bootstrap
 
@@ -224,7 +228,10 @@ Web clients can configure static fallback origins with
 `VITE_FALLBACK_BACKEND_URLS`. On connect they keep the configured origin list
 and refresh it from `/bootstrap`; relays that advertise `central_ws` or
 `fallback_wss` contribute normalized `endpointOrigins` for subsequent websocket
-reconnect attempts.
+reconnect attempts. Web and Windows clients reject remote `http://` origins
+from settings or bootstrap discovery, preventing silent downgrade to plaintext
+websocket transport; `http://localhost`, `http://127.0.0.1`, and `http://[::1]`
+remain allowed for local development and tests only.
 
 ## Mesh Prototype Contract
 

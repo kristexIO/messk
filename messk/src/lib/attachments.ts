@@ -2,6 +2,7 @@ import { randomBytes, secretbox } from 'tweetnacl';
 import { encodeBase64, decodeBase64 } from 'tweetnacl-util';
 import { socketManager } from './socket';
 import { fetchWithTimeout } from './http';
+import { appConfig } from './config';
 
 export interface EncryptedFile {
   url: string;
@@ -62,7 +63,7 @@ export async function encryptFile(file: File): Promise<{ encryptedBlob: Blob; ke
  * Decrypt a file from a URL using a symmetric key
  */
 export async function decryptFile(url: string, keyBase64: string): Promise<Blob> {
-  const response = await fetchWithTimeout(url, {
+  const response = await fetchWithTimeout(trustedAttachmentDownloadUrl(url), {
     headers: socketManager.getSessionHeaders()
   });
   if (!response.ok) {
@@ -81,4 +82,17 @@ export async function decryptFile(url: string, keyBase64: string): Promise<Blob>
   }
   
   return new Blob([new Uint8Array(decrypted)]);
+}
+
+export function trustedAttachmentDownloadUrl(value: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value, appConfig.backendOrigin);
+  } catch {
+    throw new Error('Attachment download URL is invalid');
+  }
+  if (!appConfig.backendOrigins.includes(parsed.origin) || !parsed.pathname.startsWith('/download/')) {
+    throw new Error('Attachment download URL is not a trusted backend download route');
+  }
+  return parsed.toString();
 }
