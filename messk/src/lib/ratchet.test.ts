@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { box } from 'tweetnacl';
 import { decodeBase64, encodeBase64 } from 'tweetnacl-util';
 import { RatchetManager } from './ratchet';
@@ -144,5 +144,18 @@ describe('RatchetManager', () => {
 
     await expect(RatchetManager.decrypt(bob, message)).resolves.toBeNull();
     expect(bob.recvChainIndex).toBe(0);
+  });
+
+  it('wipes mutable derived buffers while ratcheting a message', async () => {
+    const { alice, bob } = createSessionPair();
+    const fillSpy = vi.spyOn(Uint8Array.prototype, 'fill');
+
+    try {
+      const message = await RatchetManager.encrypt(alice, 'wipe-check');
+      await expect(RatchetManager.decrypt(bob, message)).resolves.toBe('wipe-check');
+      expect(fillSpy.mock.calls.filter(([value]) => value === 0).length).toBeGreaterThan(5);
+    } finally {
+      fillSpy.mockRestore();
+    }
   });
 });

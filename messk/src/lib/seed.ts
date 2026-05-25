@@ -21,7 +21,11 @@ export function deriveKeysFromPhrase(phrase: string): KeyPair {
   }
 
   const seed = mnemonicToSeedSync(phrase);
-  return deriveKeysFromSeed(seed);
+  try {
+    return deriveKeysFromSeed(seed);
+  } finally {
+    seed.fill(0);
+  }
 }
 
 export async function deriveKeysFromPhraseAsync(phrase: string): Promise<KeyPair> {
@@ -30,15 +34,26 @@ export async function deriveKeysFromPhraseAsync(phrase: string): Promise<KeyPair
   }
 
   const seed = await mnemonicToSeed(phrase);
-  return deriveKeysFromSeed(seed);
+  try {
+    return deriveKeysFromSeed(seed);
+  } finally {
+    seed.fill(0);
+  }
 }
 
 function deriveKeysFromSeed(seed: Uint8Array): KeyPair {
-  const secretKeyBytes = new Uint8Array(seed.slice(0, 32));
-  const keyPair = box.keyPair.fromSecretKey(secretKeyBytes);
+  const secretKeyBytes = new Uint8Array(32);
+  secretKeyBytes.set(seed.subarray(0, 32));
+  let keyPair: ReturnType<typeof box.keyPair.fromSecretKey> | null = null;
+  try {
+    keyPair = box.keyPair.fromSecretKey(secretKeyBytes);
 
-  return {
-    publicKey: encodeBase64(keyPair.publicKey),
-    secretKey: encodeBase64(keyPair.secretKey),
-  };
+    return {
+      publicKey: encodeBase64(keyPair.publicKey),
+      secretKey: encodeBase64(keyPair.secretKey),
+    };
+  } finally {
+    secretKeyBytes.fill(0);
+    keyPair?.secretKey.fill(0);
+  }
 }

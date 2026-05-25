@@ -1457,18 +1457,27 @@ export class SocketManager {
   private async encryptWithSenderKey(senderKeyBase64: string, plaintext: string): Promise<string> {
     const nonce = randomBytes(secretbox.nonceLength);
     const plaintextBytes = new TextEncoder().encode(plaintext);
-    const ciphertext = secretbox(plaintextBytes, nonce, decodeBase64(senderKeyBase64));
-    const packed = new Uint8Array(nonce.length + ciphertext.length);
-    packed.set(nonce);
-    packed.set(ciphertext, nonce.length);
-    return JSON.stringify({
-      v: 1,
-      mode: 'sender_key_v1',
-      ciphertext: encodeBase64(packed),
-    } satisfies GroupCipherEnvelope);
+    let senderKey: Uint8Array | null = null;
+    try {
+      senderKey = decodeBase64(senderKeyBase64);
+      const ciphertext = secretbox(plaintextBytes, nonce, senderKey);
+      const packed = new Uint8Array(nonce.length + ciphertext.length);
+      packed.set(nonce);
+      packed.set(ciphertext, nonce.length);
+      return JSON.stringify({
+        v: 1,
+        mode: 'sender_key_v1',
+        ciphertext: encodeBase64(packed),
+      } satisfies GroupCipherEnvelope);
+    } finally {
+      plaintextBytes.fill(0);
+      senderKey?.fill(0);
+    }
   }
 
   private async decryptWithSenderKey(senderKeyBase64: string, data: string): Promise<string | null> {
+    let senderKey: Uint8Array | null = null;
+    let plaintext: Uint8Array | null = null;
     try {
       const envelope = JSON.parse(data) as Partial<GroupCipherEnvelope>;
       if (envelope.mode !== 'sender_key_v1' || envelope.v !== 1 || !envelope.ciphertext) {
@@ -1478,13 +1487,17 @@ export class SocketManager {
       const packed = decodeBase64(envelope.ciphertext);
       const nonce = packed.slice(0, secretbox.nonceLength);
       const ciphertext = packed.slice(secretbox.nonceLength);
-      const plaintext = secretbox.open(ciphertext, nonce, decodeBase64(senderKeyBase64));
+      senderKey = decodeBase64(senderKeyBase64);
+      plaintext = secretbox.open(ciphertext, nonce, senderKey);
       if (!plaintext) {
         return null;
       }
       return new TextDecoder().decode(plaintext);
     } catch {
       return data;
+    } finally {
+      senderKey?.fill(0);
+      plaintext?.fill(0);
     }
   }
 
@@ -1511,23 +1524,29 @@ export class SocketManager {
       const { sharedSecret, ephemeralPub } = x3dhRes;
       pqcCiphertext = x3dhRes.pqcCiphertext;
 
-      const ratchetKP = box.keyPair();
-      session = {
-        peerPublicKey: recipientPubKey,
-        rootKey: encodeBase64(sharedSecret),
-        sendChainKey: encodeBase64(sharedSecret),
-        recvChainKey: null,
-        sendRatchetPubKey: encodeBase64(ratchetKP.publicKey),
-        sendRatchetPrivKey: encodeBase64(ratchetKP.secretKey),
-        recvRatchetPubKey: preKeyPub,
-        sendChainIndex: 0,
-        recvChainIndex: 0,
-        previousSendChainLength: 0,
-        skippedKeys: {}
-      };
+      let ratchetKP: ReturnType<typeof box.keyPair> | null = null;
+      try {
+        ratchetKP = box.keyPair();
+        session = {
+          peerPublicKey: recipientPubKey,
+          rootKey: encodeBase64(sharedSecret),
+          sendChainKey: encodeBase64(sharedSecret),
+          recvChainKey: null,
+          sendRatchetPubKey: encodeBase64(ratchetKP.publicKey),
+          sendRatchetPrivKey: encodeBase64(ratchetKP.secretKey),
+          recvRatchetPubKey: preKeyPub,
+          sendChainIndex: 0,
+          recvChainIndex: 0,
+          previousSendChainLength: 0,
+          skippedKeys: {}
+        };
 
-      await db.sessions.put({ ...session });
-      x3dhParams = { ephemeralPub, preKeyPubUsed: preKeyPub };
+        await db.sessions.put({ ...session });
+        x3dhParams = { ephemeralPub, preKeyPubUsed: preKeyPub };
+      } finally {
+        sharedSecret.fill(0);
+        ratchetKP?.secretKey.fill(0);
+      }
     }
 
     const ratchetMsg = await RatchetManager.encrypt(session, plaintext);
@@ -2136,8 +2155,14 @@ export class SocketManager {
       const pubKeysForUpload = [];
       for (let i = 0; i < 100 - count; i++) {
         const kp = box.keyPair();
-        const pkBase64 = encodeBase64(kp.publicKey);
-        const skBase64 = encodeBase64(kp.secretKey);
+        let pkBase64: string;
+        let skBase64: string;
+        try {
+          pkBase64 = encodeBase64(kp.publicKey);
+          skBase64 = encodeBase64(kp.secretKey);
+        } finally {
+          kp.secretKey.fill(0);
+        }
         newKeys.push({ publicKey: pkBase64, secretKey: skBase64 });
         pubKeysForUpload.push(pkBase64);
       }
@@ -2197,23 +2222,29 @@ export class SocketManager {
       // x3dhRespond handles null prekey by zeroing the DH components,
       // matching x3dhInitiate's fallback path.
       const sharedSecret = await x3dhRespond(mySecretKey, myPreKeyPriv, null, peerPubKey, ephemeralPub, x3dh.pqcCiphertext ?? null);
-      const ratchetKP = box.keyPair();
-      return {
-        consumedPreKeyId,
-        session: {
-          peerPublicKey: peerPubKey,
-          rootKey: encodeBase64(sharedSecret),
-          sendChainKey: null,
-          recvChainKey: encodeBase64(sharedSecret),
-          sendRatchetPubKey: encodeBase64(ratchetKP.publicKey),
-          sendRatchetPrivKey: encodeBase64(ratchetKP.secretKey),
-          recvRatchetPubKey: ratchetData.header.ratchetPubKey,
-          sendChainIndex: 0,
-          recvChainIndex: 0,
-          previousSendChainLength: 0,
-          skippedKeys: {}
-        }
-      };
+      let ratchetKP: ReturnType<typeof box.keyPair> | null = null;
+      try {
+        ratchetKP = box.keyPair();
+        return {
+          consumedPreKeyId,
+          session: {
+            peerPublicKey: peerPubKey,
+            rootKey: encodeBase64(sharedSecret),
+            sendChainKey: null,
+            recvChainKey: encodeBase64(sharedSecret),
+            sendRatchetPubKey: encodeBase64(ratchetKP.publicKey),
+            sendRatchetPrivKey: encodeBase64(ratchetKP.secretKey),
+            recvRatchetPubKey: ratchetData.header.ratchetPubKey,
+            sendChainIndex: 0,
+            recvChainIndex: 0,
+            previousSendChainLength: 0,
+            skippedKeys: {}
+          }
+        };
+      } finally {
+        sharedSecret.fill(0);
+        ratchetKP?.secretKey.fill(0);
+      }
     };
 
     const existingSession = await db.sessions.get(peerPubKey);

@@ -71,7 +71,13 @@ export async function ensureGroupSenderKey({
     return existingKey.key;
   }
 
-  const senderKey = encodeBase64(randomBytes(secretbox.keyLength));
+  const senderKeyBytes = randomBytes(secretbox.keyLength);
+  let senderKey: string;
+  try {
+    senderKey = encodeBase64(senderKeyBytes);
+  } finally {
+    senderKeyBytes.fill(0);
+  }
   await db.groupSenderKeys.put({
     id: senderKeyId,
     groupId,

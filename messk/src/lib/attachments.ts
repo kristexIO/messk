@@ -41,9 +41,9 @@ async function scrubImage(file: File): Promise<Blob> {
 export async function encryptFile(file: File): Promise<{ encryptedBlob: Blob; key: string }> {
   const scrubbedFile = await scrubImage(file);
   const key = randomBytes(secretbox.keyLength);
-  const nonce = randomBytes(secretbox.nonceLength);
 
   try {
+    const nonce = randomBytes(secretbox.nonceLength);
     const arrayBuffer = await scrubbedFile.arrayBuffer();
     const data = new Uint8Array(arrayBuffer);
     try {

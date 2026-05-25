@@ -10,7 +10,8 @@ metadata, and what users must protect themselves.
   ciphertext.
 - Identity seed phrases and ratchet/session secrets remain on the client.
 - Native clients clear stored secret buffers when no longer needed; the web
-  client clears mutable temporary key and plaintext buffers after crypto work.
+  client clears mutable temporary seed, ratchet, key and plaintext buffers
+  after crypto work where the runtime provides direct buffer access.
 - Encrypted backups contain chat data, but deliberately exclude identity and
   ratchet secrets.
 

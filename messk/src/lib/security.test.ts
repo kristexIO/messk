@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { clearRememberedIdentity, hashPin, hasRememberedIdentity, rememberIdentityWithPin, restoreRememberedIdentityWithPin, verifyPin } from './security';
 
 afterEach(() => {
@@ -34,5 +34,22 @@ describe('PIN security', () => {
       secretKey: 'secret-key',
     });
     await expect(restoreRememberedIdentityWithPin('0000')).resolves.toBeNull();
+  });
+
+  it('wipes mutable PIN and remembered-identity plaintext buffers', async () => {
+    const fillSpy = vi.spyOn(Uint8Array.prototype, 'fill');
+
+    try {
+      const hash = await hashPin('2468');
+      await expect(verifyPin('2468', hash)).resolves.toBe(true);
+      await rememberIdentityWithPin('pub-key', 'secret-key', '2468');
+      await expect(restoreRememberedIdentityWithPin('2468')).resolves.toEqual({
+        publicKey: 'pub-key',
+        secretKey: 'secret-key',
+      });
+      expect(fillSpy.mock.calls.filter(([value]) => value === 0).length).toBeGreaterThan(5);
+    } finally {
+      fillSpy.mockRestore();
+    }
   });
 });

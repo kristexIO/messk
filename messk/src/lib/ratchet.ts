@@ -5,46 +5,60 @@ import { metadataPaddingTargetLen } from './protocolContract';
 
 const MAX_PADDED_PAYLOAD_BYTES = 1024 * 1024;
 
+function clearBytes(...buffers: Array<Uint8Array | null | undefined>): void {
+  for (const buffer of buffers) {
+    buffer?.fill(0);
+  }
+}
+
 // HKDF Implementation using Web Crypto API
 async function hkdf(secret: Uint8Array, salt: Uint8Array, info: string, length: number): Promise<Uint8Array> {
   const secretBytes = new Uint8Array(secret);
   const saltBytes = new Uint8Array(salt);
   const infoBytes = new TextEncoder().encode(info);
-  const key = await window.crypto.subtle.importKey(
-    'raw',
-    secretBytes,
-    { name: 'HKDF' },
-    false,
-    ['deriveBits']
-  );
+  try {
+    const key = await window.crypto.subtle.importKey(
+      'raw',
+      secretBytes,
+      { name: 'HKDF' },
+      false,
+      ['deriveBits']
+    );
 
-  const bits = await window.crypto.subtle.deriveBits(
+    const bits = await window.crypto.subtle.deriveBits(
       {
         name: 'HKDF',
         hash: 'SHA-256',
         salt: saltBytes,
         info: infoBytes,
       },
-    key,
-    length * 8
-  );
+      key,
+      length * 8
+    );
 
-  return new Uint8Array(bits);
+    return new Uint8Array(bits);
+  } finally {
+    clearBytes(secretBytes, saltBytes);
+  }
 }
 
 // HMAC-SHA256 for Chain Ratchet
 async function hmac(key: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
   const keyBytes = new Uint8Array(key);
   const dataBytes = new Uint8Array(data);
-  const cryptoKey = await window.crypto.subtle.importKey(
-    'raw',
-    keyBytes,
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-  const signature = await window.crypto.subtle.sign('HMAC', cryptoKey, dataBytes);
-  return new Uint8Array(signature);
+  try {
+    const cryptoKey = await window.crypto.subtle.importKey(
+      'raw',
+      keyBytes,
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+    const signature = await window.crypto.subtle.sign('HMAC', cryptoKey, dataBytes);
+    return new Uint8Array(signature);
+  } finally {
+    clearBytes(keyBytes, dataBytes);
+  }
 }
 
 export interface RatchetMessage {
@@ -91,7 +105,11 @@ export class RatchetSession {
    */
   static async kdfRoot(rootKey: Uint8Array, dhOutput: Uint8Array): Promise<[Uint8Array, Uint8Array]> {
     const res = await hkdf(dhOutput, rootKey, this.ROOT_INFO, 64);
-    return [res.slice(0, 32), res.slice(32, 64)];
+    try {
+      return [res.slice(0, 32), res.slice(32, 64)];
+    } finally {
+      res.fill(0);
+    }
   }
 
   /**
@@ -99,8 +117,13 @@ export class RatchetSession {
    */
   static async kdfChain(chainKey: Uint8Array): Promise<[Uint8Array, Uint8Array]> {
     const messageKey = await hmac(chainKey, this.MESSAGE_KEY_SEED);
-    const nextChainKey = await hmac(chainKey, this.NEXT_CHAIN_SEED);
-    return [nextChainKey, messageKey];
+    try {
+      const nextChainKey = await hmac(chainKey, this.NEXT_CHAIN_SEED);
+      return [nextChainKey, messageKey];
+    } catch (error) {
+      messageKey.fill(0);
+      throw error;
+    }
   }
 
   /**
@@ -137,6 +160,7 @@ export class RatchetManager {
     messageKey: Uint8Array,
     expectedHeader?: RatchetMessage['header']
   ): string | null {
+    let decrypted: Uint8Array | null = null;
     try {
       const fullCipher = decodeBase64(ciphertext);
       if (fullCipher.length < secretbox.nonceLength + secretbox.overheadLength) {
@@ -145,7 +169,7 @@ export class RatchetManager {
 
       const nonce = fullCipher.slice(0, secretbox.nonceLength);
       const cipher = fullCipher.slice(secretbox.nonceLength);
-      const decrypted = secretbox.open(cipher, nonce, messageKey);
+      decrypted = secretbox.open(cipher, nonce, messageKey);
       if (!decrypted) {
         return null;
       }
@@ -178,6 +202,8 @@ export class RatchetManager {
       }
     } catch {
       return null;
+    } finally {
+      decrypted?.fill(0);
     }
   }
 
@@ -200,16 +226,24 @@ export class RatchetManager {
     let chainKey = decodeBase64(session.recvChainKey);
     const skippedKeys = { ...(session.skippedKeys ?? {}) };
 
-    for (let i = session.recvChainIndex; i < until; i++) {
-      const [nextChainKey, messageKey] = await RatchetSession.kdfChain(chainKey);
-      skippedKeys[this.skippedKeyId(session.recvRatchetPubKey, i)] = encodeBase64(messageKey);
-      chainKey = nextChainKey;
-    }
+    try {
+      for (let i = session.recvChainIndex; i < until; i++) {
+        const [nextChainKey, messageKey] = await RatchetSession.kdfChain(chainKey);
+        try {
+          skippedKeys[this.skippedKeyId(session.recvRatchetPubKey, i)] = encodeBase64(messageKey);
+        } finally {
+          clearBytes(chainKey, messageKey);
+        }
+        chainKey = nextChainKey;
+      }
 
-    session.recvChainKey = encodeBase64(chainKey);
-    session.recvChainIndex = until;
-    session.skippedKeys = skippedKeys;
-    return true;
+      session.recvChainKey = encodeBase64(chainKey);
+      session.recvChainIndex = until;
+      session.skippedKeys = skippedKeys;
+      return true;
+    } finally {
+      chainKey.fill(0);
+    }
   }
 
   private static async ensureSendChain(session: Session): Promise<void> {
@@ -221,23 +255,30 @@ export class RatchetManager {
       throw new Error('Missing peer ratchet public key');
     }
 
-    const newSendRatchet = box.keyPair();
-    const dhOutput = RatchetSession.diffieHellman(
-      newSendRatchet.secretKey,
-      decodeBase64(session.recvRatchetPubKey)
-    );
+    let newSendRatchet: ReturnType<typeof box.keyPair> | null = null;
+    let currentRootKey: Uint8Array | null = null;
+    let dhOutput: Uint8Array | null = null;
+    let newRootKey: Uint8Array | null = null;
+    let newSendChainKey: Uint8Array | null = null;
+    try {
+      newSendRatchet = box.keyPair();
+      currentRootKey = decodeBase64(session.rootKey);
+      dhOutput = RatchetSession.diffieHellman(
+        newSendRatchet.secretKey,
+        decodeBase64(session.recvRatchetPubKey)
+      );
 
-    const [newRootKey, newSendChainKey] = await RatchetSession.kdfRoot(
-      decodeBase64(session.rootKey),
-      dhOutput
-    );
+      [newRootKey, newSendChainKey] = await RatchetSession.kdfRoot(currentRootKey, dhOutput);
 
-    session.rootKey = encodeBase64(newRootKey);
-    session.sendChainKey = encodeBase64(newSendChainKey);
-    session.sendRatchetPubKey = encodeBase64(newSendRatchet.publicKey);
-    session.sendRatchetPrivKey = encodeBase64(newSendRatchet.secretKey);
-    session.previousSendChainLength = session.sendChainIndex;
-    session.sendChainIndex = 0;
+      session.rootKey = encodeBase64(newRootKey);
+      session.sendChainKey = encodeBase64(newSendChainKey);
+      session.sendRatchetPubKey = encodeBase64(newSendRatchet.publicKey);
+      session.sendRatchetPrivKey = encodeBase64(newSendRatchet.secretKey);
+      session.previousSendChainLength = session.sendChainIndex;
+      session.sendChainIndex = 0;
+    } finally {
+      clearBytes(currentRootKey, dhOutput, newRootKey, newSendChainKey, newSendRatchet?.secretKey);
+    }
   }
 
   /**
@@ -250,30 +291,39 @@ export class RatchetManager {
       throw new Error('Failed to initialize send chain');
     }
 
-    const [nextChainKey, messageKey] = await RatchetSession.kdfChain(decodeBase64(sendChainKey));
-    
-    // Update session state
-    session.sendChainKey = encodeBase64(nextChainKey);
-    const n = session.sendChainIndex;
-    session.sendChainIndex++;
+    const currentChainKey = decodeBase64(sendChainKey);
+    let nextChainKey: Uint8Array | null = null;
+    let messageKey: Uint8Array | null = null;
+    let authenticatedPlaintextBytes: Uint8Array | null = null;
+    try {
+      [nextChainKey, messageKey] = await RatchetSession.kdfChain(currentChainKey);
 
-    const header = {
-      ratchetPubKey: session.sendRatchetPubKey,
-      n: n,
-      pn: session.previousSendChainLength
-    };
-    const authenticatedPlaintext = buildAuthenticatedPlaintext(header, plaintext);
-    const nonce = randomBytes(secretbox.nonceLength);
-    const ciphertext = secretbox(decodeUTF8(authenticatedPlaintext), nonce, messageKey);
-    
-    const fullCipher = new Uint8Array(nonce.length + ciphertext.length);
-    fullCipher.set(nonce);
-    fullCipher.set(ciphertext, nonce.length);
+      // Update session state
+      session.sendChainKey = encodeBase64(nextChainKey);
+      const n = session.sendChainIndex;
+      session.sendChainIndex++;
 
-    return {
-      header,
-      ciphertext: encodeBase64(fullCipher)
-    };
+      const header = {
+        ratchetPubKey: session.sendRatchetPubKey,
+        n: n,
+        pn: session.previousSendChainLength
+      };
+      const authenticatedPlaintext = buildAuthenticatedPlaintext(header, plaintext);
+      const nonce = randomBytes(secretbox.nonceLength);
+      authenticatedPlaintextBytes = decodeUTF8(authenticatedPlaintext);
+      const ciphertext = secretbox(authenticatedPlaintextBytes, nonce, messageKey);
+
+      const fullCipher = new Uint8Array(nonce.length + ciphertext.length);
+      fullCipher.set(nonce);
+      fullCipher.set(ciphertext, nonce.length);
+
+      return {
+        header,
+        ciphertext: encodeBase64(fullCipher)
+      };
+    } finally {
+      clearBytes(currentChainKey, nextChainKey, messageKey, authenticatedPlaintextBytes);
+    }
   }
 
   /**
@@ -287,7 +337,13 @@ export class RatchetManager {
     const skippedKeyId = this.skippedKeyId(msg.header.ratchetPubKey, msg.header.n);
     const skippedMessageKey = session.skippedKeys?.[skippedKeyId];
     if (skippedMessageKey) {
-      const plaintext = this.decryptWithMessageKey(msg.ciphertext, decodeBase64(skippedMessageKey), msg.header);
+      const messageKey = decodeBase64(skippedMessageKey);
+      let plaintext: string | null;
+      try {
+        plaintext = this.decryptWithMessageKey(msg.ciphertext, messageKey, msg.header);
+      } finally {
+        messageKey.fill(0);
+      }
       if (!plaintext) {
         return null;
       }
@@ -310,30 +366,51 @@ export class RatchetManager {
       }
       
       // Perform DH Ratchet step
-      const dhOutput = RatchetSession.diffieHellman(
-        decodeBase64(draftSession.sendRatchetPrivKey), 
-        decodeBase64(msg.header.ratchetPubKey)
-      );
-      
-      const [newRootKey, newRecvChainKey] = await RatchetSession.kdfRoot(decodeBase64(draftSession.rootKey), dhOutput);
-      
-      draftSession.rootKey = encodeBase64(newRootKey);
-      draftSession.recvChainKey = encodeBase64(newRecvChainKey);
-      draftSession.recvRatchetPubKey = msg.header.ratchetPubKey;
-      draftSession.recvChainIndex = 0;
-      
-      // New sending DH ratchet
-      const newSendRatchet = box.keyPair();
-      const dhOutputSend = RatchetSession.diffieHellman(newSendRatchet.secretKey, decodeBase64(msg.header.ratchetPubKey));
-      
-      const [finalRootKey, newSendChainKey] = await RatchetSession.kdfRoot(newRootKey, dhOutputSend);
-      
-      draftSession.rootKey = encodeBase64(finalRootKey);
-      draftSession.sendChainKey = encodeBase64(newSendChainKey);
-      draftSession.sendRatchetPubKey = encodeBase64(newSendRatchet.publicKey);
-      draftSession.sendRatchetPrivKey = encodeBase64(newSendRatchet.secretKey);
-      draftSession.previousSendChainLength = draftSession.sendChainIndex;
-      draftSession.sendChainIndex = 0;
+      let sendRatchetPrivKey: Uint8Array | null = null;
+      let currentRootKey: Uint8Array | null = null;
+      let dhOutput: Uint8Array | null = null;
+      let newRootKey: Uint8Array | null = null;
+      let newRecvChainKey: Uint8Array | null = null;
+      try {
+        sendRatchetPrivKey = decodeBase64(draftSession.sendRatchetPrivKey);
+        currentRootKey = decodeBase64(draftSession.rootKey);
+        dhOutput = RatchetSession.diffieHellman(
+          sendRatchetPrivKey,
+          decodeBase64(msg.header.ratchetPubKey)
+        );
+
+        [newRootKey, newRecvChainKey] = await RatchetSession.kdfRoot(currentRootKey, dhOutput);
+
+        draftSession.rootKey = encodeBase64(newRootKey);
+        draftSession.recvChainKey = encodeBase64(newRecvChainKey);
+        draftSession.recvRatchetPubKey = msg.header.ratchetPubKey;
+        draftSession.recvChainIndex = 0;
+
+        // New sending DH ratchet
+        const newSendRatchet = box.keyPair();
+        let dhOutputSend: Uint8Array | null = null;
+        let finalRootKey: Uint8Array | null = null;
+        let newSendChainKey: Uint8Array | null = null;
+        try {
+          dhOutputSend = RatchetSession.diffieHellman(
+            newSendRatchet.secretKey,
+            decodeBase64(msg.header.ratchetPubKey)
+          );
+
+          [finalRootKey, newSendChainKey] = await RatchetSession.kdfRoot(newRootKey, dhOutputSend);
+
+          draftSession.rootKey = encodeBase64(finalRootKey);
+          draftSession.sendChainKey = encodeBase64(newSendChainKey);
+          draftSession.sendRatchetPubKey = encodeBase64(newSendRatchet.publicKey);
+          draftSession.sendRatchetPrivKey = encodeBase64(newSendRatchet.secretKey);
+          draftSession.previousSendChainLength = draftSession.sendChainIndex;
+          draftSession.sendChainIndex = 0;
+        } finally {
+          clearBytes(dhOutputSend, finalRootKey, newSendChainKey, newSendRatchet.secretKey);
+        }
+      } finally {
+        clearBytes(sendRatchetPrivKey, currentRootKey, dhOutput, newRootKey, newRecvChainKey);
+      }
     }
 
     // 2. Perform Chain Ratchet
@@ -346,17 +423,24 @@ export class RatchetManager {
       return null;
     }
 
-    const [nextRecvChainKey, messageKey] = await RatchetSession.kdfChain(decodeBase64(recvChainKey));
-    draftSession.recvChainKey = encodeBase64(nextRecvChainKey);
-    draftSession.recvChainIndex++;
+    const currentRecvChainKey = decodeBase64(recvChainKey);
+    let nextRecvChainKey: Uint8Array | null = null;
+    let messageKey: Uint8Array | null = null;
+    try {
+      [nextRecvChainKey, messageKey] = await RatchetSession.kdfChain(currentRecvChainKey);
+      draftSession.recvChainKey = encodeBase64(nextRecvChainKey);
+      draftSession.recvChainIndex++;
 
-    // 3. Decrypt
-    const plaintext = this.decryptWithMessageKey(msg.ciphertext, messageKey, msg.header);
-    if (!plaintext) {
-      return null;
+      // 3. Decrypt
+      const plaintext = this.decryptWithMessageKey(msg.ciphertext, messageKey, msg.header);
+      if (!plaintext) {
+        return null;
+      }
+
+      Object.assign(session, draftSession);
+      return plaintext;
+    } finally {
+      clearBytes(currentRecvChainKey, nextRecvChainKey, messageKey);
     }
-
-    Object.assign(session, draftSession);
-    return plaintext;
   }
 }

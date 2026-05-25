@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { box } from 'tweetnacl';
 import { encodeBase64 } from 'tweetnacl-util';
-import { x3dhInitiate, x3dhRespond } from './crypto';
+import { decryptMessage, encryptMessage, x3dhInitiate, x3dhRespond } from './crypto';
 
 describe('X3DH key agreement', () => {
   it('derives the same domain-separated root key on both sides', async () => {
@@ -42,5 +42,25 @@ describe('X3DH key agreement', () => {
         'fake-pqc-key'
       )
     ).rejects.toThrow(/PQC handshake is disabled/);
+  });
+
+  it('wipes mutable direct-message buffers after encrypt and decrypt', () => {
+    const alice = box.keyPair();
+    const bob = box.keyPair();
+    const fillSpy = vi.spyOn(Uint8Array.prototype, 'fill');
+
+    try {
+      const encrypted = encryptMessage(
+        'sensitive payload',
+        encodeBase64(alice.secretKey),
+        encodeBase64(bob.publicKey)
+      );
+
+      expect(decryptMessage(encrypted, encodeBase64(bob.secretKey), encodeBase64(alice.publicKey)))
+        .toBe('sensitive payload');
+      expect(fillSpy.mock.calls.filter(([value]) => value === 0).length).toBeGreaterThanOrEqual(4);
+    } finally {
+      fillSpy.mockRestore();
+    }
   });
 });

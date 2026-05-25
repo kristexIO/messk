@@ -250,9 +250,10 @@ function encryptSecretValue(value: unknown, field = 'default'): string {
   }
 
   const encryptionKey = deriveVaultSubKey(field);
-  const nonce = new Uint8Array(randomBytes(secretbox.nonceLength));
-  const plaintext = new Uint8Array(new TextEncoder().encode(serializeSecretValue(value)));
+  let plaintext: Uint8Array | null = null;
   try {
+    const nonce = new Uint8Array(randomBytes(secretbox.nonceLength));
+    plaintext = new Uint8Array(new TextEncoder().encode(serializeSecretValue(value)));
     const ciphertext = secretbox(plaintext, nonce, encryptionKey);
     const packed = new Uint8Array(nonce.length + ciphertext.length);
     packed.set(nonce);
@@ -260,7 +261,7 @@ function encryptSecretValue(value: unknown, field = 'default'): string {
     return `${ENCRYPTED_PREFIX}${encodeBase64(packed)}`;
   } finally {
     encryptionKey.fill(0);
-    plaintext.fill(0);
+    plaintext?.fill(0);
   }
 }
 
@@ -374,7 +375,7 @@ function decryptFields<T>(
 
 export function setVaultKey(secretKeyBase64: string | null) {
   vaultKey?.fill(0);
-  vaultKey = secretKeyBase64 ? new Uint8Array(decodeBase64(secretKeyBase64)) : null;
+  vaultKey = secretKeyBase64 ? decodeBase64(secretKeyBase64) : null;
 }
 
 export function getDatabaseNameForIdentity(publicKey: string | null) {

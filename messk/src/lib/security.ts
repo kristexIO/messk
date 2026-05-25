@@ -43,10 +43,19 @@ function writeSettings(patch: StoredSettings): void {
 
 async function digestPin(pin: string): Promise<string> {
   const bytes = encoder.encode(pin);
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('');
+  try {
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    const digestBytes = new Uint8Array(digest);
+    try {
+      return Array.from(digestBytes)
+        .map((byte) => byte.toString(16).padStart(2, '0'))
+        .join('');
+    } finally {
+      digestBytes.fill(0);
+    }
+  } finally {
+    bytes.fill(0);
+  }
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -88,24 +97,34 @@ async function derivePinHash(pin: string, salt: Uint8Array, iterations: number):
     saltBytes.byteOffset,
     saltBytes.byteOffset + saltBytes.byteLength
   );
-  const key = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(pin),
-    'PBKDF2',
-    false,
-    ['deriveBits']
-  );
-  const bits = await crypto.subtle.deriveBits(
-    {
-      name: 'PBKDF2',
-      hash: 'SHA-256',
-      salt: saltBuffer,
-      iterations,
-    },
-    key,
-    256
-  );
-  return new Uint8Array(bits);
+  const pinBytes = encoder.encode(pin);
+  let key: CryptoKey;
+  try {
+    key = await crypto.subtle.importKey(
+      'raw',
+      pinBytes,
+      'PBKDF2',
+      false,
+      ['deriveBits']
+    );
+  } finally {
+    pinBytes.fill(0);
+  }
+  try {
+    const bits = await crypto.subtle.deriveBits(
+      {
+        name: 'PBKDF2',
+        hash: 'SHA-256',
+        salt: saltBuffer,
+        iterations,
+      },
+      key,
+      256
+    );
+    return new Uint8Array(bits);
+  } finally {
+    saltBytes.fill(0);
+  }
 }
 
 async function derivePinAesKey(
@@ -114,13 +133,19 @@ async function derivePinAesKey(
   iterations: number,
   usages: KeyUsage[]
 ): Promise<CryptoKey> {
-  const keyMaterial = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(pin),
-    'PBKDF2',
-    false,
-    ['deriveKey']
-  );
+  const pinBytes = encoder.encode(pin);
+  let keyMaterial: CryptoKey;
+  try {
+    keyMaterial = await crypto.subtle.importKey(
+      'raw',
+      pinBytes,
+      'PBKDF2',
+      false,
+      ['deriveKey']
+    );
+  } finally {
+    pinBytes.fill(0);
+  }
 
   return crypto.subtle.deriveKey(
     {
@@ -142,12 +167,16 @@ async function derivePinAesKey(
 export async function hashPin(pin: string): Promise<string> {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const hash = await derivePinHash(pin, salt, PIN_HASH_ITERATIONS);
-  return [
-    PIN_HASH_PREFIX,
-    PIN_HASH_ITERATIONS.toString(),
-    bytesToBase64(salt),
-    bytesToBase64(hash),
-  ].join(':');
+  try {
+    return [
+      PIN_HASH_PREFIX,
+      PIN_HASH_ITERATIONS.toString(),
+      bytesToBase64(salt),
+      bytesToBase64(hash),
+    ].join(':');
+  } finally {
+    hash.fill(0);
+  }
 }
 
 export async function verifyPin(pin: string, expectedHash: string): Promise<boolean> {
@@ -168,8 +197,14 @@ export async function verifyPin(pin: string, expectedHash: string): Promise<bool
   try {
     const salt = base64ToBytes(parts[3]);
     const expected = base64ToBytes(parts[4]);
-    const actual = await derivePinHash(pin, salt, iterations);
-    return constantTimeEqual(actual, expected);
+    let actual: Uint8Array | null = null;
+    try {
+      actual = await derivePinHash(pin, salt, iterations);
+      return constantTimeEqual(actual, expected);
+    } finally {
+      actual?.fill(0);
+      expected.fill(0);
+    }
   } catch {
     return false;
   }
@@ -206,15 +241,19 @@ export async function rememberIdentityWithPin(
       savedAt: Date.now(),
     } satisfies RememberedIdentityPayload)
   );
-  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: toArrayBuffer(iv) }, key, payload);
-  const envelope: RememberedIdentityEnvelope = {
-    version: REMEMBERED_IDENTITY_PREFIX,
-    iterations: REMEMBERED_IDENTITY_ITERATIONS,
-    salt: bytesToBase64(salt),
-    iv: bytesToBase64(iv),
-    ciphertext: bytesToBase64(new Uint8Array(ciphertext)),
-  };
-  localStorage.setItem(REMEMBERED_IDENTITY_STORAGE_KEY, JSON.stringify(envelope));
+  try {
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: toArrayBuffer(iv) }, key, payload);
+    const envelope: RememberedIdentityEnvelope = {
+      version: REMEMBERED_IDENTITY_PREFIX,
+      iterations: REMEMBERED_IDENTITY_ITERATIONS,
+      salt: bytesToBase64(salt),
+      iv: bytesToBase64(iv),
+      ciphertext: bytesToBase64(new Uint8Array(ciphertext)),
+    };
+    localStorage.setItem(REMEMBERED_IDENTITY_STORAGE_KEY, JSON.stringify(envelope));
+  } finally {
+    payload.fill(0);
+  }
 }
 
 export async function restoreRememberedIdentityWithPin(
@@ -246,16 +285,21 @@ export async function restoreRememberedIdentityWithPin(
       key,
       toArrayBuffer(ciphertext)
     );
-    const payload = JSON.parse(new TextDecoder().decode(plaintext)) as Partial<RememberedIdentityPayload>;
+    const plaintextBytes = new Uint8Array(plaintext);
+    try {
+      const payload = JSON.parse(new TextDecoder().decode(plaintextBytes)) as Partial<RememberedIdentityPayload>;
 
-    if (typeof payload.publicKey !== 'string' || typeof payload.secretKey !== 'string') {
-      return null;
+      if (typeof payload.publicKey !== 'string' || typeof payload.secretKey !== 'string') {
+        return null;
+      }
+
+      return {
+        publicKey: payload.publicKey,
+        secretKey: payload.secretKey,
+      };
+    } finally {
+      plaintextBytes.fill(0);
     }
-
-    return {
-      publicKey: payload.publicKey,
-      secretKey: payload.secretKey,
-    };
   } catch {
     return null;
   }

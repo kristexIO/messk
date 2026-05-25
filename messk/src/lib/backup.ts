@@ -78,8 +78,9 @@ export async function createEncryptedBackup(
   const salt = new Uint8Array(randomBytes(16));
   const nonce = new Uint8Array(randomBytes(secretbox.nonceLength));
   const key = await deriveBackupKey(password, salt, BACKUP_KDF_ITERATIONS);
-  const plaintext = new Uint8Array(new TextEncoder().encode(JSON.stringify(backup)));
+  let plaintext: Uint8Array | null = null;
   try {
+    plaintext = new Uint8Array(new TextEncoder().encode(JSON.stringify(backup)));
     const ciphertext = secretbox(plaintext, nonce, key);
 
     return {
@@ -99,7 +100,7 @@ export async function createEncryptedBackup(
     };
   } finally {
     key.fill(0);
-    plaintext.fill(0);
+    plaintext?.fill(0);
   }
 }
 
@@ -272,13 +273,19 @@ function assertBackupPassword(password: string) {
 }
 
 async function deriveBackupKey(password: string, salt: Uint8Array, iterations: number): Promise<Uint8Array> {
-  const keyMaterial = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(password),
-    'PBKDF2',
-    false,
-    ['deriveBits']
-  );
+  const passwordBytes = new TextEncoder().encode(password);
+  let keyMaterial: CryptoKey;
+  try {
+    keyMaterial = await crypto.subtle.importKey(
+      'raw',
+      passwordBytes,
+      'PBKDF2',
+      false,
+      ['deriveBits']
+    );
+  } finally {
+    passwordBytes.fill(0);
+  }
   const bits = await crypto.subtle.deriveBits(
     {
       name: 'PBKDF2',
