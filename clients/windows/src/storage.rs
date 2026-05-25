@@ -10,6 +10,7 @@ use std::{
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+use zeroize::Zeroizing;
 
 pub const LOCAL_SCHEMA_VERSION: i64 = 1;
 
@@ -115,7 +116,7 @@ pub struct StoredOwnProfile {
 
 #[derive(Debug, Clone)]
 pub struct StoredPreKey {
-    pub secret_key: String,
+    pub secret_key: crypto::SecretString,
 }
 
 impl LocalStore {
@@ -241,7 +242,7 @@ impl LocalStore {
         peer_public_key: &str,
         session: &ratchet::Session,
     ) -> Result<()> {
-        let session_json = serde_json::to_string(session)?;
+        let session_json = Zeroizing::new(serde_json::to_string(session)?);
         let protected_session = vault::protect_secret(session_json.as_bytes())?;
         let now = now_ms();
         self.connection()?.execute(
@@ -276,9 +277,8 @@ impl LocalStore {
                     Value::Text(text) => text.into_bytes(),
                     other => return Err(anyhow!("invalid stored session value: {other:?}")),
                 };
-                let opened = vault::unprotect_secret(&bytes).unwrap_or(bytes);
-                let json = String::from_utf8(opened)?;
-                serde_json::from_str(&json).map_err(Into::into)
+                let opened = Zeroizing::new(vault::unprotect_secret(&bytes).unwrap_or(bytes));
+                serde_json::from_slice(&opened).map_err(Into::into)
             })
             .transpose()
     }
@@ -659,8 +659,9 @@ impl LocalStore {
             )
             .optional()?;
         row.map(|protected_secret_key| {
-            let secret_bytes = vault::unprotect_secret(&protected_secret_key)?;
-            let secret_key = String::from_utf8(secret_bytes)?;
+            let secret_bytes = Zeroizing::new(vault::unprotect_secret(&protected_secret_key)?);
+            let secret_key =
+                crypto::SecretString::new(std::str::from_utf8(&secret_bytes)?.to_owned());
             Ok(StoredPreKey { secret_key })
         })
         .transpose()
@@ -1707,7 +1708,10 @@ mod tests {
             .load_prekey("account", &prekey.public_key)
             .unwrap()
             .unwrap();
-        assert_eq!(stored_prekey.secret_key, prekey.secret_key.expose());
+        assert_eq!(
+            stored_prekey.secret_key.expose(),
+            prekey.secret_key.expose()
+        );
         store.delete_prekey("account", &prekey.public_key).unwrap();
         assert_eq!(store.count_prekeys("account").unwrap(), 0);
 

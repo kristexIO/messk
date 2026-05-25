@@ -1539,7 +1539,7 @@ fn decrypt_direct_payload(
         };
         let shared_secret = crate::crypto::x3dh_respond(
             identity.secret_key.expose(),
-            prekey_secret.as_deref(),
+            prekey_secret.as_ref().map(|secret| secret.expose()),
             peer_public_key,
             &x3dh.ephemeral_public_key,
         )

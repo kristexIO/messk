@@ -42,21 +42,28 @@ export async function encryptFile(file: File): Promise<{ encryptedBlob: Blob; ke
   const scrubbedFile = await scrubImage(file);
   const key = randomBytes(secretbox.keyLength);
   const nonce = randomBytes(secretbox.nonceLength);
-  
-  const arrayBuffer = await scrubbedFile.arrayBuffer();
-  const data = new Uint8Array(arrayBuffer);
-  
-  const encrypted = secretbox(data, nonce, key);
-  
-  // Pack nonce + encrypted data
-  const result = new Uint8Array(nonce.length + encrypted.length);
-  result.set(nonce);
-  result.set(encrypted, nonce.length);
-  
-  return {
-    encryptedBlob: new Blob([result], { type: 'application/octet-stream' }),
-    key: encodeBase64(key)
-  };
+
+  try {
+    const arrayBuffer = await scrubbedFile.arrayBuffer();
+    const data = new Uint8Array(arrayBuffer);
+    try {
+      const encrypted = secretbox(data, nonce, key);
+
+      // Pack nonce + encrypted data
+      const result = new Uint8Array(nonce.length + encrypted.length);
+      result.set(nonce);
+      result.set(encrypted, nonce.length);
+
+      return {
+        encryptedBlob: new Blob([result], { type: 'application/octet-stream' }),
+        key: encodeBase64(key)
+      };
+    } finally {
+      data.fill(0);
+    }
+  } finally {
+    key.fill(0);
+  }
 }
 
 /**
@@ -76,12 +83,18 @@ export async function decryptFile(url: string, keyBase64: string): Promise<Blob>
   const nonce = fullData.slice(0, secretbox.nonceLength);
   const encrypted = fullData.slice(secretbox.nonceLength);
   
-  const decrypted = secretbox.open(encrypted, nonce, key);
-  if (!decrypted) {
-    throw new Error('Failed to decrypt file');
+  let decrypted: Uint8Array | null = null;
+  try {
+    decrypted = secretbox.open(encrypted, nonce, key);
+    if (!decrypted) {
+      throw new Error('Failed to decrypt file');
+    }
+
+    return new Blob([new Uint8Array(decrypted)]);
+  } finally {
+    key.fill(0);
+    decrypted?.fill(0);
   }
-  
-  return new Blob([new Uint8Array(decrypted)]);
 }
 
 export function trustedAttachmentDownloadUrl(value: string): string {

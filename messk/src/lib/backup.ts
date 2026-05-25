@@ -79,23 +79,28 @@ export async function createEncryptedBackup(
   const nonce = new Uint8Array(randomBytes(secretbox.nonceLength));
   const key = await deriveBackupKey(password, salt, BACKUP_KDF_ITERATIONS);
   const plaintext = new Uint8Array(new TextEncoder().encode(JSON.stringify(backup)));
-  const ciphertext = secretbox(plaintext, new Uint8Array(nonce), new Uint8Array(key));
+  try {
+    const ciphertext = secretbox(plaintext, nonce, key);
 
-  return {
-    version: 2,
-    encrypted: true,
-    exportedAt: backup.exportedAt,
-    kdf: {
-      name: 'PBKDF2-SHA256',
-      iterations: BACKUP_KDF_ITERATIONS,
-      salt: encodeBase64(salt),
-    },
-    cipher: {
-      name: 'XSalsa20-Poly1305',
-      nonce: encodeBase64(nonce),
-      ciphertext: encodeBase64(ciphertext),
-    },
-  };
+    return {
+      version: 2,
+      encrypted: true,
+      exportedAt: backup.exportedAt,
+      kdf: {
+        name: 'PBKDF2-SHA256',
+        iterations: BACKUP_KDF_ITERATIONS,
+        salt: encodeBase64(salt),
+      },
+      cipher: {
+        name: 'XSalsa20-Poly1305',
+        nonce: encodeBase64(nonce),
+        ciphertext: encodeBase64(ciphertext),
+      },
+    };
+  } finally {
+    key.fill(0);
+    plaintext.fill(0);
+  }
 }
 
 export function downloadEncryptedBackup(payload: EncryptedBackupPayload) {
@@ -140,12 +145,18 @@ async function decryptBackupPayload(payload: EncryptedBackupPayload, password: s
   }
 
   const key = await deriveBackupKey(password, salt, payload.kdf.iterations);
-  const plaintext = secretbox.open(new Uint8Array(ciphertext), new Uint8Array(nonce), new Uint8Array(key));
-  if (!plaintext) {
-    throw new Error('Invalid backup password or corrupted backup');
-  }
+  let plaintext: Uint8Array | null = null;
+  try {
+    plaintext = secretbox.open(ciphertext, nonce, key);
+    if (!plaintext) {
+      throw new Error('Invalid backup password or corrupted backup');
+    }
 
-  return normalizeBackupPayload(JSON.parse(new TextDecoder().decode(plaintext)) as unknown);
+    return normalizeBackupPayload(JSON.parse(new TextDecoder().decode(plaintext)) as unknown);
+  } finally {
+    key.fill(0);
+    plaintext?.fill(0);
+  }
 }
 
 function normalizeBackupPayload(value: unknown): BackupPayload {

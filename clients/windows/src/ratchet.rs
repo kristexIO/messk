@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
 use thiserror::Error;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -93,14 +94,46 @@ pub struct Session {
     pub skipped_keys: HashMap<String, [u8; 32]>,
 }
 
+impl Zeroize for Session {
+    fn zeroize(&mut self) {
+        self.root_key.zeroize();
+        self.send_chain_key.zeroize();
+        self.recv_chain_key.zeroize();
+        self.send_ratchet_public_key.zeroize();
+        self.send_ratchet_secret_key.zeroize();
+        self.recv_ratchet_public_key.zeroize();
+        self.send_chain_index.zeroize();
+        self.recv_chain_index.zeroize();
+        self.previous_send_chain_length.zeroize();
+        for key in self.skipped_keys.values_mut() {
+            key.zeroize();
+        }
+        self.skipped_keys.clear();
+    }
+}
+
+impl ZeroizeOnDrop for Session {}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
 impl Session {
     pub fn new_sender(
         _peer_public_key: String,
-        shared_secret: [u8; 32],
+        mut shared_secret: [u8; 32],
         peer_pre_key_public_key: Option<String>,
     ) -> Result<Self, RatchetError> {
-        let ratchet_key = crypto::generate_box_keypair()?;
-        Ok(Self {
+        let ratchet_key = match crypto::generate_box_keypair() {
+            Ok(value) => value,
+            Err(error) => {
+                shared_secret.zeroize();
+                return Err(error.into());
+            }
+        };
+        let session = Self {
             root_key: shared_secret,
             send_chain_key: Some(shared_secret),
             recv_chain_key: None,
@@ -111,16 +144,24 @@ impl Session {
             recv_chain_index: 0,
             previous_send_chain_length: 0,
             skipped_keys: HashMap::new(),
-        })
+        };
+        shared_secret.zeroize();
+        Ok(session)
     }
 
     pub fn new_responder(
         _peer_public_key: String,
-        shared_secret: [u8; 32],
+        mut shared_secret: [u8; 32],
         initial_peer_ratchet_public_key: String,
     ) -> Result<Self, RatchetError> {
-        let ratchet_key = crypto::generate_box_keypair()?;
-        Ok(Self {
+        let ratchet_key = match crypto::generate_box_keypair() {
+            Ok(value) => value,
+            Err(error) => {
+                shared_secret.zeroize();
+                return Err(error.into());
+            }
+        };
+        let session = Self {
             root_key: shared_secret,
             send_chain_key: None,
             recv_chain_key: Some(shared_secret),
@@ -131,7 +172,9 @@ impl Session {
             recv_chain_index: 0,
             previous_send_chain_length: 0,
             skipped_keys: HashMap::new(),
-        })
+        };
+        shared_secret.zeroize();
+        Ok(session)
     }
 }
 
@@ -176,7 +219,7 @@ pub fn encrypt(session: &mut Session, plaintext: &str) -> Result<RatchetMessage,
     let send_chain_key = session
         .send_chain_key
         .ok_or(RatchetError::MissingSendChain)?;
-    let (next_chain_key, message_key) = kdf_chain(&send_chain_key)?;
+    let (next_chain_key, mut message_key) = kdf_chain(&send_chain_key)?;
     session.send_chain_key = Some(next_chain_key);
 
     let header = RatchetHeader {
@@ -191,12 +234,21 @@ pub fn encrypt(session: &mut Session, plaintext: &str) -> Result<RatchetMessage,
         "header": header,
         "plaintext": plaintext,
     });
-    let (authenticated_plaintext, _) =
-        pad_json_envelope_with_padding_field(authenticated_plaintext, PaddingProfile::Interactive)
-            .map_err(|_| RatchetError::MetadataPaddingFailed)?;
+    let (authenticated_plaintext, _) = match pad_json_envelope_with_padding_field(
+        authenticated_plaintext,
+        PaddingProfile::Interactive,
+    ) {
+        Ok(value) => value,
+        Err(_) => {
+            message_key.zeroize();
+            return Err(RatchetError::MetadataPaddingFailed);
+        }
+    };
 
+    let ciphertext = encrypt_secretbox(&message_key, authenticated_plaintext.as_bytes());
+    message_key.zeroize();
     Ok(RatchetMessage {
-        ciphertext: encrypt_secretbox(&message_key, authenticated_plaintext.as_bytes())?,
+        ciphertext: ciphertext?,
         header,
     })
 }
@@ -206,8 +258,10 @@ pub fn decrypt(
     message: &RatchetMessage,
 ) -> Result<Option<String>, RatchetError> {
     let skipped_key_id = skipped_key_id(&message.header.ratchet_pub_key, message.header.n);
-    if let Some(message_key) = session.skipped_keys.remove(&skipped_key_id) {
-        return decrypt_with_message_key(&message.ciphertext, &message_key, &message.header);
+    if let Some(mut message_key) = session.skipped_keys.remove(&skipped_key_id) {
+        let result = decrypt_with_message_key(&message.ciphertext, &message_key, &message.header);
+        message_key.zeroize();
+        return result;
     }
 
     let mut draft = session.clone();
@@ -216,22 +270,26 @@ pub fn decrypt(
             skip_message_keys(&mut draft, message.header.pn)?;
         }
 
-        let dh_output = crypto::nacl_box_before(
+        let mut dh_output = crypto::nacl_box_before(
             &message.header.ratchet_pub_key,
             &draft.send_ratchet_secret_key,
         )?;
-        let (new_root_key, new_recv_chain_key) = kdf_root(&draft.root_key, &dh_output)?;
+        let root_result = kdf_root(&draft.root_key, &dh_output);
+        dh_output.zeroize();
+        let (new_root_key, new_recv_chain_key) = root_result?;
         draft.root_key = new_root_key;
         draft.recv_chain_key = Some(new_recv_chain_key);
         draft.recv_ratchet_public_key = Some(message.header.ratchet_pub_key.clone());
         draft.recv_chain_index = 0;
 
         let new_send_ratchet = crypto::generate_box_keypair()?;
-        let send_dh_output = crypto::nacl_box_before(
+        let mut send_dh_output = crypto::nacl_box_before(
             &message.header.ratchet_pub_key,
             new_send_ratchet.secret_key.expose(),
         )?;
-        let (final_root_key, new_send_chain_key) = kdf_root(&draft.root_key, &send_dh_output)?;
+        let root_result = kdf_root(&draft.root_key, &send_dh_output);
+        send_dh_output.zeroize();
+        let (final_root_key, new_send_chain_key) = root_result?;
         draft.root_key = final_root_key;
         draft.send_chain_key = Some(new_send_chain_key);
         draft.send_ratchet_public_key = new_send_ratchet.public_key;
@@ -244,11 +302,13 @@ pub fn decrypt(
     let recv_chain_key = draft
         .recv_chain_key
         .ok_or(RatchetError::MissingReceiveChain)?;
-    let (next_recv_chain_key, message_key) = kdf_chain(&recv_chain_key)?;
+    let (next_recv_chain_key, mut message_key) = kdf_chain(&recv_chain_key)?;
     draft.recv_chain_key = Some(next_recv_chain_key);
     draft.recv_chain_index += 1;
 
-    let plaintext = decrypt_with_message_key(&message.ciphertext, &message_key, &message.header)?;
+    let plaintext = decrypt_with_message_key(&message.ciphertext, &message_key, &message.header);
+    message_key.zeroize();
+    let plaintext = plaintext?;
     if plaintext.is_some() {
         *session = draft;
     }
@@ -265,8 +325,11 @@ fn ensure_send_chain(session: &mut Session) -> Result<(), RatchetError> {
         .clone()
         .ok_or(RatchetError::MissingPeerRatchetKey)?;
     let new_send_ratchet = crypto::generate_box_keypair()?;
-    let dh_output = crypto::nacl_box_before(&peer_ratchet, new_send_ratchet.secret_key.expose())?;
-    let (new_root_key, new_send_chain_key) = kdf_root(&session.root_key, &dh_output)?;
+    let mut dh_output =
+        crypto::nacl_box_before(&peer_ratchet, new_send_ratchet.secret_key.expose())?;
+    let root_result = kdf_root(&session.root_key, &dh_output);
+    dh_output.zeroize();
+    let (new_root_key, new_send_chain_key) = root_result?;
     session.root_key = new_root_key;
     session.send_chain_key = Some(new_send_chain_key);
     session.send_ratchet_public_key = new_send_ratchet.public_key;
@@ -293,14 +356,22 @@ fn skip_message_keys(session: &mut Session, until: u32) -> Result<(), RatchetErr
         .ok_or(RatchetError::MissingPeerRatchetKey)?;
 
     for index in session.recv_chain_index..until {
-        let (next_chain_key, message_key) = kdf_chain(&chain_key)?;
+        let (next_chain_key, message_key) = match kdf_chain(&chain_key) {
+            Ok(value) => value,
+            Err(error) => {
+                chain_key.zeroize();
+                return Err(error);
+            }
+        };
         session
             .skipped_keys
             .insert(skipped_key_id(&ratchet_public_key, index), message_key);
+        chain_key.zeroize();
         chain_key = next_chain_key;
     }
 
     session.recv_chain_key = Some(chain_key);
+    chain_key.zeroize();
     session.recv_chain_index = until;
     Ok(())
 }
@@ -315,12 +386,15 @@ fn kdf_root(
 ) -> Result<([u8; 32], [u8; 32]), RatchetError> {
     let hkdf = Hkdf::<Sha256>::new(Some(root_key), dh_output);
     let mut out = [0u8; 64];
-    hkdf.expand(b"RatchetRootKey", &mut out)
-        .map_err(|_| RatchetError::KeyDeriveFailed)?;
+    if hkdf.expand(b"RatchetRootKey", &mut out).is_err() {
+        out.zeroize();
+        return Err(RatchetError::KeyDeriveFailed);
+    }
     let mut new_root_key = [0u8; 32];
     let mut chain_key = [0u8; 32];
     new_root_key.copy_from_slice(&out[0..32]);
     chain_key.copy_from_slice(&out[32..64]);
+    out.zeroize();
     Ok((new_root_key, chain_key))
 }
 
@@ -334,9 +408,10 @@ fn hmac_sha256(key: &[u8; 32], data: &[u8]) -> Result<[u8; 32], RatchetError> {
     let mut mac =
         <HmacSha256 as Mac>::new_from_slice(key).map_err(|_| RatchetError::KeyDeriveFailed)?;
     mac.update(data);
-    let bytes = mac.finalize().into_bytes();
+    let mut bytes = mac.finalize().into_bytes();
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
+    bytes.zeroize();
     Ok(out)
 }
 
@@ -420,7 +495,7 @@ mod tests {
         let mut sender = Session::new_sender(
             bob.public_key.clone(),
             initiated.shared_secret,
-            initiated.pre_key_public_key,
+            initiated.pre_key_public_key.clone(),
         )
         .unwrap();
         let message = encrypt(&mut sender, "hello from rust").unwrap();
@@ -435,6 +510,20 @@ mod tests {
             decrypt(&mut receiver, &message).unwrap(),
             Some("hello from rust".to_string())
         );
+    }
+
+    #[test]
+    fn session_zeroize_clears_secret_state() {
+        let keypair = crypto::generate_box_keypair().unwrap();
+        let mut session = Session::new_sender(keypair.public_key, [7u8; 32], None).unwrap();
+        session.skipped_keys.insert("skip".to_string(), [9u8; 32]);
+
+        session.zeroize();
+
+        assert_eq!(session.root_key, [0u8; 32]);
+        assert!(session.send_chain_key.is_none());
+        assert!(session.send_ratchet_secret_key.is_empty());
+        assert!(session.skipped_keys.is_empty());
     }
 
     #[test]
@@ -479,7 +568,7 @@ mod tests {
         let mut sender = Session::new_sender(
             bob.public_key.clone(),
             initiated.shared_secret,
-            initiated.pre_key_public_key,
+            initiated.pre_key_public_key.clone(),
         )
         .unwrap();
         let message = encrypt(&mut sender, "short").unwrap();

@@ -19,7 +19,7 @@ use salsa20::{
 };
 use sha2::Sha256;
 use thiserror::Error;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[derive(Debug, Clone)]
 pub struct Identity {
@@ -34,7 +34,7 @@ pub struct BoxKeyPair {
     pub secret_key: SecretString,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
 pub struct X3dhInitiation {
     pub shared_secret: [u8; 32],
     pub ephemeral_public_key: String,
@@ -45,6 +45,10 @@ pub struct X3dhInitiation {
 pub struct SecretString(String);
 
 impl SecretString {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
     pub fn expose(&self) -> &str {
         &self.0
     }
@@ -87,7 +91,8 @@ impl From<AeadError> for CryptoError {
 pub fn generate_identity() -> Result<Identity, CryptoError> {
     let mnemonic =
         Mnemonic::generate_in(Language::English, 12).map_err(|_| CryptoError::InvalidSeedPhrase)?;
-    identity_from_seed_phrase(&mnemonic.to_string())
+    let phrase = SecretString::new(mnemonic.to_string());
+    identity_from_seed_phrase(phrase.expose())
 }
 
 pub fn generate_box_keypair() -> Result<BoxKeyPair, CryptoError> {
@@ -97,27 +102,28 @@ pub fn generate_box_keypair() -> Result<BoxKeyPair, CryptoError> {
     let public_key = secret_key.public_key();
     let pair = BoxKeyPair {
         public_key: encode_key(public_key.as_bytes()),
-        secret_key: SecretString(encode_key(secret_key.as_bytes())),
+        secret_key: SecretString::new(encode_key(secret_key.as_bytes())),
     };
     secret_bytes.zeroize();
     Ok(pair)
 }
 
 pub fn identity_from_seed_phrase(phrase: &str) -> Result<Identity, CryptoError> {
-    let normalized = phrase.trim().to_lowercase();
-    let mnemonic = Mnemonic::parse_in(Language::English, &normalized)
+    let normalized = SecretString::new(phrase.trim().to_lowercase());
+    let mnemonic = Mnemonic::parse_in(Language::English, normalized.expose())
         .map_err(|_| CryptoError::InvalidSeedPhrase)?;
-    let seed = mnemonic.to_seed("");
+    let mut seed = mnemonic.to_seed("");
     let mut secret_bytes = [0u8; 32];
     secret_bytes.copy_from_slice(&seed[..32]);
     let secret_key = SecretKey::from(secret_bytes);
     let public_key = secret_key.public_key();
     let identity = Identity {
         public_key: STANDARD.encode(public_key.as_bytes()),
-        secret_key: SecretString(STANDARD.encode(secret_key.as_bytes())),
-        seed_phrase: SecretString(normalized),
+        secret_key: SecretString::new(STANDARD.encode(secret_key.as_bytes())),
+        seed_phrase: SecretString::new(normalized.expose().to_owned()),
     };
     secret_bytes.zeroize();
+    seed.zeroize();
     Ok(identity)
 }
 
@@ -131,7 +137,9 @@ pub fn decrypt_box_payload(
         return Err(CryptoError::PayloadTooShort);
     }
 
-    let secret = SecretKey::from(decode_key(recipient_secret_b64)?);
+    let mut secret_bytes = decode_key(recipient_secret_b64)?;
+    let secret = SecretKey::from(secret_bytes);
+    secret_bytes.zeroize();
     let sender = PublicKey::from(decode_key(sender_public_b64)?);
     let cipher = SalsaBox::new(&sender, &secret);
     let nonce: &Nonce = (&payload[..24])
@@ -145,16 +153,27 @@ pub fn encrypt_file_secretbox(plaintext: &[u8]) -> Result<(Vec<u8>, String), Cry
     let mut key = [0u8; 32];
     let mut nonce = [0u8; 24];
     getrandom::fill(&mut key).map_err(|_| CryptoError::RandomFailed)?;
-    getrandom::fill(&mut nonce).map_err(|_| CryptoError::RandomFailed)?;
+    if getrandom::fill(&mut nonce).is_err() {
+        key.zeroize();
+        return Err(CryptoError::RandomFailed);
+    }
 
     let secretbox_key =
         SecretboxKey::try_from(&key[..]).map_err(|_| CryptoError::InvalidKeyLength)?;
     let secretbox_nonce =
         SecretboxNonce::try_from(&nonce[..]).map_err(|_| CryptoError::PayloadTooShort)?;
     let cipher = XSalsa20Poly1305::new(&secretbox_key);
-    let ciphertext = cipher
+    let ciphertext = match cipher
         .encrypt(&secretbox_nonce, plaintext)
-        .map_err(|_| CryptoError::EncryptFailed)?;
+        .map_err(|_| CryptoError::EncryptFailed)
+    {
+        Ok(value) => value,
+        Err(error) => {
+            key.zeroize();
+            nonce.zeroize();
+            return Err(error);
+        }
+    };
 
     let mut packed = Vec::with_capacity(nonce.len() + ciphertext.len());
     packed.extend_from_slice(&nonce);
@@ -169,16 +188,17 @@ pub fn decrypt_file_secretbox(payload: &[u8], key_b64: &str) -> Result<Vec<u8>, 
     if payload.len() <= 24 {
         return Err(CryptoError::PayloadTooShort);
     }
-    let key = STANDARD.decode(key_b64)?;
-    let key: [u8; 32] = key.try_into().map_err(|_| CryptoError::InvalidKeyLength)?;
+    let mut key = decode_key(key_b64)?;
     let secretbox_key =
         SecretboxKey::try_from(&key[..]).map_err(|_| CryptoError::InvalidKeyLength)?;
     let secretbox_nonce =
         SecretboxNonce::try_from(&payload[..24]).map_err(|_| CryptoError::PayloadTooShort)?;
     let cipher = XSalsa20Poly1305::new(&secretbox_key);
-    cipher
+    let result = cipher
         .decrypt(&secretbox_nonce, &payload[24..])
-        .map_err(|_| CryptoError::DecryptFailed)
+        .map_err(|_| CryptoError::DecryptFailed);
+    key.zeroize();
+    result
 }
 
 pub fn x3dh_initiate(
@@ -202,7 +222,7 @@ pub fn x3dh_initiate(
     };
 
     let dh2 = nacl_box_before(peer_identity_public_b64, ephemeral.secret_key.expose())?;
-    let shared_secret = derive_x3dh_root_key(&combine_x3dh_components(dh1, dh2, dh3));
+    let shared_secret = derive_x3dh_root_key_from_components(dh1, dh2, dh3);
 
     Ok(X3dhInitiation {
         shared_secret: shared_secret?,
@@ -230,7 +250,7 @@ pub fn x3dh_respond(
     };
 
     let dh2 = nacl_box_before(peer_ephemeral_public_b64, my_identity_secret_b64)?;
-    derive_x3dh_root_key(&combine_x3dh_components(dh1, dh2, dh3))
+    derive_x3dh_root_key_from_components(dh1, dh2, dh3)
 }
 
 pub fn nacl_box_before(
@@ -238,18 +258,28 @@ pub fn nacl_box_before(
     own_secret_b64: &str,
 ) -> Result<[u8; 32], CryptoError> {
     let peer_public = decode_key(peer_public_b64)?;
-    let own_secret = decode_key(own_secret_b64)?;
-    let shared_secret = MontgomeryPoint(peer_public).mul_clamped(own_secret);
+    let mut own_secret = decode_key(own_secret_b64)?;
+    let mut shared_secret = MontgomeryPoint(peer_public).mul_clamped(own_secret);
+    own_secret.zeroize();
     let zero_nonce = Array::<u8, U16>::default();
-    let key = hsalsa::<U10>((&shared_secret.0).into(), &zero_nonce);
+    let mut key = hsalsa::<U10>((&shared_secret.0).into(), &zero_nonce);
     let mut out = [0u8; 32];
     out.copy_from_slice(&key);
+    key.zeroize();
+    shared_secret.0.zeroize();
     Ok(out)
 }
 
 pub fn decode_key(value: &str) -> Result<[u8; 32], CryptoError> {
-    let bytes = STANDARD.decode(value)?;
-    bytes.try_into().map_err(|_| CryptoError::InvalidKeyLength)
+    let mut bytes = STANDARD.decode(value)?;
+    if bytes.len() != 32 {
+        bytes.zeroize();
+        return Err(CryptoError::InvalidKeyLength);
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes);
+    bytes.zeroize();
+    Ok(key)
 }
 
 pub fn encode_key(bytes: &[u8; 32]) -> String {
@@ -264,13 +294,31 @@ fn combine_x3dh_components(dh1: [u8; 32], dh2: [u8; 32], dh3: [u8; 32]) -> [u8; 
     combined
 }
 
+fn derive_x3dh_root_key_from_components(
+    mut dh1: [u8; 32],
+    mut dh2: [u8; 32],
+    mut dh3: [u8; 32],
+) -> Result<[u8; 32], CryptoError> {
+    let mut combined = combine_x3dh_components(dh1, dh2, dh3);
+    dh1.zeroize();
+    dh2.zeroize();
+    dh3.zeroize();
+    let result = derive_x3dh_root_key(&combined);
+    combined.zeroize();
+    result
+}
+
 fn derive_x3dh_root_key(input_key_material: &[u8]) -> Result<[u8; 32], CryptoError> {
     let salt = [0u8; 32];
     let hkdf = Hkdf::<Sha256>::new(Some(&salt), input_key_material);
     let mut out = [0u8; 32];
-    hkdf.expand(b"messk-x3dh-v2-root-key", &mut out)
-        .map_err(|_| CryptoError::KeyDeriveFailed)?;
-    Ok(out)
+    match hkdf.expand(b"messk-x3dh-v2-root-key", &mut out) {
+        Ok(()) => Ok(out),
+        Err(_) => {
+            out.zeroize();
+            Err(CryptoError::KeyDeriveFailed)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -346,5 +394,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(initiated.shared_secret, responded);
+    }
+
+    #[test]
+    fn x3dh_initiation_zeroize_clears_derived_secret() {
+        let mut initiation = X3dhInitiation {
+            shared_secret: [7u8; 32],
+            ephemeral_public_key: "public".to_string(),
+            pre_key_public_key: Some("prekey".to_string()),
+        };
+
+        initiation.zeroize();
+
+        assert_eq!(initiation.shared_secret, [0u8; 32]);
+        assert!(initiation.ephemeral_public_key.is_empty());
+        assert!(
+            initiation
+                .pre_key_public_key
+                .as_deref()
+                .unwrap_or_default()
+                .is_empty()
+        );
     }
 }

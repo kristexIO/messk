@@ -222,7 +222,9 @@ function deriveVaultSubKey(field: string): Uint8Array {
 
   const nonce = deriveFieldNonce(`messk-local-vault:${field}`);
   const stream = secretbox(new Uint8Array(32), nonce, vaultKey);
-  return stream.slice(0, 32);
+  const subKey = stream.slice(0, 32);
+  stream.fill(0);
+  return subKey;
 }
 
 function deriveFieldNonce(label: string): Uint8Array {
@@ -250,11 +252,16 @@ function encryptSecretValue(value: unknown, field = 'default'): string {
   const encryptionKey = deriveVaultSubKey(field);
   const nonce = new Uint8Array(randomBytes(secretbox.nonceLength));
   const plaintext = new Uint8Array(new TextEncoder().encode(serializeSecretValue(value)));
-  const ciphertext = secretbox(plaintext, nonce, encryptionKey);
-  const packed = new Uint8Array(nonce.length + ciphertext.length);
-  packed.set(nonce);
-  packed.set(ciphertext, nonce.length);
-  return `${ENCRYPTED_PREFIX}${encodeBase64(packed)}`;
+  try {
+    const ciphertext = secretbox(plaintext, nonce, encryptionKey);
+    const packed = new Uint8Array(nonce.length + ciphertext.length);
+    packed.set(nonce);
+    packed.set(ciphertext, nonce.length);
+    return `${ENCRYPTED_PREFIX}${encodeBase64(packed)}`;
+  } finally {
+    encryptionKey.fill(0);
+    plaintext.fill(0);
+  }
 }
 
 function decryptSecretValue<T>(value: unknown, field = 'default'): T {
@@ -269,7 +276,13 @@ function decryptSecretValue<T>(value: unknown, field = 'default'): T {
   const packed = decodeBase64(value.slice(ENCRYPTED_PREFIX.length));
   const nonce = packed.slice(0, secretbox.nonceLength);
   const ciphertext = packed.slice(secretbox.nonceLength);
-  let plaintext = secretbox.open(ciphertext, nonce, deriveVaultSubKey(field));
+  const encryptionKey = deriveVaultSubKey(field);
+  let plaintext: Uint8Array | null;
+  try {
+    plaintext = secretbox.open(ciphertext, nonce, encryptionKey);
+  } finally {
+    encryptionKey.fill(0);
+  }
   if (!plaintext) {
     // Existing installs may have records encrypted with the original raw vault key.
     plaintext = secretbox.open(ciphertext, nonce, vaultKey);
@@ -279,7 +292,11 @@ function decryptSecretValue<T>(value: unknown, field = 'default'): T {
     return getFieldFallback(field) as T;
   }
 
-  return deserializeSecretValue<T>(new TextDecoder().decode(plaintext));
+  try {
+    return deserializeSecretValue<T>(new TextDecoder().decode(plaintext));
+  } finally {
+    plaintext.fill(0);
+  }
 }
 
 function getFieldFallback(field: string): unknown {
@@ -356,6 +373,7 @@ function decryptFields<T>(
 }
 
 export function setVaultKey(secretKeyBase64: string | null) {
+  vaultKey?.fill(0);
   vaultKey = secretKeyBase64 ? new Uint8Array(decodeBase64(secretKeyBase64)) : null;
 }
 

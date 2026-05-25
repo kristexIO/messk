@@ -16,6 +16,7 @@ use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 #[derive(Debug)]
 enum UiEvent {
@@ -672,8 +673,9 @@ impl MesskApp {
     fn generate_identity(&mut self) -> bool {
         match crypto::generate_identity() {
             Ok(identity) => {
-                self.seed_input = identity.seed_phrase.expose().to_string();
-                self.seed_confirmation_input.clear();
+                self.seed_input.zeroize();
+                self.seed_input.push_str(identity.seed_phrase.expose());
+                self.seed_confirmation_input.zeroize();
                 self.seed_confirmed = false;
                 if self.profile_nickname.trim().is_empty() {
                     self.profile_nickname = format!("User {}", short_key(&identity.public_key));
@@ -692,8 +694,12 @@ impl MesskApp {
     }
 
     fn seed_confirmation_matches(&self) -> bool {
-        let seed = normalize_seed_phrase(&self.seed_input);
-        !seed.is_empty() && seed == normalize_seed_phrase(&self.seed_confirmation_input)
+        let mut seed = normalize_seed_phrase(&self.seed_input);
+        let mut confirmation = normalize_seed_phrase(&self.seed_confirmation_input);
+        let matches = !seed.is_empty() && seed == confirmation;
+        seed.zeroize();
+        confirmation.zeroize();
+        matches
     }
 
     fn confirm_generated_identity(&mut self) -> bool {
@@ -732,7 +738,8 @@ impl MesskApp {
         self.load_rooms_for_identity(&identity.public_key);
         self.identity = Some(identity);
         self.pending_identity = None;
-        self.seed_confirmation_input.clear();
+        self.seed_input.zeroize();
+        self.seed_confirmation_input.zeroize();
         self.seed_confirmed = false;
         self.profile_status = "profile ready".to_string();
         self.logs.push("new identity confirmed locally".to_string());
@@ -742,10 +749,10 @@ impl MesskApp {
 
     fn cancel_pending_identity(&mut self) {
         self.pending_identity = None;
-        self.seed_confirmation_input.clear();
+        self.seed_confirmation_input.zeroize();
         self.seed_confirmed = false;
         if self.identity.is_none() {
-            self.seed_input.clear();
+            self.seed_input.zeroize();
         }
         self.profile_status.clear();
         self.logs.push("pending identity cancelled".to_string());
@@ -757,7 +764,7 @@ impl MesskApp {
                 self.logs
                     .push("identity imported from seed phrase".to_string());
                 self.pending_identity = None;
-                self.seed_confirmation_input.clear();
+                self.seed_confirmation_input.zeroize();
                 self.seed_confirmed = false;
                 self.persist_identity(&identity);
                 self.load_messages_for_identity(&identity.public_key);
@@ -765,6 +772,7 @@ impl MesskApp {
                 self.load_rooms_for_identity(&identity.public_key);
                 self.load_profile_for_identity(&identity.public_key);
                 self.identity = Some(identity);
+                self.seed_input.zeroize();
                 if self.profile_nickname.trim().is_empty() {
                     self.profile_status = "loading remote profile...".to_string();
                     self.fetch_remote_profile();
@@ -2110,7 +2118,7 @@ impl MesskApp {
                 return;
             }
         };
-        let seed_phrase = match String::from_utf8(seed_bytes) {
+        let mut seed_phrase = match String::from_utf8(seed_bytes) {
             Ok(seed_phrase) => seed_phrase,
             Err(error) => {
                 self.logs
@@ -2118,14 +2126,16 @@ impl MesskApp {
                 return;
             }
         };
-        match crypto::identity_from_seed_phrase(&seed_phrase) {
+        let identity_result = crypto::identity_from_seed_phrase(&seed_phrase);
+        seed_phrase.zeroize();
+        match identity_result {
             Ok(identity) => {
                 self.logs.push(format!(
                     "stored identity unlocked: {}",
                     short_key(&stored.account_public_key)
                 ));
                 self.pending_identity = None;
-                self.seed_confirmation_input.clear();
+                self.seed_confirmation_input.zeroize();
                 self.seed_confirmed = false;
                 self.load_messages_for_identity(&identity.public_key);
                 self.load_contacts_for_identity(&identity.public_key);
@@ -2164,8 +2174,8 @@ impl MesskApp {
         }
         self.identity = None;
         self.pending_identity = None;
-        self.seed_input.clear();
-        self.seed_confirmation_input.clear();
+        self.seed_input.zeroize();
+        self.seed_confirmation_input.zeroize();
         self.seed_confirmed = false;
         self.profile_nickname.clear();
         self.profile_username.clear();
@@ -2213,8 +2223,8 @@ impl MesskApp {
         }
         self.identity = None;
         self.pending_identity = None;
-        self.seed_input.clear();
-        self.seed_confirmation_input.clear();
+        self.seed_input.zeroize();
+        self.seed_confirmation_input.zeroize();
         self.seed_confirmed = false;
         self.profile_nickname.clear();
         self.profile_username.clear();
@@ -2827,6 +2837,7 @@ impl MesskApp {
                                 .desired_rows(2)
                                 .interactive(false),
                         );
+                        generated_seed.zeroize();
                         ui.add_space(8.0);
                         ui.add_sized(
                             [520.0, 64.0],
@@ -3095,6 +3106,7 @@ impl MesskApp {
                             .desired_rows(2)
                             .interactive(false),
                     );
+                    generated_seed.zeroize();
                     ui.add_space(8.0);
                     ui.add_sized(
                         [440.0, 64.0],

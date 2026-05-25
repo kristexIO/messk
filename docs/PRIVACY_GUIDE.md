@@ -9,6 +9,8 @@ metadata, and what users must protect themselves.
 - Attachments and voice payloads are encrypted before upload; the server stores
   ciphertext.
 - Identity seed phrases and ratchet/session secrets remain on the client.
+- Native clients clear stored secret buffers when no longer needed; the web
+  client clears mutable temporary key and plaintext buffers after crypto work.
 - Encrypted backups contain chat data, but deliberately exclude identity and
   ratchet secrets.
 
@@ -37,4 +39,6 @@ metadata, and what users must protect themselves.
 Messk is not independently audited cryptographic infrastructure. It does not
 hide all traffic metadata from the server, hosting provider, or network
 observer. Signed Windows distribution remains a release blocker until a
-protected signing workflow and certificate are configured.
+protected signing workflow and certificate are configured. JavaScript runtimes
+cannot guarantee immediate removal of immutable string copies or garbage-
+collected historical buffers, so web memory clearing is best-effort hardening.
