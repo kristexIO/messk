@@ -13,6 +13,7 @@ evidence in the repository. It is a status record, not an independent audit.
 | Panic reset with confirmed local wipe | Implemented and regression-tested | Settings requires typing `RESET`; `messk/src/lib/panicReset.ts` removes Messk localStorage keys and all Messk IndexedDB databases while preserving unrelated origin data. |
 | Retry-safe offline encrypted delivery | Implemented | Backend dedupe/ack tests in `mess/hub_test.go`; protocol documentation in `docs/PROTOCOL_CONTRACT.md`. |
 | Reliable delivery status visualization | Implemented and regression-tested | `messk/src/lib/deliveryStatus.ts` provides one direct/group status contract for pending, sent, delivered, read, distributed, and failed states. |
+| Chat surface error containment | Implemented and regression-tested | `messk/src/components/chat/ChatSurfaceErrorBoundary.tsx` contains rendering failures inside the conversation surface; `messk/src/lib/uiErrorRecovery.ts` keeps fallback copy and logged reports free of raw message/error text. |
 | Auth-bound sender normalization and protected admin endpoints | Implemented | Backend validation and tests in `mess/main_test.go`; `/admin/health` authorization. |
 | Signed relay capabilities and revocation controls | Implemented for staging | `mess/relay_routes.go`, tests, and operator relay announcer. |
 | Metadata-resistance foundations and gated mesh work | Implemented as staged foundations | `clients/core/src/metadata.rs`, `clients/core/src/mesh.rs`; mesh remains feature-gated. |

@@ -49,6 +49,7 @@ import { MessageBubble } from '../components/chat/MessageBubble';
 import { fallbackParticipantName, normalizeReactionValue } from '../components/chat/messageUtils';
 import { ChatComposer } from '../components/chat/ChatComposer';
 import type { MentionSuggestion } from '../components/chat/MentionSuggestions';
+import { ChatSurfaceErrorBoundary } from '../components/chat/ChatSurfaceErrorBoundary';
 
 const MAX_ATTACHMENT_SIZE_BYTES = 75 * 1024 * 1024;
 
@@ -146,7 +147,16 @@ export const Chat: React.FC = () => {
   const draftSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const deferredMessageSearch = useDeferredValue(messageSearch.trim().toLowerCase());
   const activeThreadId = activeGroupId ?? activeChannelId ?? activePeerKey;
+  const chatSurfaceResetKey = `${activeThreadId ?? 'empty'}:${location.pathname}`;
   const currentMessageRenderLimit = activeThreadId ? (messageRenderLimits[activeThreadId] ?? INITIAL_MESSAGE_RENDER_LIMIT) : INITIAL_MESSAGE_RENDER_LIMIT;
+  const handleBackToThreadList = React.useCallback(() => {
+    setActivePeer(null);
+    setActiveGroup(null);
+    setActiveChannel(null);
+    if (location.pathname !== '/') {
+      navigate('/');
+    }
+  }, [location.pathname, navigate, setActiveChannel, setActiveGroup, setActivePeer]);
 
   useEffect(() => {
     if (myPublicKey) {
@@ -1509,6 +1519,7 @@ export const Chat: React.FC = () => {
     <div className="messk-shell app-shell-height flex overflow-hidden">
       <Sidebar />
       <CallOverlay />
+      <ChatSurfaceErrorBoundary resetKey={chatSurfaceResetKey} onBackToList={handleBackToThreadList}>
       {isRoomSettingsOpen && (activeGroup || activeChannel) ? (
         <div className="fixed inset-0 z-[140] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur">
           <div className="w-full max-w-xl rounded-3xl border border-white/15 bg-slate-900/95 p-5 shadow-2xl">
@@ -2723,6 +2734,7 @@ export const Chat: React.FC = () => {
           onClose={() => setViewedIdentityPubKey(null)} 
         />
       )}
+      </ChatSurfaceErrorBoundary>
     </div>
   );
 };

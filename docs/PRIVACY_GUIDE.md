@@ -23,6 +23,9 @@ metadata, and what users must protect themselves.
   encrypted payload sizes, and basic abuse-control events.
 - Operators can inspect aggregated reliability counters through protected
   `/admin/health`; those counters do not include message text.
+- Chat recovery screens intentionally avoid raw exception messages so local
+  message text, keys, and diagnostics are not printed into the UI after a
+  render failure.
 - Relay and bootstrap operation is not anonymity protection. Mesh work remains
   staged and feature-gated.
 

@@ -22,6 +22,7 @@ describe('public trust center contract', () => {
     expect(implementedTrustControls.map((item) => item.title)).toContain('Local key status without secret exposure');
     expect(implementedTrustControls.map((item) => item.title)).toContain('Versioned encrypted backup manifest');
     expect(implementedTrustControls.map((item) => item.title)).toContain('Reliable delivery status labels');
+    expect(implementedTrustControls.map((item) => item.title)).toContain('Safe chat surface recovery');
     expect(productionTrustBlockers.map((item) => item.title)).toContain('Independent security review');
     expect(productionTrustBlockers.map((item) => item.title)).toContain('Staged production promotion');
   });

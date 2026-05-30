@@ -47,6 +47,12 @@ export const implementedTrustControls: TrustItem[] = [
     evidence: 'Delivery-status tests cover pending, failed, delivered, read and group distributed states.',
   },
   {
+    title: 'Safe chat surface recovery',
+    status: 'implemented',
+    summary: 'Chat rendering failures are contained inside the conversation surface and the fallback does not print raw error messages, keys or message text.',
+    evidence: 'Chat surface error boundary tests verify sanitized recovery copy and non-leaking fallback UI.',
+  },
+  {
     title: 'Reduced temporary secret lifetime',
     status: 'implemented',
     summary: 'Mutable secret buffers used for message, attachment, backup, seed and PIN operations are cleared after use where the runtime permits it.',

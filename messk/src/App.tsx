@@ -12,6 +12,7 @@ import { useI18n } from './lib/i18n';
 import { joinInviteLink, syncChannels, syncGroups } from './lib/community';
 import { toast } from 'react-hot-toast';
 import { ONBOARDING_STORAGE_KEY } from './lib/storage';
+import { getSafeUiRecoveryCopy, logUiRenderError } from './lib/uiErrorRecovery';
 
 const Auth = lazy(async () => {
   const module = await import('./pages/Auth');
@@ -29,51 +30,50 @@ const TrustCenter = lazy(async () => {
 });
 
 type AppErrorBoundaryState = {
-  errorMessage: string | null;
+  hasError: boolean;
 };
 
 class AppErrorBoundary extends Component<{ children: ReactNode }, AppErrorBoundaryState> {
-  state: AppErrorBoundaryState = { errorMessage: null };
+  state: AppErrorBoundaryState = { hasError: false };
 
-  static getDerivedStateFromError(error: unknown): AppErrorBoundaryState {
+  static getDerivedStateFromError(): AppErrorBoundaryState {
     return {
-      errorMessage: error instanceof Error ? error.message : 'The interface crashed while rendering.',
+      hasError: true,
     };
   }
 
   componentDidCatch(error: unknown, info: ErrorInfo) {
-    console.error('Fatal UI render error', error, info);
+    logUiRenderError('app', error, info.componentStack ?? undefined);
   }
 
   render() {
-    if (!this.state.errorMessage) {
+    if (!this.state.hasError) {
       return this.props.children;
     }
+
+    const copy = getSafeUiRecoveryCopy('app');
 
     return (
       <div className="flex min-h-screen items-center justify-center bg-[#0e1621] px-4 text-white">
         <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#17212b] p-5 shadow-none">
-          <div className="text-lg font-semibold">Interface recovered</div>
+          <div className="text-lg font-semibold">{copy.title}</div>
           <p className="mt-2 text-sm leading-6 text-white/70">
-            A local message record could not be rendered. Reloading keeps your account data and reconnects the chat.
+            {copy.body}
           </p>
-          <div className="mt-3 rounded-xl border border-white/10 bg-black/10 px-3 py-2 text-xs text-white/60">
-            {this.state.errorMessage}
-          </div>
           <div className="mt-4 flex gap-2">
             <button
               type="button"
               onClick={() => window.location.reload()}
               className="rounded-xl bg-[#2aabee] px-4 py-2 text-sm font-semibold text-white"
             >
-              Reload
+              {copy.primaryAction}
             </button>
             <button
               type="button"
-              onClick={() => this.setState({ errorMessage: null })}
+              onClick={() => this.setState({ hasError: false })}
               className="rounded-xl border border-white/15 px-4 py-2 text-sm font-semibold text-white/80"
             >
-              Try again
+              {copy.secondaryAction}
             </button>
           </div>
         </div>
