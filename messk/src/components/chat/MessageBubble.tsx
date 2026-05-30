@@ -3,6 +3,7 @@ import { AlertCircle, Check, CheckCheck, Clock3, CornerUpRight, Download, FileIc
 import { toast } from 'react-hot-toast';
 import { decryptFile } from '../../lib/attachments';
 import { type StoredMessage } from '../../lib/db';
+import { getDeliveryStatusPresentation } from '../../lib/deliveryStatus';
 import { parseRichTextMessage, type MessageMention, type ReplyPreview } from '../../lib/message-format';
 import { coerceMessageText } from '../../lib/protocolContract';
 import { VoiceWaveform } from '../VoiceWaveform';
@@ -303,6 +304,10 @@ export const MessageBubble = React.memo(({
     () => new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     [msg.timestamp]
   );
+  const deliveryStatus = React.useMemo(
+    () => getDeliveryStatusPresentation(msg.status, { isGroupMessage }),
+    [isGroupMessage, msg.status]
+  );
 
   const editInputRef = React.useRef<HTMLTextAreaElement | null>(null);
   React.useEffect(() => {
@@ -482,17 +487,9 @@ export const MessageBubble = React.memo(({
             {formattedTimestamp}
           </span>
           {isMine && (
-            <span className="flex items-center gap-1.5 flex-shrink-0">
-              <span className="text-[10px] font-medium uppercase tracking-wide">
-                {msg.status === 'failed'
-                  ? 'error'
-                  : msg.status === 'pending'
-                  ? 'pending'
-                  : msg.status === 'read' && !isGroupMessage
-                    ? 'read'
-                    : msg.status === 'delivered'
-                      ? (isGroupMessage ? 'distributed' : 'delivered')
-                      : 'sent'}
+            <span className="flex items-center gap-1.5 flex-shrink-0" title={retryDetails || deliveryStatus.description}>
+              <span className="text-[10px] font-medium uppercase tracking-wide" aria-label={`Message status: ${deliveryStatus.label}. ${deliveryStatus.description}`}>
+                {deliveryStatus.label}
               </span>
               {msg.status === 'failed' ? (
                 <AlertCircle className="w-3.5 h-3.5 text-red-300" />

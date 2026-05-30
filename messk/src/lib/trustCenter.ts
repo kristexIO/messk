@@ -29,6 +29,24 @@ export const implementedTrustControls: TrustItem[] = [
     evidence: 'Identity setup, backup and remembered-identity paths are covered by client tests.',
   },
   {
+    title: 'Local key status without secret exposure',
+    status: 'implemented',
+    summary: 'Settings shows whether identity, PIN restore, local database scoping and auto-lock are ready without printing raw seed or secret-key material.',
+    evidence: 'Local key status tests assert the posture contract and reject raw secret wording.',
+  },
+  {
+    title: 'Versioned encrypted backup manifest',
+    status: 'implemented',
+    summary: 'Encrypted backups include a manifest with record counts and explicit exclusions for identity seeds, secret keys, ratchet sessions, prekeys and group sender keys.',
+    evidence: 'Backup tests verify the manifest and that encrypted backup JSON does not expose plaintext or secret field names.',
+  },
+  {
+    title: 'Reliable delivery status labels',
+    status: 'implemented',
+    summary: 'Outgoing messages use a shared delivery-status contract so direct and group messages do not imply unsupported read receipts.',
+    evidence: 'Delivery-status tests cover pending, failed, delivered, read and group distributed states.',
+  },
+  {
     title: 'Reduced temporary secret lifetime',
     status: 'implemented',
     summary: 'Mutable secret buffers used for message, attachment, backup, seed and PIN operations are cleared after use where the runtime permits it.',

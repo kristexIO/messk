@@ -128,7 +128,17 @@ describe('backup utilities', () => {
 
     expect(encrypted.version).toBe(2);
     expect(encrypted.encrypted).toBe(true);
+    expect(encrypted.manifest).toEqual({
+      schema: 'messk.encrypted-backup.v2',
+      content: {
+        profile: true,
+        contacts: 1,
+        messages: 1,
+      },
+      excludes: ['identity_seed', 'identity_secret_key', 'ratchet_sessions', 'prekeys', 'group_sender_keys'],
+    });
     expect(JSON.stringify(encrypted)).not.toContain('encrypted backup text');
+    expect(JSON.stringify(encrypted)).not.toMatch(/secretKey|rootKey|sendRatchetPrivKey/i);
 
     const file = {
       size: 1000,

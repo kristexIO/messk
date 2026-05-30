@@ -13,7 +13,8 @@ metadata, and what users must protect themselves.
   client clears mutable temporary seed, ratchet, key and plaintext buffers
   after crypto work where the runtime provides direct buffer access.
 - Encrypted backups contain chat data, but deliberately exclude identity and
-  ratchet secrets.
+  ratchet secrets. The encrypted backup manifest lists included record counts
+  and the excluded secret classes before distribution.
 
 ## Metadata That Still Exists
 

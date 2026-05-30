@@ -11,6 +11,7 @@ import { clearRememberedIdentity, hashPin, rememberIdentityWithPin, verifyPin } 
 import { createEncryptedBackup, downloadEncryptedBackup, parseBackupFile, restoreBackup } from '../lib/backup';
 import { prepareAvatarDataUrl } from '../lib/images';
 import { useI18n } from '../lib/i18n';
+import { buildLocalKeyStatus } from '../lib/localKeyStatus';
 import { panicResetLocalState } from '../lib/panicReset';
 import { SETTINGS_STORAGE_KEY } from '../lib/storage';
 
@@ -86,6 +87,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
   const contactByPubKey = React.useMemo(
     () => new Map((contacts ?? []).map((contact) => [contact.pubKey, contact] as const)),
     [contacts]
+  );
+  const localKeyStatusItems = React.useMemo(
+    () => buildLocalKeyStatus({
+      hasUnlockedIdentity: Boolean(mySecretKey),
+      hasPin: Boolean(pinHash),
+      isIdentityRemembered,
+      autoLockMinutes,
+      databaseName: getDatabaseNameForIdentity(myPublicKey),
+    }),
+    [autoLockMinutes, isIdentityRemembered, myPublicKey, mySecretKey, pinHash]
   );
   const unreadChatCount = React.useMemo(
     () =>
@@ -686,6 +697,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                 </span>
               </div>
               <div className="text-xs text-text-muted min-h-4">{securityMessage}</div>
+            </div>
+            <div className="settings-card rounded-2xl p-4 space-y-4">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <Shield className="w-4 h-4 text-accent" />
+                Local key status
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {localKeyStatusItems.map((item) => (
+                  <div key={item.id} className="rounded-xl border border-white/10 bg-black/15 px-3 py-3">
+                    <div className="text-[11px] uppercase tracking-[0.18em] text-text-muted">{item.label}</div>
+                    <div className={`mt-1 text-sm font-semibold ${
+                      item.tone === 'ok' ? 'text-emerald-300' : item.tone === 'warn' ? 'text-amber-200' : 'text-white'
+                    }`}>
+                      {item.value}
+                    </div>
+                    <p className="mt-2 text-xs leading-5 text-text-muted">{item.detail}</p>
+                  </div>
+                ))}
+              </div>
             </div>
             <div className="settings-card rounded-2xl p-4 space-y-4">
               <div className="flex items-center justify-between gap-3">

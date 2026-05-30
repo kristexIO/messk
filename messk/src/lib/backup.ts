@@ -19,6 +19,7 @@ export interface EncryptedBackupPayload {
   version: 2;
   encrypted: true;
   exportedAt: string;
+  manifest: EncryptedBackupManifest;
   kdf: {
     name: 'PBKDF2-SHA256';
     iterations: number;
@@ -31,9 +32,26 @@ export interface EncryptedBackupPayload {
   };
 }
 
+export interface EncryptedBackupManifest {
+  schema: 'messk.encrypted-backup.v2';
+  content: {
+    profile: true;
+    contacts: number;
+    messages: number;
+  };
+  excludes: Array<'identity_seed' | 'identity_secret_key' | 'ratchet_sessions' | 'prekeys' | 'group_sender_keys'>;
+}
+
 const MAX_BACKUP_BYTES = 10 * 1024 * 1024;
 const MAX_BACKUP_ITEMS = 100_000;
 const BACKUP_KDF_ITERATIONS = 310_000;
+const ENCRYPTED_BACKUP_EXCLUDES: EncryptedBackupManifest['excludes'] = [
+  'identity_seed',
+  'identity_secret_key',
+  'ratchet_sessions',
+  'prekeys',
+  'group_sender_keys',
+];
 
 export async function createBackup(profile: {
   nickname: string | null;
@@ -87,6 +105,7 @@ export async function createEncryptedBackup(
       version: 2,
       encrypted: true,
       exportedAt: backup.exportedAt,
+      manifest: createEncryptedBackupManifest(backup),
       kdf: {
         name: 'PBKDF2-SHA256',
         iterations: BACKUP_KDF_ITERATIONS,
@@ -102,6 +121,18 @@ export async function createEncryptedBackup(
     key.fill(0);
     plaintext?.fill(0);
   }
+}
+
+export function createEncryptedBackupManifest(payload: BackupPayload): EncryptedBackupManifest {
+  return {
+    schema: 'messk.encrypted-backup.v2',
+    content: {
+      profile: true,
+      contacts: payload.contacts.length,
+      messages: payload.messages.length,
+    },
+    excludes: [...ENCRYPTED_BACKUP_EXCLUDES],
+  };
 }
 
 export function downloadEncryptedBackup(payload: EncryptedBackupPayload) {

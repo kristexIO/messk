@@ -8,9 +8,11 @@ evidence in the repository. It is a status record, not an independent audit.
 | Obligation | State | Evidence |
 | --- | --- | --- |
 | Seed phrase confirmation before new identity use | Implemented | Web verification flow in `messk/src/pages/Auth.tsx`; native confirmation in `clients/windows/src/app.rs`. |
+| Local key status without secret exposure | Implemented and regression-tested | Settings renders `messk/src/lib/localKeyStatus.ts` posture items for unlocked identity, PIN, restore, database scope, and auto-lock without exposing raw seed or secret-key values. |
 | Verified-contact key change warning | Implemented and regression-tested | Web fingerprint warning in `messk/src/pages/Chat.tsx`; public profile refresh preserves verification state in `messk/src/lib/socketApi.test.ts`. |
 | Panic reset with confirmed local wipe | Implemented and regression-tested | Settings requires typing `RESET`; `messk/src/lib/panicReset.ts` removes Messk localStorage keys and all Messk IndexedDB databases while preserving unrelated origin data. |
 | Retry-safe offline encrypted delivery | Implemented | Backend dedupe/ack tests in `mess/hub_test.go`; protocol documentation in `docs/PROTOCOL_CONTRACT.md`. |
+| Reliable delivery status visualization | Implemented and regression-tested | `messk/src/lib/deliveryStatus.ts` provides one direct/group status contract for pending, sent, delivered, read, distributed, and failed states. |
 | Auth-bound sender normalization and protected admin endpoints | Implemented | Backend validation and tests in `mess/main_test.go`; `/admin/health` authorization. |
 | Signed relay capabilities and revocation controls | Implemented for staging | `mess/relay_routes.go`, tests, and operator relay announcer. |
 | Metadata-resistance foundations and gated mesh work | Implemented as staged foundations | `clients/core/src/metadata.rs`, `clients/core/src/mesh.rs`; mesh remains feature-gated. |
@@ -30,6 +32,7 @@ evidence in the repository. It is a status record, not an independent audit.
 | Protocol compatibility visibility | `/protocol` advertises the supported client state; web and Windows clients reject incompatible websocket connection attempts with an actionable upgrade message. |
 | Transport and download-token downgrade protection | Web and Windows accept remote backend/bootstrap origins only over HTTPS; loopback HTTP remains available for local development. Attachment requests are restricted to trusted `/download/` routes before session headers are attached, and tests reject changed ciphertext. |
 | Secret lifetime reduction | Windows X3DH and ratchet state use zeroization-on-drop, wipe decrypted persistence buffers, and clear seed UI copies; web seed derivation, direct/X3DH, ratchet, group sender-key, PIN vault, local vault, attachment, and encrypted-backup paths wipe mutable temporary key/plaintext buffers after use. Browser string/runtime copies remain a platform limitation. |
+| Versioned encrypted backup manifest | `messk/src/lib/backup.ts` emits `messk.encrypted-backup.v2` metadata with counts and explicit exclusions for identity seed, secret key, ratchet sessions, prekeys, and group sender keys. |
 | Artifact tamper detection and source binding | `scripts/release-build.ps1` emits a SHA-256 release manifest and rejects dirty release sources by default; `scripts/verify-release-manifest.ps1` verifies packaged payloads. VPS deploy rejects dirty worktrees. |
 | Release governance and privacy disclosure | `.github/CODEOWNERS`, `.github/release.yml`, `docs/PRIVACY_GUIDE.md`, `docs/SECURITY_REVIEW_PLAN.md`, and ADR 0001 establish an ownership map, generated release-note categories, user disclosure, and independent-review scope. Requiring owner approval still depends on GitHub branch protection settings. |
 | Stable/beta and EOL contract | `scripts/release-build.ps1 -Channel <stable|beta>` records the channel in manifests; `docs/SUPPORTED_VERSIONS.md` publishes compatibility and retirement rules. |
