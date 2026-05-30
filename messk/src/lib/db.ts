@@ -399,6 +399,13 @@ export function switchActiveDatabase(publicKey: string | null) {
   return db;
 }
 
+export function resetActiveDatabase(publicKey: string | null = null) {
+  db.close();
+  db = new MessengerDatabase(getDatabaseNameForIdentity(publicKey));
+  vaultResetScheduled = false;
+  return db;
+}
+
 export async function prepareDatabaseForIdentity(publicKey: string, databaseName?: string) {
   if (databaseName) {
     vaultResetScheduled = false;

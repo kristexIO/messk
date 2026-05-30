@@ -11,6 +11,7 @@ import { clearRememberedIdentity, hashPin, rememberIdentityWithPin, verifyPin } 
 import { createEncryptedBackup, downloadEncryptedBackup, parseBackupFile, restoreBackup } from '../lib/backup';
 import { prepareAvatarDataUrl } from '../lib/images';
 import { useI18n } from '../lib/i18n';
+import { panicResetLocalState } from '../lib/panicReset';
 import { SETTINGS_STORAGE_KEY } from '../lib/storage';
 
 interface SettingsModalProps {
@@ -68,6 +69,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
   const [currentSessionToken, setCurrentSessionToken] = useState('');
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [sessionActionToken, setSessionActionToken] = useState<string | null>(null);
+  const [isPanicResetting, setIsPanicResetting] = useState(false);
   const { t } = useI18n();
   const callHistory = useLiveQuery(() => db.callHistory.orderBy('createdAt').reverse().limit(12).toArray(), []);
   const contacts = useLiveQuery(() => db.contacts.toArray(), []);
@@ -164,6 +166,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     db.close();
     void Promise.all(databaseNames.map((databaseName) => Dexie.delete(databaseName).catch(() => undefined)))
       .finally(() => window.location.reload());
+  };
+
+  const handlePanicReset = async () => {
+    const confirmation = window.prompt('Type RESET to delete local Messk keys, PIN restore data, settings, and all local chat databases on this browser.');
+    if (confirmation !== 'RESET') {
+      setSecurityMessage('Panic reset cancelled. Nothing was deleted.');
+      return;
+    }
+
+    setIsPanicResetting(true);
+    setSecurityMessage('Panic reset is deleting local Messk data on this browser...');
+    try {
+      socketManager.disconnect();
+      await panicResetLocalState(myPublicKey);
+      logout();
+      window.location.assign('/');
+    } catch (error) {
+      setSecurityMessage(error instanceof Error ? error.message : 'Panic reset failed.');
+      setIsPanicResetting(false);
+    }
   };
 
   const handleForgetDevice = () => {
@@ -813,14 +835,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
               </div>
             </button>
             <button
-              onClick={handleLogout}
+              onClick={() => void handlePanicReset()}
+              disabled={isPanicResetting}
               className="w-full p-4 rounded-xl border border-red-500/40 bg-red-500/10 hover:bg-red-500/15 text-red-200 flex items-center justify-between transition-all"
             >
               <div className="flex items-center gap-3">
                 <LogOut className="w-5 h-5" />
-                <span className="font-medium">Panic Logout</span>
+                <span className="font-medium">{isPanicResetting ? 'Panic reset in progress...' : 'Panic Reset Local Data'}</span>
               </div>
             </button>
+            <p className="px-1 text-xs leading-5 text-text-muted">
+              Panic reset requires typing RESET and deletes this browser's Messk PIN restore data, settings, identity records, local messages, sessions, prekeys, and sender keys. It does not delete remote messages already delivered to other devices.
+            </p>
           </section>
 
           <section className="space-y-4">

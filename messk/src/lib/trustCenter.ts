@@ -35,6 +35,12 @@ export const implementedTrustControls: TrustItem[] = [
     evidence: 'Web and native zeroization regression tests run in the release gate.',
   },
   {
+    title: 'Confirmed local panic reset',
+    status: 'implemented',
+    summary: 'The web client can delete Messk PIN restore data, settings, identity records and local encrypted databases from this browser profile after an explicit RESET confirmation.',
+    evidence: 'Panic reset regression tests verify Messk localStorage keys and IndexedDB databases are removed without touching unrelated origin data.',
+  },
+  {
     title: 'Release and compatibility gates',
     status: 'implemented',
     summary: 'Stable artifacts identify their source commit and incompatible protocol or disabled-feature calls fail closed.',

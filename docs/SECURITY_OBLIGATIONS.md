@@ -9,6 +9,7 @@ evidence in the repository. It is a status record, not an independent audit.
 | --- | --- | --- |
 | Seed phrase confirmation before new identity use | Implemented | Web verification flow in `messk/src/pages/Auth.tsx`; native confirmation in `clients/windows/src/app.rs`. |
 | Verified-contact key change warning | Implemented and regression-tested | Web fingerprint warning in `messk/src/pages/Chat.tsx`; public profile refresh preserves verification state in `messk/src/lib/socketApi.test.ts`. |
+| Panic reset with confirmed local wipe | Implemented and regression-tested | Settings requires typing `RESET`; `messk/src/lib/panicReset.ts` removes Messk localStorage keys and all Messk IndexedDB databases while preserving unrelated origin data. |
 | Retry-safe offline encrypted delivery | Implemented | Backend dedupe/ack tests in `mess/hub_test.go`; protocol documentation in `docs/PROTOCOL_CONTRACT.md`. |
 | Auth-bound sender normalization and protected admin endpoints | Implemented | Backend validation and tests in `mess/main_test.go`; `/admin/health` authorization. |
 | Signed relay capabilities and revocation controls | Implemented for staging | `mess/relay_routes.go`, tests, and operator relay announcer. |

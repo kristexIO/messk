@@ -18,6 +18,7 @@ describe('public trust center contract', () => {
     expect(implementedTrustControls.every((item) => item.status === 'implemented')).toBe(true);
     expect(experimentalTrustControls.every((item) => item.status === 'experimental')).toBe(true);
     expect(productionTrustBlockers.every((item) => item.status === 'release-blocker')).toBe(true);
+    expect(implementedTrustControls.map((item) => item.title)).toContain('Confirmed local panic reset');
     expect(productionTrustBlockers.map((item) => item.title)).toContain('Independent security review');
     expect(productionTrustBlockers.map((item) => item.title)).toContain('Staged production promotion');
   });

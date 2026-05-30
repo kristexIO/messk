@@ -34,6 +34,9 @@ metadata, and what users must protect themselves.
 4. Never paste seeds, private keys, recovery backups, access tokens, or message
    plaintext into public issue reports.
 5. Install only artifacts whose source and integrity manifest you can verify.
+6. Use Settings -> Panic Reset Local Data when a browser profile or shared
+   machine may be compromised; it wipes local Messk storage on that browser,
+   but cannot delete messages already delivered to other devices.
 
 ## Limits
 
