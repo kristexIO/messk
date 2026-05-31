@@ -26,6 +26,9 @@ metadata, and what users must protect themselves.
 - Chat recovery screens intentionally avoid raw exception messages so local
   message text, keys, and diagnostics are not printed into the UI after a
   render failure.
+- Offline and reconnect banners show aggregate queue counts and generic sync
+  state only; raw server errors, public keys, and message text are hidden from
+  the chat surface.
 - Relay and bootstrap operation is not anonymity protection. Mesh work remains
   staged and feature-gated.
 

@@ -4,7 +4,7 @@ import { socketManager } from '../lib/socket';
 import { clearThreadStats, db, syncThreadStats, type StoredMessage } from '../lib/db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import Dexie from 'dexie';
-import { ArrowLeft, ShieldCheck, Trash2, Phone, Video, MonitorUp, Pencil, Search, X, Archive, Bell, BellOff, ArrowDownCircle, Users, Crown, WifiOff, Clock3, UserPlus, UserMinus, Shield, Megaphone, Pin, AtSign, Link2 } from 'lucide-react';
+import { ArrowLeft, ShieldCheck, Trash2, Phone, Video, MonitorUp, Pencil, Search, X, Archive, Bell, BellOff, ArrowDownCircle, Users, Crown, UserPlus, UserMinus, Shield, Megaphone, Pin, AtSign, Link2 } from 'lucide-react';
 import { UserIdentityModal } from '../components/UserIdentityModal';
 import { Sidebar } from '../components/Sidebar';
 import { encryptFile, decryptFile } from '../lib/attachments';
@@ -16,6 +16,7 @@ import { encodeRichTextMessage, getMessageNotificationPreview, isMentioningPubKe
 import { coerceMessageText } from '../lib/protocolContract';
 import { deriveMentionHandle, getPublicKeyFingerprint } from '../lib/identity';
 import { useI18n } from '../lib/i18n';
+import { buildConnectionHealthItems } from '../lib/connectionHealth';
 import {
   addChannelSubscriber,
   addGroupMember,
@@ -50,6 +51,7 @@ import { fallbackParticipantName, normalizeReactionValue } from '../components/c
 import { ChatComposer } from '../components/chat/ChatComposer';
 import type { MentionSuggestion } from '../components/chat/MentionSuggestions';
 import { ChatSurfaceErrorBoundary } from '../components/chat/ChatSurfaceErrorBoundary';
+import { ConnectionHealthBanner } from '../components/chat/ConnectionHealthBanner';
 
 const MAX_ATTACHMENT_SIZE_BYTES = 75 * 1024 * 1024;
 
@@ -232,10 +234,11 @@ export const Chat: React.FC = () => {
     if (!activeGroupId || !activeGroup?.pinnedMsgId) return undefined;
     return db.messages.where('msgId').equals(activeGroup.pinnedMsgId).first();
   }, [activeGroupId, activeGroup?.pinnedMsgId]);
-  const queuedGroupEvents = useLiveQuery(() => {
-    if (!activeGroupId) return [];
-    return db.outgoingGroupEvents.where('groupId').equals(activeGroupId).sortBy('createdAt');
-  }, [activeGroupId]);
+  const queuedRoomEvents = useLiveQuery(() => {
+    const roomId = activeGroupId ?? activeChannelId;
+    if (!roomId) return [];
+    return db.outgoingGroupEvents.where('groupId').equals(roomId).sortBy('createdAt');
+  }, [activeGroupId, activeChannelId]);
   const queuedDirectMessages = useLiveQuery(() => {
     if (!activePeerKey) return [];
     return db.outgoingDirectMessages.where('recipientPubKey').equals(activePeerKey).sortBy('createdAt');
@@ -1490,20 +1493,31 @@ export const Chat: React.FC = () => {
     }
   };
 
-  const connectionLabel = connectionStatus === 'connected'
-    ? 'Secure channel live'
-    : connectionStatus === 'connecting'
-      ? 'Connecting secure channel...'
-      : connectionStatus === 'reconnecting'
-        ? 'Reconnecting... messages may be delayed'
-        : 'Offline';
-
-  const connectionTone = connectionStatus === 'connected'
-    ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200'
-    : connectionStatus === 'offline'
-      ? 'border-red-400/20 bg-red-400/10 text-red-200'
-      : 'border-amber-400/20 bg-amber-400/10 text-amber-100';
   const activeCollectionSync = activeGroupId ? groupSyncStatus : activeChannelId ? channelSyncStatus : null;
+  const queuedDirectCount = queuedDirectMessages?.length ?? 0;
+  const queuedDirectAttempts = React.useMemo(
+    () => (queuedDirectMessages ?? []).reduce((total, item) => total + item.attempts, 0),
+    [queuedDirectMessages]
+  );
+  const queuedRoomEventCount = queuedRoomEvents?.length ?? 0;
+  const directConnectionHealthItems = React.useMemo(
+    () => buildConnectionHealthItems({
+      connectionStatus,
+      threadKind: 'direct',
+      queuedDirectCount,
+      queuedDirectAttempts,
+    }),
+    [connectionStatus, queuedDirectAttempts, queuedDirectCount]
+  );
+  const roomConnectionHealthItems = React.useMemo(
+    () => buildConnectionHealthItems({
+      connectionStatus,
+      threadKind: activeGroupId ? 'group' : 'channel',
+      queuedRoomEventCount,
+      collectionSyncStatus: activeCollectionSync,
+    }),
+    [activeCollectionSync, activeGroupId, connectionStatus, queuedRoomEventCount]
+  );
   const isIdentityVerified = Boolean(
     activeContact?.verifiedIdentityFingerprint &&
     activePeerFingerprint &&
@@ -1919,29 +1933,16 @@ export const Chat: React.FC = () => {
               </div>
             </header>
 
-            {connectionStatus !== 'connected' ? (
-              <div className={`mx-4 mt-3 rounded-2xl border px-4 py-3 text-sm sm:mx-6 sm:mt-4 ${connectionTone}`}>
-                {connectionLabel}
-              </div>
-            ) : null}
+            <ConnectionHealthBanner
+              items={directConnectionHealthItems}
+              className="mx-4 mt-3 sm:mx-6 sm:mt-4"
+            />
 
             {hasIdentityKeyMismatch ? (
               <div className="mx-4 mt-3 rounded-2xl border border-red-400/25 bg-red-400/10 px-4 py-3 text-sm text-red-100 sm:mx-6 sm:mt-4">
                 <div className="font-medium">Contact key changed</div>
                 <div className="mt-1 text-xs text-red-100/75">
                   Safety number no longer matches your verified fingerprint. Re-check the contact before trusting new messages.
-                </div>
-              </div>
-            ) : null}
-
-            {(queuedDirectMessages?.length ?? 0) > 0 ? (
-              <div className="mx-4 mt-3 rounded-2xl border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm text-amber-100 sm:mx-6 sm:mt-4">
-                <div className="flex items-center gap-2 font-medium">
-                  {connectionStatus === 'connected' ? <Clock3 className="h-4 w-4" /> : <WifiOff className="h-4 w-4" />}
-                  {queuedDirectMessages?.length} message{queuedDirectMessages?.length === 1 ? '' : 's'} waiting for delivery
-                </div>
-                <div className="mt-1 text-xs text-amber-100/75">
-                  Stored locally and on retry queue. Attempts: {queuedDirectMessages?.reduce((total, item) => total + item.attempts, 0) ?? 0}.
                 </div>
               </div>
             ) : null}
@@ -2125,19 +2126,10 @@ export const Chat: React.FC = () => {
 
             <div className="grid flex-1 overflow-hidden lg:grid-cols-[minmax(0,1fr)_320px]">
               <div className="flex min-h-0 flex-col">
-                {activeGroupId && (queuedGroupEvents?.length ?? 0) > 0 ? (
-                  <div className="mx-4 mt-3 rounded-2xl border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm text-amber-100 sm:mx-6 sm:mt-4">
-                    <div className="flex items-center gap-2 font-medium">
-                      {connectionStatus === 'connected' ? <Clock3 className="h-4 w-4" /> : <WifiOff className="h-4 w-4" />}
-                      {queuedGroupEvents?.length} queued group event{queuedGroupEvents?.length === 1 ? '' : 's'}
-                    </div>
-                    <div className="mt-1 text-xs text-amber-100/75">
-                      {connectionStatus === 'connected'
-                        ? 'Messages are waiting for secure resend and should flush shortly.'
-                        : 'Connection is unstable. Group changes will send automatically after reconnect.'}
-                    </div>
-                  </div>
-                ) : null}
+                <ConnectionHealthBanner
+                  items={roomConnectionHealthItems}
+                  className="mx-4 mt-3 sm:mx-6 sm:mt-4"
+                />
                 {pinnedGroupMessage && !pinnedGroupMessage.deletedAt ? (
                   <div className="mx-4 mt-3 rounded-2xl border border-accent/25 bg-accent/10 px-4 py-3 text-sm text-white sm:mx-6 sm:mt-4">
                     <div className="flex items-center gap-2 font-medium">
@@ -2145,26 +2137,6 @@ export const Chat: React.FC = () => {
                       Pinned group message
                     </div>
                     <div className="mt-1 truncate text-xs text-white/75">{getThreadMessagePreview(pinnedGroupMessage)}</div>
-                  </div>
-                ) : null}
-                {activeCollectionSync && activeCollectionSync.state !== 'synced' ? (
-                  <div className={`mx-4 mt-3 rounded-2xl border px-4 py-3 text-sm sm:mx-6 sm:mt-4 ${
-                    activeCollectionSync.state === 'error'
-                      ? 'border-red-400/20 bg-red-400/10 text-red-100'
-                      : 'border-amber-300/20 bg-amber-300/10 text-amber-100'
-                  }`}>
-                    <div className="font-medium">
-                      {activeCollectionSync.state === 'syncing'
-                        ? activeGroupId
-                          ? 'Syncing group members and room state...'
-                          : 'Syncing channel subscribers and publishing state...'
-                        : activeCollectionSync.error || 'Sync status requires attention'}
-                    </div>
-                    <div className="mt-1 text-xs opacity-80">
-                      {activeCollectionSync.state === 'syncing'
-                        ? 'You can keep reading the current thread while metadata catches up.'
-                        : 'Try refresh after reconnect. If this repeats before release, it should be treated as a blocker.'}
-                    </div>
                   </div>
                 ) : null}
                 <div
@@ -2411,6 +2383,10 @@ export const Chat: React.FC = () => {
 
             <div className="grid flex-1 overflow-hidden lg:grid-cols-[minmax(0,1fr)_340px]">
               <div className="flex min-h-0 flex-col">
+                <ConnectionHealthBanner
+                  items={roomConnectionHealthItems}
+                  className="mx-4 mt-3 sm:mx-6 sm:mt-4"
+                />
                 {pinnedChannelMessage && !pinnedChannelMessage.deletedAt ? (
                   <div className="mx-6 mt-4 rounded-2xl border border-accent/20 bg-accent/10 px-4 py-3 text-sm text-white">
                     <div className="flex items-center gap-2 font-medium">

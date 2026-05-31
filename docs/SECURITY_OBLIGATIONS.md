@@ -14,6 +14,7 @@ evidence in the repository. It is a status record, not an independent audit.
 | Retry-safe offline encrypted delivery | Implemented | Backend dedupe/ack tests in `mess/hub_test.go`; protocol documentation in `docs/PROTOCOL_CONTRACT.md`. |
 | Reliable delivery status visualization | Implemented and regression-tested | `messk/src/lib/deliveryStatus.ts` provides one direct/group status contract for pending, sent, delivered, read, distributed, and failed states. |
 | Chat surface error containment | Implemented and regression-tested | `messk/src/components/chat/ChatSurfaceErrorBoundary.tsx` contains rendering failures inside the conversation surface; `messk/src/lib/uiErrorRecovery.ts` keeps fallback copy and logged reports free of raw message/error text. |
+| Offline and reconnect indicators | Implemented and regression-tested | `messk/src/lib/connectionHealth.ts` and `messk/src/components/chat/ConnectionHealthBanner.tsx` provide screen-reader status regions for connection, retry queue, and room metadata sync state using aggregate counts only. |
 | Auth-bound sender normalization and protected admin endpoints | Implemented | Backend validation and tests in `mess/main_test.go`; `/admin/health` authorization. |
 | Signed relay capabilities and revocation controls | Implemented for staging | `mess/relay_routes.go`, tests, and operator relay announcer. |
 | Metadata-resistance foundations and gated mesh work | Implemented as staged foundations | `clients/core/src/metadata.rs`, `clients/core/src/mesh.rs`; mesh remains feature-gated. |

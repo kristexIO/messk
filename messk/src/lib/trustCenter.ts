@@ -53,6 +53,12 @@ export const implementedTrustControls: TrustItem[] = [
     evidence: 'Chat surface error boundary tests verify sanitized recovery copy and non-leaking fallback UI.',
   },
   {
+    title: 'Accessible offline and reconnect indicators',
+    status: 'implemented',
+    summary: 'Direct, group and channel surfaces show connection, retry queue and metadata-sync state with screen-reader status regions and aggregate counts only.',
+    evidence: 'Connection-health tests cover offline, reconnect, queued delivery and sanitized sync-error states.',
+  },
+  {
     title: 'Reduced temporary secret lifetime',
     status: 'implemented',
     summary: 'Mutable secret buffers used for message, attachment, backup, seed and PIN operations are cleared after use where the runtime permits it.',
