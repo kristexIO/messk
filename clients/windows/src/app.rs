@@ -160,6 +160,8 @@ pub struct MesskApp {
     chat_search: String,
     show_message_search: bool,
     message_search: String,
+    typing_until_ms: HashMap<String, i64>,
+    last_typing_sent_at_ms: i64,
     selected_chat: usize,
     recipient_public_key: String,
     composer_text: String,
@@ -243,6 +245,8 @@ impl MesskApp {
             chat_search: String::new(),
             show_message_search: false,
             message_search: String::new(),
+            typing_until_ms: HashMap::new(),
+            last_typing_sent_at_ms: 0,
             selected_chat: 0,
             recipient_public_key: String::new(),
             composer_text: String::new(),
@@ -544,6 +548,7 @@ impl MesskApp {
                 }
             }
         }
+        self.expire_typing_indicators(app_now_ms());
         self.refresh_voice_playback_status();
     }
 
@@ -1471,6 +1476,7 @@ impl MesskApp {
                 if !recovered && self.settings.desktop_notifications {
                     self.notify_incoming_message(&peer_public_key, &plaintext);
                 }
+                self.typing_until_ms.remove(&peer_public_key);
                 self.upsert_chat_line(ChatLine {
                     peer_public_key,
                     msg_id,
@@ -1527,6 +1533,11 @@ impl MesskApp {
                 } else {
                     self.pinned_message_ids.remove(&msg_id);
                 }
+                self.ensure_peer_contact(&peer_public_key);
+            }
+            net::RealtimeEvent::DirectTyping { peer_public_key } => {
+                self.typing_until_ms
+                    .insert(peer_public_key.clone(), typing_expires_at(app_now_ms()));
                 self.ensure_peer_contact(&peer_public_key);
             }
             net::RealtimeEvent::DirectDecryptFailed {
@@ -2353,6 +2364,42 @@ impl MesskApp {
                 message.reactions.remove(actor_public_key);
             }
         }
+    }
+
+    fn expire_typing_indicators(&mut self, now_ms: i64) {
+        self.typing_until_ms
+            .retain(|_, until_ms| is_typing_visible(*until_ms, now_ms));
+    }
+
+    fn peer_is_typing(&self, peer_public_key: &str) -> bool {
+        self.typing_until_ms
+            .get(peer_public_key.trim())
+            .is_some_and(|until_ms| is_typing_visible(*until_ms, app_now_ms()))
+    }
+
+    fn maybe_send_direct_typing(&mut self) {
+        if self.realtime_status != "listening" {
+            return;
+        }
+        let recipient = self.recipient_public_key.trim().to_string();
+        let now = app_now_ms();
+        if !should_send_typing(
+            self.last_typing_sent_at_ms,
+            now,
+            &self.composer_text,
+            &recipient,
+        ) {
+            return;
+        }
+        let Some(identity) = self.identity.clone() else {
+            return;
+        };
+
+        self.last_typing_sent_at_ms = now;
+        let origins = self.transport_origins();
+        self.runtime.spawn(async move {
+            let _ = net::send_direct_typing_once_with_fallback(origins, identity, recipient).await;
+        });
     }
 
     fn ensure_peer_contact(&mut self, peer_public_key: &str) {
@@ -4592,6 +4639,9 @@ impl MesskApp {
                                     egui::TextEdit::singleline(&mut self.composer_text)
                                         .hint_text("Message..."),
                                 );
+                                if composer_response.changed() {
+                                    self.maybe_send_direct_typing();
+                                }
                                 ui.add_space(8.0);
                                 let enter_send = composer_response.has_focus()
                                     && ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -4834,20 +4884,37 @@ impl MesskApp {
         let mut summaries: Vec<ChatSummary> = Vec::new();
         for message in &self.messages {
             let peer = message.peer_public_key.clone();
+            let peer_is_typing = self.peer_is_typing(&peer);
             if let Some(existing) = summaries
                 .iter_mut()
                 .find(|summary| summary.peer_public_key == peer)
             {
                 existing.title = self.contact_title(&peer);
-                existing.subtitle = display_message_text(&message.text);
-                existing.status = message.status.clone();
+                existing.subtitle = if peer_is_typing {
+                    "typing...".to_string()
+                } else {
+                    display_message_text(&message.text)
+                };
+                existing.status = if peer_is_typing {
+                    "typing".to_string()
+                } else {
+                    message.status.clone()
+                };
                 existing.last_activity_ms = message.created_at_ms;
             } else {
                 summaries.push(ChatSummary {
                     peer_public_key: peer.clone(),
                     title: self.contact_title(&peer),
-                    subtitle: display_message_text(&message.text),
-                    status: message.status.clone(),
+                    subtitle: if peer_is_typing {
+                        "typing...".to_string()
+                    } else {
+                        display_message_text(&message.text)
+                    },
+                    status: if peer_is_typing {
+                        "typing".to_string()
+                    } else {
+                        message.status.clone()
+                    },
                     last_activity_ms: message.created_at_ms,
                 });
             }
@@ -4859,6 +4926,7 @@ impl MesskApp {
             {
                 continue;
             }
+            let peer_is_typing = self.peer_is_typing(peer);
             summaries.push(ChatSummary {
                 peer_public_key: peer.clone(),
                 title: if alias.display_name.trim().is_empty() {
@@ -4866,8 +4934,16 @@ impl MesskApp {
                 } else {
                     alias.display_name.clone()
                 },
-                subtitle: "No messages yet".to_string(),
-                status: "ready".to_string(),
+                subtitle: if peer_is_typing {
+                    "typing...".to_string()
+                } else {
+                    "No messages yet".to_string()
+                },
+                status: if peer_is_typing {
+                    "typing".to_string()
+                } else {
+                    "ready".to_string()
+                },
                 last_activity_ms: alias.updated_at_ms,
             });
         }
@@ -4967,12 +5043,15 @@ impl MesskApp {
     }
 
     fn active_chat_subtitle(&self) -> String {
-        if self.recipient_public_key.trim().is_empty() {
+        let peer = self.recipient_public_key.trim();
+        if peer.is_empty() {
             "Start a new encrypted chat".to_string()
+        } else if self.peer_is_typing(peer) {
+            "typing...".to_string()
         } else {
-            let count = self.chat_message_count(&self.recipient_public_key);
+            let count = self.chat_message_count(peer);
             let status = self
-                .last_message_for_peer(&self.recipient_public_key)
+                .last_message_for_peer(peer)
                 .map(|message| clean_status(&message.status).to_string())
                 .unwrap_or_else(|| "ready".to_string());
             format!("{count} messages - {status}")
@@ -5034,6 +5113,8 @@ const COL_MUTED: egui::Color32 = egui::Color32::from_rgb(143, 161, 179);
 const COL_LINE: egui::Color32 = egui::Color32::from_rgb(38, 50, 65);
 const COL_LINE_STRONG: egui::Color32 = egui::Color32::from_rgb(49, 65, 83);
 const SIDEBAR_WIDTH: f32 = 390.0;
+const TYPING_THROTTLE_MS: i64 = 1_500;
+const TYPING_VISIBLE_MS: i64 = 3_000;
 
 fn build_tray_icon(
     ctx: egui::Context,
@@ -5173,6 +5254,7 @@ fn apply_visuals(ctx: &egui::Context, settings: &storage::StoredAppSettings) {
 
 fn status_color(status: &str) -> egui::Color32 {
     match status {
+        "typing" => COL_ACCENT,
         "ok" | "ready" | "listening" | "sent" | "delivered" | "read" | "active" | "pinned" => {
             COL_OK
         }
@@ -6364,6 +6446,25 @@ fn app_now_ms() -> i64 {
         .unwrap_or_default()
 }
 
+fn should_send_typing(
+    last_sent_at_ms: i64,
+    now_ms: i64,
+    draft: &str,
+    recipient_public_key: &str,
+) -> bool {
+    !draft.trim().is_empty()
+        && !recipient_public_key.trim().is_empty()
+        && (last_sent_at_ms <= 0 || now_ms.saturating_sub(last_sent_at_ms) >= TYPING_THROTTLE_MS)
+}
+
+fn typing_expires_at(now_ms: i64) -> i64 {
+    now_ms.saturating_add(TYPING_VISIBLE_MS)
+}
+
+fn is_typing_visible(until_ms: i64, now_ms: i64) -> bool {
+    until_ms > now_ms
+}
+
 fn first_non_empty(values: &[&str]) -> String {
     values
         .iter()
@@ -6543,6 +6644,19 @@ mod tests {
             message_reply_preview(&payload).as_deref(),
             Some("original question")
         );
+    }
+
+    #[test]
+    fn typing_indicator_throttles_and_expires() {
+        assert!(should_send_typing(0, 100, "hello", "peer"));
+        assert!(!should_send_typing(100, 1_000, "hello", "peer"));
+        assert!(should_send_typing(100, 1_700, "hello", "peer"));
+        assert!(!should_send_typing(0, 100, "   ", "peer"));
+        assert!(!should_send_typing(0, 100, "hello", "   "));
+
+        let expires_at = typing_expires_at(10_000);
+        assert!(is_typing_visible(expires_at, 12_999));
+        assert!(!is_typing_visible(expires_at, 13_000));
     }
 
     #[test]

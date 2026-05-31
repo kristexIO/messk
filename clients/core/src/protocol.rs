@@ -16,6 +16,7 @@ pub const WIRE_READ_RECEIPT: &str = "read_receipt";
 pub const WIRE_REPLY: &str = "reply";
 pub const WIRE_SESSION_REPAIR: &str = "session_repair";
 pub const WIRE_SESSION_RESET: &str = "session_reset";
+pub const WIRE_TYPING: &str = "typing";
 pub const WIRE_UNPIN: &str = "unpin";
 pub const WIRE_UPLOAD_PREKEYS: &str = "upload_prekeys";
 pub const WIRE_ATTACHMENT: &str = "attachment";
@@ -74,7 +75,11 @@ pub fn is_direct_history_event(kind: &str) -> bool {
 pub fn requires_message_id(kind: &str) -> bool {
     !matches!(
         kind,
-        WIRE_AUTH_RESPONSE | WIRE_CLEAR_PREKEYS | WIRE_GET_PREKEY | WIRE_UPLOAD_PREKEYS
+        WIRE_AUTH_RESPONSE
+            | WIRE_CLEAR_PREKEYS
+            | WIRE_GET_PREKEY
+            | WIRE_TYPING
+            | WIRE_UPLOAD_PREKEYS
     )
 }
 
@@ -163,6 +168,14 @@ mod tests {
         assert!(requires_message_id(WIRE_DUMMY));
         assert!(carries_encrypted_data(WIRE_DUMMY));
         assert!(!is_direct_history_event(WIRE_DUMMY));
+    }
+
+    #[test]
+    fn typing_is_ephemeral_presence_not_history() {
+        assert!(!requires_message_id(WIRE_TYPING));
+        assert!(!requires_target_message_id(WIRE_TYPING));
+        assert!(!is_direct_history_event(WIRE_TYPING));
+        assert!(!carries_encrypted_data(WIRE_TYPING));
     }
 
     #[test]

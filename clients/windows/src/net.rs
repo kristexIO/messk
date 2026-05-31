@@ -192,6 +192,9 @@ pub enum RealtimeEvent {
         peer_public_key: String,
         pinned: bool,
     },
+    DirectTyping {
+        peer_public_key: String,
+    },
     CallSignal {
         kind: String,
         sender_public_key: String,
@@ -947,6 +950,36 @@ pub async fn send_call_signal_once_with_fallback(
 }
 
 #[allow(dead_code)]
+pub async fn send_direct_typing_once(
+    origin: String,
+    identity: Identity,
+    recipient_public_key: String,
+) -> Result<()> {
+    send_direct_typing_once_with_fallback(vec![origin], identity, recipient_public_key).await
+}
+
+pub async fn send_direct_typing_once_with_fallback(
+    origins: Vec<String>,
+    identity: Identity,
+    recipient_public_key: String,
+) -> Result<()> {
+    let recipient_public_key = recipient_public_key.trim().to_string();
+    if recipient_public_key.is_empty() {
+        return Err(anyhow!("recipient public key is empty"));
+    }
+    if recipient_public_key == identity.public_key {
+        return Err(anyhow!("typing recipient must be a peer"));
+    }
+
+    let (mut socket, _, _active_origin) =
+        connect_authenticated_with_fallback(&origins, &identity).await?;
+    let envelope = Envelope::direct_typing(identity.public_key.clone(), recipient_public_key);
+    send_envelope(&mut socket, &envelope)
+        .await
+        .context("failed to send direct typing indicator")
+}
+
+#[allow(dead_code)]
 pub async fn flush_outbox_once(
     origin: String,
     identity: Identity,
@@ -1185,6 +1218,10 @@ async fn handle_realtime_envelope(
         "message" | "offline_message" => {
             handle_direct_envelope(socket, identity, store, sessions, events, envelope, false).await
         }
+        kind if kind == core_protocol::WIRE_TYPING => {
+            handle_direct_typing_envelope(identity, events, envelope);
+            Ok(())
+        }
         "edit" | "delete" | "reaction" | "pin" | "unpin" => {
             handle_direct_control_envelope(socket, identity, store, sessions, events, envelope)
                 .await
@@ -1220,6 +1257,28 @@ async fn handle_realtime_envelope(
             Ok(())
         }
     }
+}
+
+fn handle_direct_typing_envelope(
+    identity: &Identity,
+    events: &UnboundedSender<RealtimeEvent>,
+    envelope: Envelope,
+) {
+    let sender_public_key = envelope.sender_pub_key.unwrap_or_default();
+    let recipient_public_key = envelope.recipient_pub_key.unwrap_or_default();
+    if sender_public_key.trim().is_empty()
+        || recipient_public_key != identity.public_key
+        || sender_public_key == identity.public_key
+    {
+        return;
+    }
+
+    send_realtime_event(
+        events,
+        RealtimeEvent::DirectTyping {
+            peer_public_key: sender_public_key,
+        },
+    );
 }
 
 async fn handle_direct_envelope(

@@ -19,6 +19,8 @@ Current milestone:
 - Periodic outbox flush while realtime is connected.
 - Visible retry outbox with queued message previews, attempts, last error, and next retry timing.
 - Contact list and chat start by public key or @username.
+- Direct typing indicators compatible with the web client; typing events are
+  transient and are not written to local history or retry outbox.
 - Optional Windows startup registration through the current user's Run key.
 - Native window/taskbar icon.
 - Portable install/uninstall scripts included in release packages.

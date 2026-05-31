@@ -100,6 +100,14 @@ impl Envelope {
         }
     }
 
+    pub fn direct_typing(sender_public_key: String, recipient_public_key: String) -> Self {
+        Self {
+            recipient_pub_key: Some(recipient_public_key),
+            sender_pub_key: Some(sender_public_key),
+            ..Self::new(core_protocol::WIRE_TYPING)
+        }
+    }
+
     pub fn direct_edit(
         event_id: String,
         target_msg_id: String,
@@ -197,5 +205,35 @@ impl Envelope {
             msg_id: Some(msg_id),
             ..Self::new(core_protocol::WIRE_OFFLINE_ACK)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_typing_matches_web_shape_without_message_id() {
+        let envelope = Envelope::direct_typing("sender".to_string(), "recipient".to_string());
+        let value = serde_json::to_value(envelope).unwrap();
+
+        assert_eq!(
+            value.get("type").and_then(serde_json::Value::as_str),
+            Some("typing")
+        );
+        assert_eq!(
+            value
+                .get("sender_pub_key")
+                .and_then(serde_json::Value::as_str),
+            Some("sender")
+        );
+        assert_eq!(
+            value
+                .get("recipient_pub_key")
+                .and_then(serde_json::Value::as_str),
+            Some("recipient")
+        );
+        assert!(value.get("msg_id").is_none());
+        assert!(value.get("data").is_none());
     }
 }

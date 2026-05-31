@@ -29,6 +29,9 @@ metadata, and what users must protect themselves.
 - Offline and reconnect banners show aggregate queue counts and generic sync
   state only; raw server errors, public keys, and message text are hidden from
   the chat surface.
+- Direct typing indicators are transient routing metadata. The Windows client
+  sends them only while the realtime connection is active and does not store
+  typing events in chat history, retry queues, or release artifacts.
 - Interface density is a local appearance preference. It changes spacing only,
   is stored with other settings, and does not expose messages, routing details,
   seed phrases, or encryption keys.
