@@ -5,6 +5,7 @@ import { createGroup } from '../lib/community';
 import { toast } from 'react-hot-toast';
 import { decodeBase64 } from 'tweetnacl-util';
 import { prepareAvatarDataUrl } from '../lib/images';
+import { AccessibleModalFrame } from './AccessibleModalFrame';
 
 type CreateGroupModalProps = {
   onClose: () => void;
@@ -12,6 +13,8 @@ type CreateGroupModalProps = {
 };
 
 export const CreateGroupModal: React.FC<CreateGroupModalProps> = ({ onClose, onCreated }) => {
+  const titleId = 'create-group-dialog-title';
+  const descriptionId = 'create-group-dialog-description';
   const [title, setTitle] = useState('');
   const [avatar, setAvatar] = useState<string | null>(null);
   const [memberInput, setMemberInput] = useState('');
@@ -82,12 +85,20 @@ export const CreateGroupModal: React.FC<CreateGroupModalProps> = ({ onClose, onC
   };
 
   const modal = (
-    <div className="fixed inset-0 z-[120] flex items-end justify-center bg-slate-950/80 px-3 py-3 backdrop-blur sm:items-center sm:px-4">
-      <div className="max-h-[100dvh] w-full max-w-4xl overflow-y-auto rounded-[28px] border border-white/10 bg-slate-950/95 shadow-[0_30px_100px_rgba(0,0,0,0.45)] sm:rounded-[32px]">
+    <AccessibleModalFrame
+      titleId={titleId}
+      descriptionId={descriptionId}
+      onClose={onClose}
+      className="fixed inset-0 z-[120] flex items-end justify-center bg-slate-950/80 px-3 py-3 backdrop-blur sm:items-center sm:px-4"
+      panelClassName="max-h-[100dvh] w-full max-w-4xl overflow-y-auto rounded-[28px] border border-white/10 bg-slate-950/95 shadow-[0_30px_100px_rgba(0,0,0,0.45)] outline-none sm:rounded-[32px]"
+    >
         <div className="flex items-center justify-between border-b border-white/10 px-6 py-5">
           <div>
             <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-accent/80">Groups</div>
-            <h2 className="mt-1 text-[30px] font-semibold leading-tight tracking-[-0.02em] text-white">Create a team space</h2>
+            <h2 id={titleId} className="mt-1 text-[30px] font-semibold leading-tight tracking-[-0.02em] text-white">Create a team space</h2>
+            <p id={descriptionId} className="mt-2 max-w-2xl text-sm leading-6 text-text-muted">
+              Create a private room with optional avatar and invited members.
+            </p>
           </div>
           <button
             type="button"
@@ -210,8 +221,7 @@ export const CreateGroupModal: React.FC<CreateGroupModalProps> = ({ onClose, onC
             </div>
           </div>
         </form>
-      </div>
-    </div>
+    </AccessibleModalFrame>
   );
 
   return createPortal(modal, document.body);

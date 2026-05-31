@@ -6,6 +6,7 @@ import { Phone, PhoneOff, Video, Mic, MicOff, VideoOff, ShieldCheck, RotateCcw, 
 import { socketManager } from '../lib/socket';
 import { db } from '../lib/db';
 import { useLiveQuery } from 'dexie-react-hooks';
+import { buildCallControlAccessibility } from '../lib/callControls';
 
 type WebRTCSignalDetail = {
   type: 'call_offer' | 'call_answer' | 'call_reject' | 'call_end' | 'ice_candidate';
@@ -659,15 +660,35 @@ export const CallOverlay: React.FC = () => {
       : statusTone === 'danger'
         ? 'border-red-400/30 bg-red-500/10 text-red-100'
         : 'border-slate-700 bg-slate-900/85 text-slate-300';
+  const callA11y = buildCallControlAccessibility({
+    callState,
+    callMedia,
+    isMicOn,
+    isVideoOn,
+    isScreenSharing,
+    showDiagnostics,
+    statusTone,
+  });
+  const callOverlayTitleId = 'call-overlay-title';
+  const callOverlayDescriptionId = 'call-overlay-description';
+  const callStatusId = 'call-overlay-status';
+  const incomingTitleId = 'incoming-call-title';
+  const incomingDescriptionId = 'incoming-call-description';
+  const diagnosticsPanelId = 'call-diagnostics-panel';
 
   if (callState === 'idle') {
     return statusText ? (
-      <div className={`absolute top-4 right-4 z-30 min-w-[220px] rounded-2xl border px-3 py-3 text-xs backdrop-blur-md ${statusToneClass}`}>
+      <div
+        role={callA11y.statusRole}
+        aria-live={callA11y.statusLive}
+        className={`absolute top-4 right-4 z-30 min-w-[220px] rounded-2xl border px-3 py-3 text-xs backdrop-blur-md ${statusToneClass}`}
+      >
         <div>{statusText}</div>
         {lastRetryTarget ? (
           <button
             type="button"
             onClick={handleRetryLastCall}
+            aria-label={callA11y.retryLabel}
             className="mt-2 inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] font-medium text-white transition-all hover:bg-white/10"
           >
             <RotateCcw className="h-3.5 w-3.5" />
@@ -679,14 +700,26 @@ export const CallOverlay: React.FC = () => {
   }
 
   return (
-    <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-slate-950 p-4 sm:p-8">
+    <div
+      className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-slate-950 p-4 sm:p-8"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={callOverlayTitleId}
+      aria-describedby={`${callOverlayDescriptionId}${statusText ? ` ${callStatusId}` : ''}`}
+    >
+      <p id={callOverlayDescriptionId} className="sr-only">{callA11y.overlayDescription}</p>
       <div className="absolute top-4 flex items-center gap-2 text-primary-400 animate-pulse sm:top-8">
         <ShieldCheck className="w-5 h-5" />
-        <span className="text-xs font-mono uppercase tracking-widest">End-to-End Encrypted Call</span>
+        <span id={callOverlayTitleId} className="text-xs font-mono uppercase tracking-widest">{callA11y.overlayTitle}</span>
       </div>
 
       {statusText ? (
-        <div className={`absolute top-14 rounded-full border px-4 py-2 text-xs sm:top-16 ${statusToneClass}`}>
+        <div
+          id={callStatusId}
+          role={callA11y.statusRole}
+          aria-live={callA11y.statusLive}
+          className={`absolute top-14 rounded-full border px-4 py-2 text-xs sm:top-16 ${statusToneClass}`}
+        >
           {statusText}
         </div>
       ) : null}
@@ -694,6 +727,9 @@ export const CallOverlay: React.FC = () => {
       <button
         type="button"
         onClick={() => setShowDiagnostics((current) => !current)}
+        aria-controls={diagnosticsPanelId}
+        aria-expanded={showDiagnostics}
+        aria-label={callA11y.diagnosticsLabel}
         className="absolute right-4 top-4 inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900/90 px-3 py-2 text-xs text-slate-300 transition-all hover:border-slate-500 hover:text-white sm:right-8 sm:top-8"
       >
         <Activity className="h-4 w-4" />
@@ -705,6 +741,7 @@ export const CallOverlay: React.FC = () => {
           ref={remoteVideoRef}
           autoPlay
           playsInline
+          aria-label="Remote call media"
           onLoadedData={revealRemoteVideoIfReady}
           onPlaying={revealRemoteVideoIfReady}
           onResize={revealRemoteVideoIfReady}
@@ -735,6 +772,7 @@ export const CallOverlay: React.FC = () => {
             autoPlay
             playsInline
             muted
+            aria-label={isScreenSharing ? 'Local screen share preview' : 'Local camera preview'}
             className={`h-full w-full ${isScreenSharing ? 'object-contain' : 'object-cover'}`}
           />
         </div>
@@ -755,7 +793,12 @@ export const CallOverlay: React.FC = () => {
         )}
 
         {showDiagnostics ? (
-          <div className="absolute left-3 top-3 z-10 w-[calc(100%-24px)] max-w-72 rounded-2xl border border-slate-700 bg-slate-950/85 p-4 text-xs text-slate-300 backdrop-blur sm:left-6 sm:top-6 sm:w-72">
+          <div
+            id={diagnosticsPanelId}
+            role="region"
+            aria-label="Call diagnostics"
+            className="absolute left-3 top-3 z-10 w-[calc(100%-24px)] max-w-72 rounded-2xl border border-slate-700 bg-slate-950/85 p-4 text-xs text-slate-300 backdrop-blur sm:left-6 sm:top-6 sm:w-72"
+          >
             <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Call Diagnostics</div>
             <div className="mt-3 space-y-2">
               <div className="flex items-center justify-between">
@@ -810,14 +853,21 @@ export const CallOverlay: React.FC = () => {
 
       <div className="mt-8 flex items-center gap-4 sm:mt-12 sm:gap-6">
         <button 
+          type="button"
           onClick={handleToggleMic}
+          aria-label={callA11y.micLabel}
+          aria-pressed={isMicOn}
+          title={callA11y.micLabel}
           className={`p-5 rounded-full transition-all ${isMicOn ? 'bg-slate-800 hover:bg-slate-700' : 'bg-red-500/20 text-red-400'}`}
         >
           {isMicOn ? <Mic className="w-6 h-6" /> : <MicOff className="w-6 h-6" />}
         </button>
         
         <button 
+          type="button"
           onClick={handleEndCall}
+          aria-label={callA11y.endLabel}
+          title={callA11y.endLabel}
           className="p-6 bg-red-600 hover:bg-red-500 rounded-full shadow-lg shadow-red-600/30 transition-all hover:scale-110"
         >
           <PhoneOff className="w-8 h-8 text-white" />
@@ -828,8 +878,9 @@ export const CallOverlay: React.FC = () => {
             type="button"
             onClick={handleToggleVideo}
             className={`p-5 rounded-full transition-all ${isVideoOn ? 'bg-slate-800 hover:bg-slate-700' : 'bg-red-500/20 text-red-400'}`}
-            aria-label={isVideoOn ? 'Disable camera' : 'Enable camera'}
-            title={isVideoOn ? 'Disable camera' : 'Enable camera'}
+            aria-label={callA11y.videoLabel}
+            aria-pressed={isVideoOn}
+            title={callA11y.videoLabel}
           >
             {isVideoOn ? <Video className="w-6 h-6" /> : <VideoOff className="w-6 h-6" />}
           </button>
@@ -839,6 +890,9 @@ export const CallOverlay: React.FC = () => {
           type="button"
           onClick={() => void handleToggleScreenShare()}
           disabled={callState !== 'active'}
+          aria-label={callA11y.screenShareLabel}
+          aria-pressed={isScreenSharing}
+          title={callA11y.screenShareLabel}
           className={`p-5 rounded-full transition-all ${
             isScreenSharing
               ? 'bg-accent/20 text-accent'
@@ -846,15 +900,19 @@ export const CallOverlay: React.FC = () => {
                 ? 'bg-slate-800 hover:bg-slate-700'
                 : 'cursor-not-allowed bg-slate-900 text-slate-600'
           }`}
-          aria-label={isScreenSharing ? 'Stop screen sharing' : 'Share screen'}
-          title={isScreenSharing ? 'Stop screen sharing' : 'Share screen'}
         >
           {isScreenSharing ? <ScreenShareOff className="w-6 h-6" /> : <MonitorUp className="w-6 h-6" />}
         </button>
       </div>
 
       {callState === 'incoming' && (
-        <div className="fixed inset-0 z-[110] bg-slate-950/90 backdrop-blur-xl flex flex-col items-center justify-center">
+        <div
+          className="fixed inset-0 z-[110] bg-slate-950/90 backdrop-blur-xl flex flex-col items-center justify-center"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby={incomingTitleId}
+          aria-describedby={incomingDescriptionId}
+        >
            <div className="w-32 h-32 rounded-full bg-green-500/20 flex items-center justify-center animate-pulse mb-8 overflow-hidden border border-green-400/20">
               {displayAvatar ? (
                 <img src={displayAvatar} alt={displayName} className="h-full w-full object-cover" />
@@ -862,14 +920,14 @@ export const CallOverlay: React.FC = () => {
                 <span className="text-5xl font-bold text-white">{displayName.charAt(0).toUpperCase()}</span>
               )}
            </div>
-           <h2 className="text-3xl font-bold mb-2">Incoming {callMedia === 'screen' ? 'Screen Share' : callMedia === 'video' ? 'Video Call' : 'Audio Call'}</h2>
+           <h2 id={incomingTitleId} className="text-3xl font-bold mb-2">Incoming {callMedia === 'screen' ? 'Screen Share' : callMedia === 'video' ? 'Video Call' : 'Audio Call'}</h2>
            <p className="text-slate-400 mb-12">{displayName}</p>
-           <p className="mb-8 max-w-md text-center text-xs text-slate-500">
+           <p id={incomingDescriptionId} className="mb-8 max-w-md text-center text-xs text-slate-500">
              If you do not answer within 30 seconds, the call will be marked as missed.
            </p>
            <div className="flex gap-8">
-              <button onClick={handleRejectCall} className="w-20 h-20 bg-red-600 rounded-full flex items-center justify-center"><PhoneOff className="w-8 h-8 text-white" /></button>
-              <button onClick={handleAccept} className="w-20 h-20 bg-green-600 rounded-full flex items-center justify-center animate-bounce"><Phone className="w-8 h-8 text-white" /></button>
+              <button type="button" onClick={handleRejectCall} aria-label={callA11y.rejectLabel} className="w-20 h-20 bg-red-600 rounded-full flex items-center justify-center"><PhoneOff className="w-8 h-8 text-white" /></button>
+              <button type="button" onClick={handleAccept} aria-label={callA11y.acceptLabel} className="w-20 h-20 bg-green-600 rounded-full flex items-center justify-center animate-bounce"><Phone className="w-8 h-8 text-white" /></button>
            </div>
         </div>
       )}

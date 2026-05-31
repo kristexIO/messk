@@ -32,6 +32,9 @@ metadata, and what users must protect themselves.
 - Interface density is a local appearance preference. It changes spacing only,
   is stored with other settings, and does not expose messages, routing details,
   seed phrases, or encryption keys.
+- Modal and call control labels stay generic for assistive tools. They describe
+  actions and state without exposing SDP, ICE candidates, tokens, seed phrases
+  or message plaintext.
 - Relay and bootstrap operation is not anonymity protection. Mesh work remains
   staged and feature-gated.
 

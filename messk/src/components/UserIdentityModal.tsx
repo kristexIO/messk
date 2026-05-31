@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { QRCodeSVG } from 'qrcode.react';
 import { X, ShieldCheck, QrCode, Copy } from 'lucide-react';
 import { useI18n } from '../lib/i18n';
+import { AccessibleModalFrame } from './AccessibleModalFrame';
 
 interface Props {
   pubKey: string;
@@ -11,6 +12,8 @@ interface Props {
 
 export const UserIdentityModal: React.FC<Props> = ({ pubKey, onClose }) => {
   const { t } = useI18n();
+  const titleId = 'identity-dialog-title';
+  const descriptionId = 'identity-dialog-description';
   const chatUrl = React.useMemo(() => {
     if (typeof window === 'undefined') {
       return pubKey;
@@ -19,14 +22,19 @@ export const UserIdentityModal: React.FC<Props> = ({ pubKey, onClose }) => {
   }, [pubKey]);
 
   const modal = (
-    <div className="fixed inset-0 z-[600] flex items-center justify-center bg-slate-950/90 backdrop-blur-2xl p-4">
-      <div className="premium-glass p-8 rounded-[32px] w-full max-w-md flex flex-col items-center gap-6 animate-in zoom-in-95 duration-300 shadow-2xl border border-white/10">
+    <AccessibleModalFrame
+      titleId={titleId}
+      descriptionId={descriptionId}
+      onClose={onClose}
+      className="fixed inset-0 z-[600] flex items-center justify-center bg-slate-950/90 p-4 backdrop-blur-2xl"
+      panelClassName="premium-glass flex w-full max-w-md flex-col items-center gap-6 rounded-[32px] border border-white/10 p-8 shadow-2xl outline-none animate-in zoom-in-95 duration-300"
+    >
         <div className="w-full flex justify-between items-center">
-          <h2 className="text-xl font-bold flex items-center gap-2">
+          <h2 id={titleId} className="text-xl font-bold flex items-center gap-2">
             <QrCode className="text-accent w-5 h-5" />
             {t('identityCard')}
           </h2>
-          <button onClick={onClose} className="p-2 hover:bg-white/5 rounded-full transition-colors">
+          <button onClick={onClose} className="p-2 hover:bg-white/5 rounded-full transition-colors" aria-label="Close identity card">
             <X className="w-5 h-5 text-text-muted" />
           </button>
         </div>
@@ -53,10 +61,9 @@ export const UserIdentityModal: React.FC<Props> = ({ pubKey, onClose }) => {
 
         <div className="flex items-center gap-4 p-5 bg-accent/5 rounded-2xl border border-accent/10 text-[11px] text-text-muted leading-relaxed">
           <ShieldCheck className="w-6 h-6 text-accent flex-shrink-0" />
-          <p>{t('scanIdentity')}</p>
+          <p id={descriptionId}>{t('scanIdentity')}</p>
         </div>
-      </div>
-    </div>
+    </AccessibleModalFrame>
   );
 
   return createPortal(modal, document.body);

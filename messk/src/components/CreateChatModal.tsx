@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { MessageSquare, UserPlus, X } from 'lucide-react';
 import { socketManager } from '../lib/socket';
 import { toast } from 'react-hot-toast';
+import { AccessibleModalFrame } from './AccessibleModalFrame';
 
 type CreateChatModalProps = {
   onClose: () => void;
@@ -10,6 +11,8 @@ type CreateChatModalProps = {
 };
 
 export const CreateChatModal: React.FC<CreateChatModalProps> = ({ onClose, onCreate }) => {
+  const titleId = 'create-chat-dialog-title';
+  const descriptionId = 'create-chat-dialog-description';
   const [publicKey, setPublicKey] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -49,12 +52,17 @@ export const CreateChatModal: React.FC<CreateChatModalProps> = ({ onClose, onCre
   };
 
   const modal = (
-    <div className="fixed inset-0 z-[120] flex items-end justify-center bg-slate-950/80 px-3 py-3 backdrop-blur sm:items-center sm:px-4">
-      <div className="max-h-[100dvh] w-full max-w-2xl overflow-y-auto rounded-[28px] border border-white/10 bg-slate-950/95 shadow-[0_30px_100px_rgba(0,0,0,0.45)] sm:rounded-[32px]">
+    <AccessibleModalFrame
+      titleId={titleId}
+      descriptionId={descriptionId}
+      onClose={onClose}
+      className="fixed inset-0 z-[120] flex items-end justify-center bg-slate-950/80 px-3 py-3 backdrop-blur sm:items-center sm:px-4"
+      panelClassName="max-h-[100dvh] w-full max-w-2xl overflow-y-auto rounded-[28px] border border-white/10 bg-slate-950/95 shadow-[0_30px_100px_rgba(0,0,0,0.45)] outline-none sm:rounded-[32px]"
+    >
         <div className="flex items-center justify-between border-b border-white/10 px-6 py-5">
           <div>
             <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-accent/80">Chats</div>
-            <h2 className="mt-1 text-[30px] font-semibold leading-tight tracking-[-0.02em] text-white">Start a private chat</h2>
+            <h2 id={titleId} className="mt-1 text-[30px] font-semibold leading-tight tracking-[-0.02em] text-white">Start a private chat</h2>
           </div>
           <button
             type="button"
@@ -74,7 +82,7 @@ export const CreateChatModal: React.FC<CreateChatModalProps> = ({ onClose, onCre
               </div>
               <div className="min-w-0">
                 <div className="text-base font-semibold tracking-[-0.01em] text-white">Paste a contact public key</div>
-                <div className="mt-1 text-sm leading-6 text-text-muted">
+                <div id={descriptionId} className="mt-1 text-sm leading-6 text-text-muted">
                   This creates a direct encrypted thread and pulls the contact profile as soon as the connection is available.
                 </div>
               </div>
@@ -113,8 +121,7 @@ export const CreateChatModal: React.FC<CreateChatModalProps> = ({ onClose, onCre
             </div>
           </div>
         </form>
-      </div>
-    </div>
+    </AccessibleModalFrame>
   );
 
   return createPortal(modal, document.body);

@@ -1,5 +1,6 @@
 import React from 'react';
 import { BellOff, Download, KeyRound, Search, ShieldCheck, X } from 'lucide-react';
+import { AccessibleModalFrame } from './AccessibleModalFrame';
 
 interface OnboardingModalProps {
   onClose: () => void;
@@ -31,9 +32,17 @@ const shortcuts = [
 ];
 
 export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onClose }) => {
+  const titleId = 'onboarding-dialog-title';
+  const descriptionId = 'onboarding-dialog-description';
+
   return (
-    <div className="fixed inset-0 z-[210] flex items-end justify-center bg-black/70 px-3 py-3 backdrop-blur-md sm:items-center sm:p-4">
-      <div className="premium-glass relative flex max-h-[100dvh] w-full max-w-4xl flex-col overflow-hidden rounded-[28px] border border-white/10 shadow-2xl animate-in fade-in zoom-in duration-300 sm:rounded-[36px]">
+    <AccessibleModalFrame
+      titleId={titleId}
+      descriptionId={descriptionId}
+      onClose={onClose}
+      className="fixed inset-0 z-[210] flex items-end justify-center bg-black/70 px-3 py-3 backdrop-blur-md sm:items-center sm:p-4"
+      panelClassName="premium-glass relative flex max-h-[100dvh] w-full max-w-4xl flex-col overflow-hidden rounded-[28px] border border-white/10 shadow-2xl outline-none animate-in fade-in zoom-in duration-300 sm:rounded-[36px]"
+    >
         <div className="absolute inset-0 pointer-events-none">
           <div className="absolute -left-10 top-0 h-48 w-48 rounded-full bg-accent/15 blur-[100px]" />
           <div className="absolute bottom-0 right-0 h-56 w-56 rounded-full bg-blue-500/10 blur-[120px]" />
@@ -54,10 +63,10 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onClose }) => 
             </div>
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.3em] text-accent/80">Welcome</p>
-              <h2 className="text-xl font-bold text-white sm:text-2xl">Your secure workspace is ready</h2>
+              <h2 id={titleId} className="text-xl font-bold text-white sm:text-2xl">Your secure workspace is ready</h2>
             </div>
           </div>
-          <p className="mt-3 max-w-2xl text-sm leading-relaxed text-text-muted sm:mt-4">
+          <p id={descriptionId} className="mt-3 max-w-2xl text-sm leading-relaxed text-text-muted sm:mt-4">
             Messk is set up for end-to-end encrypted conversations, local vault protection and encrypted backups. Here are the fastest ways to feel at home.
           </p>
         </div>
@@ -112,7 +121,6 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({ onClose }) => 
             Start Messaging
           </button>
         </div>
-      </div>
-    </div>
+    </AccessibleModalFrame>
   );
 };

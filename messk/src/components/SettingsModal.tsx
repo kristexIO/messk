@@ -15,12 +15,14 @@ import { buildLocalKeyStatus } from '../lib/localKeyStatus';
 import { panicResetLocalState } from '../lib/panicReset';
 import { SETTINGS_STORAGE_KEY } from '../lib/storage';
 import { InterfaceDensitySelector } from './InterfaceDensitySelector';
+import { AccessibleModalFrame } from './AccessibleModalFrame';
 
 interface SettingsModalProps {
   onClose: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
+  const titleId = 'settings-dialog-title';
   const {
     nickname,
     avatar,
@@ -445,10 +447,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
       : 'text-amber-200';
 
   const modal = (
-    <div className="settings-backdrop fixed inset-0 z-[200] flex items-center justify-center px-3 py-3 backdrop-blur-md sm:p-4">
-      <div className="settings-panel flex max-h-[calc(100dvh-24px)] w-full max-w-2xl flex-col overflow-hidden rounded-[28px] shadow-2xl animate-in fade-in zoom-in duration-300 sm:max-h-[min(880px,calc(100dvh-32px))] sm:rounded-3xl">
+    <AccessibleModalFrame
+      titleId={titleId}
+      onClose={onClose}
+      className="settings-backdrop fixed inset-0 z-[200] flex items-center justify-center px-3 py-3 backdrop-blur-md sm:p-4"
+      panelClassName="settings-panel flex max-h-[calc(100dvh-24px)] w-full max-w-2xl flex-col overflow-hidden rounded-[28px] shadow-2xl outline-none animate-in fade-in zoom-in duration-300 sm:max-h-[min(880px,calc(100dvh-32px))] sm:rounded-3xl"
+    >
         <div className="settings-header flex items-center justify-between px-4 py-4 sm:px-6">
-          <h2 className="text-xl font-bold flex items-center gap-2">
+          <h2 id={titleId} className="text-xl font-bold flex items-center gap-2">
             <Palette className="w-5 h-5 text-accent" />
             {t('settings')}
           </h2>
@@ -1011,8 +1017,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
             {t('saveChanges')}
           </button>
         </div>
-      </div>
-    </div>
+    </AccessibleModalFrame>
   );
 
   return createPortal(modal, document.body);

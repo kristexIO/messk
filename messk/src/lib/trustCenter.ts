@@ -59,6 +59,12 @@ export const implementedTrustControls: TrustItem[] = [
     evidence: 'Connection-health tests cover offline, reconnect, queued delivery and sanitized sync-error states.',
   },
   {
+    title: 'Accessible modal and call controls',
+    status: 'implemented',
+    summary: 'Critical dialogs and call actions expose labelled dialog semantics, Escape handling, live status regions and explicit keyboard-readable control labels.',
+    evidence: 'Accessible modal frame and call-control tests verify dialog labels, Escape close behavior, assertive call alerts and generic non-secret assistive copy.',
+  },
+  {
     title: 'Reduced temporary secret lifetime',
     status: 'implemented',
     summary: 'Mutable secret buffers used for message, attachment, backup, seed and PIN operations are cleared after use where the runtime permits it.',
