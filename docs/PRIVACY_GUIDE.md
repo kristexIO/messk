@@ -38,6 +38,9 @@ metadata, and what users must protect themselves.
 - Lazy route loading keeps authenticated chat bootstrap outside the public entry
   bundle. Loading fallbacks use generic copy and do not expose chat, invite or
   signaling diagnostics before the workspace opens.
+- Visual regression baselines use synthetic labels and generated SVG fixtures
+  only. They cover normal, empty, loading, recovery and responsive states
+  without storing real conversations, keys, signaling details, or reports.
 - Relay and bootstrap operation is not anonymity protection. Mesh work remains
   staged and feature-gated.
 

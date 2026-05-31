@@ -43,6 +43,8 @@ if (-not $SkipFrontend) {
     if ($LASTEXITCODE -ne 0) { throw "Frontend lint failed" }
     npm test
     if ($LASTEXITCODE -ne 0) { throw "Frontend tests failed" }
+    npm run visual:baseline
+    if ($LASTEXITCODE -ne 0) { throw "Frontend visual baselines failed" }
     npm run build
     if ($LASTEXITCODE -ne 0) { throw "Frontend build failed" }
     & (Join-Path $root "scripts\frontend-bundle-budget.ps1")

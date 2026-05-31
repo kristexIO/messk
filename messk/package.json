@@ -8,6 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "test": "vitest run",
+    "visual:baseline": "powershell -NoProfile -ExecutionPolicy Bypass -File ..\\scripts\\visual-regression-baselines.ps1",
+    "visual:baseline:update": "powershell -NoProfile -ExecutionPolicy Bypass -File ..\\scripts\\visual-regression-baselines.ps1 -Update",
     "preview": "vite preview"
   },
   "dependencies": {

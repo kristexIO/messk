@@ -71,6 +71,12 @@ export const implementedTrustControls: TrustItem[] = [
     evidence: 'Lazy-route tests validate safe fallback copy, and the frontend bundle budget gate verifies route chunks plus authenticated-only marker isolation.',
   },
   {
+    title: 'Visual regression baselines',
+    status: 'implemented',
+    summary: 'Normal, empty, loading and recovered chat states have deterministic responsive baselines so layout regressions are caught before release.',
+    evidence: 'Visual regression scenario tests require mobile, tablet and desktop coverage, while the release gate verifies generated SVG baselines are current and synthetic.',
+  },
+  {
     title: 'Reduced temporary secret lifetime',
     status: 'implemented',
     summary: 'Mutable secret buffers used for message, attachment, backup, seed and PIN operations are cleared after use where the runtime permits it.',

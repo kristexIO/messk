@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="1180" viewBox="0 0 820 1180" role="img" aria-label="Tablet empty chat state visual baseline">
+  <title>Tablet empty chat state</title>
+  <desc>Tablet 820x1180; spacious; state empty; synthetic UI baseline with no private data.</desc>
+  <rect width="820" height="1180" fill="#0f172a"/>
+  <rect x="0" y="0" width="820" height="84" fill="#0f172a" opacity="0.96"/>
+  <circle cx="48" cy="42" r="14" fill="#a78bfa"/>
+  <text x="76" y="49" fill="#e5e7eb" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="700">Messk</text>
+  <rect x="644" y="28" width="128" height="28" rx="14" fill="#111827" stroke="#a78bfa" stroke-opacity="0.56"/>
+  <text x="660" y="47" fill="#cbd5e1" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12">tablet</text>
+  <rect x="48" y="132" width="220" height="1000" rx="28" fill="#0b1220" stroke="#1f2937"/>
+  <text x="76" y="176" fill="#f8fafc" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="18" font-weight="700">Navigation</text>
+  <rect x="68" y="206" width="180" height="42" rx="14" fill="#a78bfa" opacity="0.18"/>
+  <circle cx="92" cy="227" r="8" fill="#a78bfa"/>
+  <rect x="110" y="223" width="95" height="8" rx="4" fill="#cbd5e1" opacity="0.90"/>
+  <rect x="68" y="264" width="180" height="42" rx="14" fill="#1f2937" opacity="0.72"/>
+  <circle cx="92" cy="285" r="8" fill="#64748b"/>
+  <rect x="110" y="281" width="111" height="8" rx="4" fill="#cbd5e1" opacity="0.45"/>
+  <rect x="68" y="322" width="180" height="42" rx="14" fill="#1f2937" opacity="0.72"/>
+  <circle cx="92" cy="343" r="8" fill="#64748b"/>
+  <rect x="110" y="339" width="127" height="8" rx="4" fill="#cbd5e1" opacity="0.45"/>
+  <rect x="68" y="380" width="180" height="42" rx="14" fill="#1f2937" opacity="0.72"/>
+  <circle cx="92" cy="401" r="8" fill="#64748b"/>
+  <rect x="110" y="397" width="143" height="8" rx="4" fill="#cbd5e1" opacity="0.45"/>
+  <rect x="292" y="132" width="480" height="1000" rx="32" fill="#0b1220" stroke="#1f2937"/>
+  <rect x="324" y="166" width="220" height="6" rx="3" fill="#a78bfa"/>
+  <text x="324" y="214" fill="#f8fafc" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="800">Tablet empty chat state</text>
+  <text x="324" y="242" fill="#94a3b8" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14">state: empty | density: spacious</text>
+  <rect x="324" y="280" width="416" height="76" rx="22" fill="#111827" stroke="#1f2937"/>
+  <rect x="348" y="296" width="6" height="44" rx="3" fill="#94a3b8"/>
+  <text x="370" y="313" fill="#e5e7eb" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">No conversation selected</text>
+  <rect x="370" y="328" width="384" height="10" rx="5" fill="#94a3b8" opacity="0.32"/>
+  <rect x="324" y="376" width="416" height="76" rx="22" fill="#111827" stroke="#1f2937"/>
+  <rect x="348" y="392" width="6" height="44" rx="3" fill="#38bdf8"/>
+  <text x="370" y="409" fill="#e5e7eb" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Start from verified contact</text>
+  <rect x="370" y="424" width="307" height="10" rx="5" fill="#38bdf8" opacity="0.32"/>
+  <rect x="324" y="472" width="416" height="76" rx="22" fill="#111827" stroke="#1f2937"/>
+  <rect x="348" y="488" width="6" height="44" rx="3" fill="#34d399"/>
+  <text x="370" y="505" fill="#e5e7eb" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Empty state actions visible</text>
+  <rect x="370" y="520" width="336" height="10" rx="5" fill="#34d399" opacity="0.32"/>
+  <rect x="292" y="1088" width="480" height="44" rx="22" fill="#020617" stroke="#a78bfa" stroke-opacity="0.38"/>
+  <text x="316" y="1116" fill="#94a3b8" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13">visual baseline | synthetic fixtures | no private data</text>
+</svg>

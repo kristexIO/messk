@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "generatedBy": "scripts/visual-regression-baselines.ps1",
+  "requiredStates": ["normal", "empty", "loading", "error"],
+  "requiredViewports": ["mobile", "tablet", "desktop"],
+  "scenarios": [
+    {
+      "id": "desktop-chat-normal",
+      "baseline": "desktop-chat-normal.svg",
+      "title": "Desktop chat normal state",
+      "viewport": "desktop",
+      "state": "normal",
+      "theme": "dark",
+      "density": "comfortable",
+      "accent": "#2aabee",
+      "background": "#020617",
+      "cards": [
+        { "label": "Conversation header", "tone": "info", "width": 74 },
+        { "label": "Delivery label: Delivered", "tone": "success", "width": 66 },
+        { "label": "Composer ready", "tone": "muted", "width": 82 },
+        { "label": "Attachment button labelled", "tone": "muted", "width": 54 }
+      ],
+      "assertions": ["normal-layout", "labelled-actions", "synthetic-data"]
+    },
+    {
+      "id": "desktop-contained-error",
+      "baseline": "desktop-contained-error.svg",
+      "title": "Desktop contained recovery state",
+      "viewport": "desktop",
+      "state": "error",
+      "theme": "dark",
+      "density": "comfortable",
+      "accent": "#fb7185",
+      "background": "#111827",
+      "cards": [
+        { "label": "Chat surface recovered", "tone": "danger", "width": 76 },
+        { "label": "Try again action", "tone": "info", "width": 58 },
+        { "label": "Generic support copy", "tone": "muted", "width": 69 }
+      ],
+      "assertions": ["sanitized-recovery", "contained-failure", "synthetic-data"]
+    },
+    {
+      "id": "mobile-route-loading",
+      "baseline": "mobile-route-loading.svg",
+      "title": "Mobile route loading state",
+      "viewport": "mobile",
+      "state": "loading",
+      "theme": "dark",
+      "density": "compact",
+      "accent": "#38bdf8",
+      "background": "#020617",
+      "cards": [
+        { "label": "Loading chat workspace", "tone": "info", "width": 84 },
+        { "label": "Preparing encrypted conversations", "tone": "muted", "width": 68 },
+        { "label": "Screen reader status visible", "tone": "success", "width": 72 }
+      ],
+      "assertions": ["route-fallback", "accessible-status", "synthetic-data"]
+    },
+    {
+      "id": "tablet-empty-chat",
+      "baseline": "tablet-empty-chat.svg",
+      "title": "Tablet empty chat state",
+      "viewport": "tablet",
+      "state": "empty",
+      "theme": "dark",
+      "density": "spacious",
+      "accent": "#a78bfa",
+      "background": "#0f172a",
+      "cards": [
+        { "label": "No conversation selected", "tone": "muted", "width": 80 },
+        { "label": "Start from verified contact", "tone": "info", "width": 64 },
+        { "label": "Empty state actions visible", "tone": "success", "width": 70 }
+      ],
+      "assertions": ["empty-state", "responsive-shell", "synthetic-data"]
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="844" viewBox="0 0 390 844" role="img" aria-label="Mobile route loading state visual baseline">
+  <title>Mobile route loading state</title>
+  <desc>Mobile 390x844; compact; state loading; synthetic UI baseline with no private data.</desc>
+  <rect width="390" height="844" fill="#020617"/>
+  <rect x="0" y="0" width="390" height="72" fill="#0f172a" opacity="0.96"/>
+  <circle cx="24" cy="36" r="14" fill="#38bdf8"/>
+  <text x="52" y="43" fill="#e5e7eb" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="700">Messk</text>
+  <rect x="238" y="22" width="128" height="28" rx="14" fill="#111827" stroke="#38bdf8" stroke-opacity="0.56"/>
+  <text x="254" y="41" fill="#cbd5e1" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12">mobile</text>
+  <rect x="24" y="96" width="342" height="724" rx="32" fill="#0b1220" stroke="#1f2937"/>
+  <rect x="56" y="130" width="157" height="6" rx="3" fill="#38bdf8"/>
+  <text x="56" y="178" fill="#f8fafc" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="800">Mobile route loading state</text>
+  <text x="56" y="206" fill="#94a3b8" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14">state: loading | density: compact</text>
+  <rect x="56" y="244" width="278" height="76" rx="22" fill="#111827" stroke="#1f2937"/>
+  <rect x="80" y="260" width="6" height="44" rx="3" fill="#38bdf8"/>
+  <text x="102" y="277" fill="#e5e7eb" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Loading chat workspace</text>
+  <rect x="102" y="292" width="287" height="10" rx="5" fill="#38bdf8" opacity="0.32"/>
+  <rect x="56" y="340" width="278" height="76" rx="22" fill="#111827" stroke="#1f2937"/>
+  <rect x="80" y="356" width="6" height="44" rx="3" fill="#94a3b8"/>
+  <text x="102" y="373" fill="#e5e7eb" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Preparing encrypted conversations</text>
+  <rect x="102" y="388" width="232" height="10" rx="5" fill="#94a3b8" opacity="0.32"/>
+  <rect x="56" y="436" width="278" height="76" rx="22" fill="#111827" stroke="#1f2937"/>
+  <rect x="80" y="452" width="6" height="44" rx="3" fill="#34d399"/>
+  <text x="102" y="469" fill="#e5e7eb" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">Screen reader status visible</text>
+  <rect x="102" y="484" width="246" height="10" rx="5" fill="#34d399" opacity="0.32"/>
+  <rect x="24" y="776" width="342" height="44" rx="22" fill="#020617" stroke="#38bdf8" stroke-opacity="0.38"/>
+  <text x="48" y="804" fill="#94a3b8" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13">visual baseline | synthetic fixtures | no private data</text>
+</svg>

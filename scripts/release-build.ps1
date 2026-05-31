@@ -97,6 +97,7 @@ Push-Location (Join-Path $root "messk")
 Invoke-External "== Frontend install ==" "npm" @("ci")
 Invoke-External "== Frontend lint ==" "npm" @("run", "lint")
 Invoke-External "== Frontend tests ==" "npm" @("test")
+Invoke-External "== Frontend visual baselines ==" "npm" @("run", "visual:baseline")
 $previousBackendUrl = [Environment]::GetEnvironmentVariable("VITE_BACKEND_URL", "Process")
 try {
   [Environment]::SetEnvironmentVariable("VITE_BACKEND_URL", $BackendOrigin.Trim().TrimEnd("/"), "Process")
