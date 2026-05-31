@@ -12,6 +12,33 @@ export type ThreatModelItem = {
   description: string;
 };
 
+export type TrustMetric = {
+  label: string;
+  value: string;
+  detail: string;
+};
+
+export type TrustChartSegment = {
+  label: string;
+  count: number;
+  color: string;
+  description: string;
+};
+
+export type TrustEvidenceBar = {
+  label: string;
+  value: number;
+  max: number;
+  color: string;
+  detail: string;
+};
+
+export type TrustHighlight = {
+  title: string;
+  summary: string;
+  evidence: string;
+};
+
 export const publicTrustDisclosure =
   'Messk is alpha software and has not been independently audited. Do not treat it as production-ready security software.';
 
@@ -160,5 +187,95 @@ export const publicThreatModel: ThreatModelItem[] = [
   {
     title: 'What users must verify',
     description: 'Protect the seed phrase offline and confirm contact identity changes through a trusted channel before continuing sensitive chats.',
+  },
+];
+
+const regressionEvidenceCount = implementedTrustControls.filter((item) =>
+  /test|gate|budget|baseline/i.test(item.evidence),
+).length;
+
+export const trustMetrics: TrustMetric[] = [
+  {
+    label: 'Implemented controls',
+    value: implementedTrustControls.length.toString(),
+    detail: 'Public claims backed by repository evidence.',
+  },
+  {
+    label: 'Regression evidence',
+    value: regressionEvidenceCount.toString(),
+    detail: 'Implemented controls with tests, gates, budgets or baselines.',
+  },
+  {
+    label: 'Responsive baselines',
+    value: '4',
+    detail: 'Normal, empty, loading and recovery states across device sizes.',
+  },
+  {
+    label: 'Production blockers',
+    value: productionTrustBlockers.length.toString(),
+    detail: 'Kept visible until external evidence exists.',
+  },
+];
+
+export const trustStatusChart: TrustChartSegment[] = [
+  {
+    label: 'Implemented',
+    count: implementedTrustControls.length,
+    color: '#34d399',
+    description: 'Shipped controls with local evidence.',
+  },
+  {
+    label: 'Experimental',
+    count: experimentalTrustControls.length,
+    color: '#38bdf8',
+    description: 'Staged work that must not be oversold.',
+  },
+  {
+    label: 'Blocked',
+    count: productionTrustBlockers.length,
+    color: '#fb7185',
+    description: 'Mandatory before production security claims.',
+  },
+];
+
+export const trustEvidenceBars: TrustEvidenceBar[] = [
+  {
+    label: 'Automated evidence',
+    value: regressionEvidenceCount,
+    max: implementedTrustControls.length,
+    color: '#34d399',
+    detail: 'Tests, release gates, bundle checks and visual baselines.',
+  },
+  {
+    label: 'Public limitations',
+    value: experimentalTrustControls.length + productionTrustBlockers.length,
+    max: implementedTrustControls.length + experimentalTrustControls.length + productionTrustBlockers.length,
+    color: '#f59e0b',
+    detail: 'Experimental items and blockers shown before users sign in.',
+  },
+  {
+    label: 'Native parity signals',
+    value: 4,
+    max: 6,
+    color: '#38bdf8',
+    detail: 'Identity, direct chat, attachments/voice and typing are native; realtime media remains blocked.',
+  },
+];
+
+export const latestTrustHighlights: TrustHighlight[] = [
+  {
+    title: 'Visual regression gate',
+    summary: 'The release path now verifies synthetic responsive SVG baselines so UI states do not drift silently.',
+    evidence: 'scripts/visual-regression-baselines.ps1 and messk/visual-regression/scenarios.json',
+  },
+  {
+    title: 'Windows typing parity',
+    summary: 'The native client sends and displays transient direct typing indicators compatible with the web client.',
+    evidence: 'clients/windows/src/net.rs, clients/windows/src/app.rs and protocol tests',
+  },
+  {
+    title: 'Route budget visibility',
+    summary: 'The public shell, auth flow, chat workspace and trust center keep separate lazy route boundaries.',
+    evidence: 'scripts/frontend-bundle-budget.ps1 and lazy route regression tests',
   },
 ];

@@ -2,9 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   experimentalTrustControls,
   implementedTrustControls,
+  latestTrustHighlights,
   productionTrustBlockers,
   publicThreatModel,
   publicTrustDisclosure,
+  trustEvidenceBars,
+  trustMetrics,
+  trustStatusChart,
 } from './trustCenter';
 
 describe('public trust center contract', () => {
@@ -37,5 +41,32 @@ describe('public trust center contract', () => {
     expect(experimentalTrustControls.find((item) => item.title === 'Mesh transport prototype')?.summary)
       .toMatch(/disabled/i);
     expect(publicThreatModel.some((item) => /relay can still observe/i.test(item.title))).toBe(true);
+  });
+
+  it('keeps dashboard metrics tied to the public trust contract', () => {
+    expect(trustMetrics.find((metric) => metric.label === 'Implemented controls')?.value)
+      .toBe(String(implementedTrustControls.length));
+    expect(trustMetrics.find((metric) => metric.label === 'Production blockers')?.value)
+      .toBe(String(productionTrustBlockers.length));
+    expect(trustMetrics.find((metric) => metric.label === 'Responsive baselines')?.value)
+      .toBe('4');
+
+    expect(trustStatusChart.map((segment) => segment.label)).toEqual([
+      'Implemented',
+      'Experimental',
+      'Blocked',
+    ]);
+    expect(trustStatusChart.map((segment) => segment.count)).toEqual([
+      implementedTrustControls.length,
+      experimentalTrustControls.length,
+      productionTrustBlockers.length,
+    ]);
+  });
+
+  it('surfaces latest evidence without turning it into a production claim', () => {
+    expect(latestTrustHighlights.map((item) => item.title)).toContain('Visual regression gate');
+    expect(latestTrustHighlights.map((item) => item.title)).toContain('Windows typing parity');
+    expect(trustEvidenceBars.every((bar) => bar.value > 0 && bar.value <= bar.max)).toBe(true);
+    expect(trustEvidenceBars.some((bar) => /realtime media remains blocked/i.test(bar.detail))).toBe(true);
   });
 });

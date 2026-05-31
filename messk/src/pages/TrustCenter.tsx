@@ -1,12 +1,25 @@
 import { type ReactNode } from 'react';
-import { AlertTriangle, ArrowLeft, FlaskConical, LockKeyhole, ShieldCheck } from 'lucide-react';
+import {
+  Activity,
+  AlertTriangle,
+  ArrowLeft,
+  BarChart3,
+  FlaskConical,
+  LockKeyhole,
+  ShieldCheck,
+  TrendingUp,
+} from 'lucide-react';
 import { Link } from 'react-router-dom';
 import {
   experimentalTrustControls,
   implementedTrustControls,
+  latestTrustHighlights,
   productionTrustBlockers,
   publicThreatModel,
   publicTrustDisclosure,
+  trustEvidenceBars,
+  trustMetrics,
+  trustStatusChart,
   type TrustItem,
 } from '../lib/trustCenter';
 
@@ -42,6 +55,117 @@ function TrustSection({ title, subtitle, icon, items }: TrustSectionProps) {
   );
 }
 
+function TrustMetricGrid() {
+  return (
+    <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4" aria-label="Trust center evidence metrics">
+      {trustMetrics.map((metric) => (
+        <article key={metric.label} className="rounded-3xl border border-white/10 bg-white/[0.05] p-5">
+          <div className="text-3xl font-bold text-white">{metric.value}</div>
+          <div className="mt-2 text-sm font-semibold text-white">{metric.label}</div>
+          <p className="mt-2 text-xs leading-5 text-text-muted">{metric.detail}</p>
+        </article>
+      ))}
+    </section>
+  );
+}
+
+function TrustStatusChart() {
+  const total = trustStatusChart.reduce((sum, segment) => sum + segment.count, 0);
+
+  return (
+    <section className="rounded-[28px] border border-white/10 bg-white/[0.04] p-5 sm:p-7" aria-label="Trust claim status chart">
+      <div className="mb-5 flex items-center gap-3">
+        <BarChart3 className="h-6 w-6 text-accent" />
+        <div>
+          <h2 className="text-xl font-semibold">Claim status mix</h2>
+          <p className="text-sm text-text-muted">Count of public claims by maturity. This is not an audit score.</p>
+        </div>
+      </div>
+      <div className="flex h-4 overflow-hidden rounded-full bg-white/10">
+        {trustStatusChart.map((segment) => (
+          <div
+            key={segment.label}
+            className="h-full"
+            style={{ width: `${(segment.count / total) * 100}%`, backgroundColor: segment.color }}
+            aria-label={`${segment.label}: ${segment.count}`}
+          />
+        ))}
+      </div>
+      <div className="mt-5 grid gap-3 md:grid-cols-3">
+        {trustStatusChart.map((segment) => (
+          <article key={segment.label} className="rounded-2xl border border-white/[0.08] bg-black/20 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <span className="flex items-center gap-2 text-sm font-semibold">
+                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: segment.color }} />
+                {segment.label}
+              </span>
+              <span className="text-lg font-bold">{segment.count}</span>
+            </div>
+            <p className="mt-2 text-xs leading-5 text-text-muted">{segment.description}</p>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function TrustEvidenceChart() {
+  return (
+    <section className="rounded-[28px] border border-white/10 bg-white/[0.04] p-5 sm:p-7" aria-label="Trust evidence coverage chart">
+      <div className="mb-5 flex items-center gap-3">
+        <Activity className="h-6 w-6 text-accent" />
+        <div>
+          <h2 className="text-xl font-semibold">Evidence coverage map</h2>
+          <p className="text-sm text-text-muted">Operational view of what is backed by automation or still bounded by disclosure.</p>
+        </div>
+      </div>
+      <div className="space-y-5">
+        {trustEvidenceBars.map((bar) => {
+          const percent = Math.round((bar.value / bar.max) * 100);
+
+          return (
+            <article key={bar.label}>
+              <div className="mb-2 flex items-center justify-between gap-3 text-sm">
+                <span className="font-semibold text-white">{bar.label}</span>
+                <span className="text-text-muted">{bar.value}/{bar.max}</span>
+              </div>
+              <div className="h-3 overflow-hidden rounded-full bg-white/10">
+                <div className="h-full rounded-full" style={{ width: `${percent}%`, backgroundColor: bar.color }} />
+              </div>
+              <p className="mt-2 text-xs leading-5 text-text-muted">{bar.detail}</p>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function LatestTrustHighlights() {
+  return (
+    <section className="rounded-[28px] border border-accent/20 bg-accent/[0.07] p-5 sm:p-7">
+      <div className="mb-5 flex items-center gap-3">
+        <TrendingUp className="h-6 w-6 text-accent" />
+        <div>
+          <h2 className="text-xl font-semibold">Latest shipped evidence</h2>
+          <p className="text-sm text-text-muted">Recent work that changed what users and operators can verify.</p>
+        </div>
+      </div>
+      <div className="grid gap-4 lg:grid-cols-3">
+        {latestTrustHighlights.map((highlight) => (
+          <article key={highlight.title} className="rounded-2xl border border-white/[0.08] bg-black/20 p-4">
+            <h3 className="font-semibold text-white">{highlight.title}</h3>
+            <p className="mt-2 text-sm leading-6 text-text-muted">{highlight.summary}</p>
+            <p className="mt-3 border-t border-white/[0.08] pt-3 text-xs leading-5 text-white/55">
+              Evidence: {highlight.evidence}
+            </p>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export function TrustCenter() {
   return (
     <div className="auth-screen min-h-[100dvh] w-full overflow-y-auto bg-gradient-to-br from-[#020617] via-[#0f172a] to-[#1e1b4b] px-4 py-6 text-white sm:px-6 sm:py-10">
@@ -69,7 +193,18 @@ export function TrustCenter() {
           </div>
         </header>
 
-        <div className="grid gap-5 lg:grid-cols-3">
+        <TrustMetricGrid />
+
+        <div className="mt-6 grid gap-5 lg:grid-cols-[1.1fr_0.9fr]">
+          <TrustStatusChart />
+          <TrustEvidenceChart />
+        </div>
+
+        <div className="mt-6">
+          <LatestTrustHighlights />
+        </div>
+
+        <div className="mt-6 grid gap-5 lg:grid-cols-3">
           <TrustSection
             title="Implemented today"
             subtitle="Controls present in the client or release gate and backed by tests."
