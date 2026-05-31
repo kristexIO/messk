@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useAppStore } from '../store';
-import type { FontSize, InterfaceDensity, Language, Theme } from '../store';
+import type { FontSize, Language, Theme } from '../store';
 import { X, User, Palette, Shield, LogOut, Camera, Lock, Download, Upload, Database, PhoneCall, PhoneIncoming, PhoneOutgoing, PhoneMissed } from 'lucide-react';
 import { socketManager } from '../lib/socket';
 import { db, getDatabaseNameForIdentity } from '../lib/db';
@@ -14,6 +14,7 @@ import { useI18n } from '../lib/i18n';
 import { buildLocalKeyStatus } from '../lib/localKeyStatus';
 import { panicResetLocalState } from '../lib/panicReset';
 import { SETTINGS_STORAGE_KEY } from '../lib/storage';
+import { InterfaceDensitySelector } from './InterfaceDensitySelector';
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -408,10 +409,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     { id: 'normal', name: 'Normal' },
     { id: 'large', name: 'Large' },
   ];
-  const densities: { id: InterfaceDensity; name: string; description: string }[] = [
-    { id: 'compact', name: 'Compact', description: 'Tighter list and chat spacing' },
-    { id: 'comfortable', name: 'Comfortable', description: 'More room for long sessions' },
-  ];
   const autoLockOptions = [
     { value: 0, label: 'Never' },
     { value: 5, label: '5 min' },
@@ -589,22 +586,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                   ))}
                 </div>
               </div>
-              <div className="settings-card rounded-2xl p-4">
-                <div className="mb-3 text-xs uppercase tracking-[0.22em] text-text-muted">Density</div>
-                <div className="grid grid-cols-2 gap-2">
-                  {densities.map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => setInterfaceDensity(item.id)}
-                      className={`settings-choice rounded-xl px-3 py-2 text-left transition-all ${interfaceDensity === item.id ? 'is-active' : ''}`}
-                    >
-                      <div className="text-xs font-semibold">{item.name}</div>
-                      <div className="mt-1 text-[10px] text-text-muted">{item.description}</div>
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <InterfaceDensitySelector value={interfaceDensity} onChange={setInterfaceDensity} />
             </div>
           </section>
 

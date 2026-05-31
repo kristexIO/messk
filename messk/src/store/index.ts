@@ -3,13 +3,16 @@ import { migrateLocalDataToEncryptedAtRest, persistIdentityKeyPair, setVaultKey,
 import { clearRememberedIdentity, getStoredPinHash, hasRememberedIdentity, persistPinHash, restoreRememberedIdentityWithPin } from '../lib/security';
 import { prepareDatabaseForIdentity } from '../lib/db';
 import { SETTINGS_STORAGE_KEY } from '../lib/storage';
+import { applyInterfaceDensityAttribute, normalizeInterfaceDensity } from '../lib/interfaceDensity';
+import type { InterfaceDensity } from '../lib/interfaceDensity';
+
+export type { InterfaceDensity } from '../lib/interfaceDensity';
 
 export type Theme = 'system' | 'dark' | 'light' | 'forest';
 export type DesignStyle = 'telegram';
 export type UiMode = 'classic';
 export type Language = 'en' | 'ru' | 'fr' | 'de';
 export type FontSize = 'small' | 'normal' | 'large';
-export type InterfaceDensity = 'compact' | 'comfortable';
 
 export type CollectionSyncStatus = {
   state: 'idle' | 'syncing' | 'synced' | 'error';
@@ -107,10 +110,6 @@ const normalizeFontSize = (value: unknown): FontSize => {
   return value === 'small' || value === 'large' || value === 'normal' ? value : 'normal';
 };
 
-const normalizeInterfaceDensity = (value: unknown): InterfaceDensity => {
-  return value === 'compact' || value === 'comfortable' ? value : 'comfortable';
-};
-
 const normalizeAutoLockMinutes = (value: unknown): number => {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 240 ? value : 15;
 };
@@ -134,11 +133,6 @@ const applyThemeAttribute = (theme: Theme) => {
 const applyFontSizeAttribute = (fontSize: FontSize) => {
   if (typeof document === 'undefined') return;
   document.documentElement.setAttribute('data-font-size', fontSize);
-};
-
-const applyInterfaceDensityAttribute = (interfaceDensity: InterfaceDensity) => {
-  if (typeof document === 'undefined') return;
-  document.documentElement.setAttribute('data-density', interfaceDensity);
 };
 
 const loadProfileForKey = (publicKey: string): { nickname?: string | null; avatar?: string | null; username?: string | null } | null => {
