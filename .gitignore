@@ -21,3 +21,6 @@ messk/node_modules/
 .env
 mess/.env
 messk/.env
+
+# Local editor state
+.vscode/

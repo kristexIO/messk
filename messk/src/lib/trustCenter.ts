@@ -65,6 +65,12 @@ export const implementedTrustControls: TrustItem[] = [
     evidence: 'Accessible modal frame and call-control tests verify dialog labels, Escape close behavior, assertive call alerts and generic non-secret assistive copy.',
   },
   {
+    title: 'Lazy route bundle boundaries',
+    status: 'implemented',
+    summary: 'The public app shell, auth screen, chat workspace and trust center load through separate route fallbacks so authenticated chat bootstrap does not inflate first paint.',
+    evidence: 'Lazy-route tests validate safe fallback copy, and the frontend bundle budget gate verifies route chunks plus authenticated-only marker isolation.',
+  },
+  {
     title: 'Reduced temporary secret lifetime',
     status: 'implemented',
     summary: 'Mutable secret buffers used for message, attachment, backup, seed and PIN operations are cleared after use where the runtime permits it.',

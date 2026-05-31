@@ -45,6 +45,8 @@ if (-not $SkipFrontend) {
     if ($LASTEXITCODE -ne 0) { throw "Frontend tests failed" }
     npm run build
     if ($LASTEXITCODE -ne 0) { throw "Frontend build failed" }
+    & (Join-Path $root "scripts\frontend-bundle-budget.ps1")
+    if ($LASTEXITCODE -ne 0) { throw "Frontend bundle budget failed" }
   }
   finally {
     Pop-Location

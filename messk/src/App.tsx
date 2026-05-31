@@ -2,31 +2,24 @@ import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { useAppStore } from './store';
 import { Toaster } from 'react-hot-toast';
 import { LockScreen } from './components/LockScreen';
-import { Component, lazy, Suspense, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react';
-import { socketManager } from './lib/socket';
-import { initNotifications } from './lib/notifications';
-import { OnboardingModal } from './components/OnboardingModal';
-import { db } from './lib/db';
-import { decodeBase64 } from 'tweetnacl-util';
+import { Component, lazy, Suspense, useEffect, useRef, type ErrorInfo, type ReactNode } from 'react';
 import { useI18n } from './lib/i18n';
-import { joinInviteLink, syncChannels, syncGroups } from './lib/community';
-import { toast } from 'react-hot-toast';
-import { ONBOARDING_STORAGE_KEY } from './lib/storage';
 import { getSafeUiRecoveryCopy, logUiRenderError } from './lib/uiErrorRecovery';
+import { RouteLoadingFallback } from './components/RouteLoadingFallback';
 
 const Auth = lazy(async () => {
   const module = await import('./pages/Auth');
   return { default: module.Auth };
 });
 
-const Chat = lazy(async () => {
-  const module = await import('./pages/Chat');
-  return { default: module.Chat };
-});
-
 const TrustCenter = lazy(async () => {
   const module = await import('./pages/TrustCenter');
   return { default: module.TrustCenter };
+});
+
+const AuthenticatedSession = lazy(async () => {
+  const module = await import('./components/AuthenticatedSession');
+  return { default: module.AuthenticatedSession };
 });
 
 type AppErrorBoundaryState = {
@@ -83,13 +76,9 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, AppErrorBounda
 }
 
 function App() {
-  const { myPublicKey, mySecretKey, isLocked, isRestoringIdentity, restoreRememberedIdentity, setActivePeer, setActiveGroup, setActiveChannel, autoLockMinutes, lockApp } = useAppStore();
+  const { mySecretKey, isLocked, isRestoringIdentity, restoreRememberedIdentity, autoLockMinutes, lockApp } = useAppStore();
   const { t } = useI18n();
   const lastActivityRef = useRef(0);
-  const [hasDismissedOnboarding, setHasDismissedOnboarding] = useState(
-    () => localStorage.getItem(ONBOARDING_STORAGE_KEY) === '1'
-  );
-  const showOnboarding = Boolean(mySecretKey && !isLocked && !hasDismissedOnboarding);
 
   useEffect(() => {
     void restoreRememberedIdentity();
@@ -118,118 +107,6 @@ function App() {
     };
   }, [autoLockMinutes, isLocked, lockApp, mySecretKey]);
 
-  useEffect(() => {
-    if (!myPublicKey || isRestoringIdentity) {
-      return;
-    }
-    void socketManager.refreshOwnProfile(myPublicKey);
-  }, [isRestoringIdentity, myPublicKey]);
-
-  useEffect(() => {
-    if (!mySecretKey || isRestoringIdentity) {
-      return;
-    }
-
-    const params = new URLSearchParams(window.location.search);
-    const chatPubKey = params.get('chat');
-    if (!chatPubKey) {
-      return;
-    }
-
-    try {
-      if (decodeBase64(chatPubKey).length !== 32) {
-        return;
-      }
-    } catch {
-      return;
-    }
-
-    void db.contacts.get(chatPubKey).then(async (existing) => {
-      if (!existing) {
-        await db.contacts.put({
-          pubKey: chatPubKey,
-          name: `${chatPubKey.substring(0, 8)}...`,
-          lastMessageAt: Date.now(),
-        });
-      }
-      void socketManager.refreshContactProfile(chatPubKey);
-      setActivePeer(chatPubKey);
-      params.delete('chat');
-      const nextQuery = params.toString();
-      window.history.replaceState(null, '', `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}${window.location.hash}`);
-    });
-  }, [isRestoringIdentity, mySecretKey, setActivePeer]);
-
-  useEffect(() => {
-    if (!mySecretKey || isRestoringIdentity) {
-      return;
-    }
-
-    const params = new URLSearchParams(window.location.search);
-    const inviteToken = params.get('invite');
-    if (!inviteToken) {
-      return;
-    }
-
-    let cancelled = false;
-    void (async () => {
-      let shouldClearInvite = false;
-      try {
-        const ready = await socketManager.ensureRealtimeReady();
-        if (!ready || cancelled) {
-          return;
-        }
-        shouldClearInvite = true;
-        const joined = await joinInviteLink(inviteToken);
-        if (cancelled) {
-          return;
-        }
-
-        if (joined.entityType === 'group') {
-          await syncGroups(true);
-          if (cancelled) {
-            return;
-          }
-          setActiveGroup(joined.entityId);
-          toast.success('Joined group via invite link.');
-        } else {
-          await syncChannels(true);
-          if (cancelled) {
-            return;
-          }
-          setActiveChannel(joined.entityId);
-          toast.success('Joined channel via invite link.');
-        }
-      } catch (error) {
-        if (!cancelled) {
-          toast.error(error instanceof Error ? error.message : 'Failed to use invite link.');
-        }
-      } finally {
-        if (shouldClearInvite) {
-          params.delete('invite');
-          const nextQuery = params.toString();
-          window.history.replaceState(null, '', `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ''}${window.location.hash}`);
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [isRestoringIdentity, mySecretKey, setActiveChannel, setActiveGroup]);
-
-  useEffect(() => {
-    void initNotifications();
-
-    const handleUnload = () => {
-      socketManager.disconnect();
-    };
-    window.addEventListener('beforeunload', handleUnload);
-    return () => {
-      window.removeEventListener('beforeunload', handleUnload);
-    };
-  }, [mySecretKey]);
-
   return (
     <Router>
       <Toaster position="top-center" toastOptions={{
@@ -244,27 +121,17 @@ function App() {
       <AppErrorBoundary>
         <Routes>
           <Route path="/trust" element={
-            <Suspense fallback={<div className="min-h-screen bg-[#020617]" />}>
+            <Suspense fallback={<RouteLoadingFallback route="trust" />}>
               <TrustCenter />
             </Suspense>
           } />
           <Route path="*" element={
-            <Suspense fallback={<div className="min-h-screen bg-[#020617]" />}>
+            <Suspense fallback={<RouteLoadingFallback route={mySecretKey ? 'session' : 'auth'} />}>
               <>
                 {isLocked && <LockScreen />}
-                {showOnboarding && mySecretKey && !isLocked ? (
-                  <OnboardingModal
-                    onClose={() => {
-                      localStorage.setItem(ONBOARDING_STORAGE_KEY, '1');
-                      setHasDismissedOnboarding(true);
-                    }}
-                  />
-                ) : null}
                 {isRestoringIdentity ? (
-                  <div className="flex min-h-screen items-center justify-center bg-[#020617] text-sm font-semibold text-white/70">
-                    {t('restoringSession')}
-                  </div>
-                ) : mySecretKey ? <Chat /> : <Auth />}
+                  <RouteLoadingFallback route="session" detailOverride={t('restoringSession')} />
+                ) : mySecretKey ? <AuthenticatedSession /> : <Auth />}
               </>
             </Suspense>
           } />

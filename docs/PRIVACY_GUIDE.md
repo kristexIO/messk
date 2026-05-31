@@ -35,6 +35,9 @@ metadata, and what users must protect themselves.
 - Modal and call control labels stay generic for assistive tools. They describe
   actions and state without exposing SDP, ICE candidates, tokens, seed phrases
   or message plaintext.
+- Lazy route loading keeps authenticated chat bootstrap outside the public entry
+  bundle. Loading fallbacks use generic copy and do not expose chat, invite or
+  signaling diagnostics before the workspace opens.
 - Relay and bootstrap operation is not anonymity protection. Mesh work remains
   staged and feature-gated.
 

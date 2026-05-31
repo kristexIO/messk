@@ -25,6 +25,7 @@ describe('public trust center contract', () => {
     expect(implementedTrustControls.map((item) => item.title)).toContain('Safe chat surface recovery');
     expect(implementedTrustControls.map((item) => item.title)).toContain('Accessible offline and reconnect indicators');
     expect(implementedTrustControls.map((item) => item.title)).toContain('Accessible modal and call controls');
+    expect(implementedTrustControls.map((item) => item.title)).toContain('Lazy route bundle boundaries');
     expect(productionTrustBlockers.map((item) => item.title)).toContain('Independent security review');
     expect(productionTrustBlockers.map((item) => item.title)).toContain('Staged production promotion');
   });

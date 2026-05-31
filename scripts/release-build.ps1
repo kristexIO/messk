@@ -101,6 +101,10 @@ $previousBackendUrl = [Environment]::GetEnvironmentVariable("VITE_BACKEND_URL", 
 try {
   [Environment]::SetEnvironmentVariable("VITE_BACKEND_URL", $BackendOrigin.Trim().TrimEnd("/"), "Process")
   Invoke-External "== Frontend build ==" "npm" @("run", "build")
+  & "$PSScriptRoot\frontend-bundle-budget.ps1"
+  if ($LASTEXITCODE -ne 0) {
+    throw "Frontend bundle budget failed"
+  }
 } finally {
   [Environment]::SetEnvironmentVariable("VITE_BACKEND_URL", $previousBackendUrl, "Process")
 }
